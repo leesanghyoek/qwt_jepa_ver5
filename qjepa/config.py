@@ -69,6 +69,10 @@ def validate_config(config: dict[str, Any]) -> None:
     model = config["model"]
     if str(config["runtime"].get("gpu_count", "auto")) not in {"auto", "1", "2"}:
         raise ValueError("runtime.gpu_count must be auto, 1 or 2")
+    restart_limit = config["runtime"].get("restart_above_rss_gib")
+    if restart_limit is not None and (isinstance(restart_limit, bool)
+                                      or not isinstance(restart_limit, (int, float)) or restart_limit <= 0):
+        raise ValueError("runtime.restart_above_rss_gib must be a positive number of GiB")
     if model.get("image_transform") not in QWT_BACKENDS or model.get("imu_transform") != "haar1d":
         raise ValueError(
             f"model.image_transform must be one of {sorted(QWT_BACKENDS)} and imu_transform haar1d"

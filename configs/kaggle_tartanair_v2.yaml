@@ -42,6 +42,11 @@ runtime:
   output_dir: /kaggle/working/qwt_jepa_version3/outputs/p10_jepa_context
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
+  # p11 phase 2: RSS tien trinh train tang ~6,7 MiB/update (1,67 GB moi 250 update) toi
+  # khi bi kill o update 4097; code chay CPU khong ro, nen ro nam o duong GPU. Qua nguong
+  # nay, sau khi luu checkpoint, CLI thoat voi ma 75 va notebook tu resume — ket qua
+  # giong het mot lan chay lien. Nam ngoai configuration hash.
+  restart_above_rss_gib: 16
   validation_batches: 32
 
 data:

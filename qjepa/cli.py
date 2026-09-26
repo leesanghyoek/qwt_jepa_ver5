@@ -212,6 +212,28 @@ class _Jsonl:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+# Exit status that means "checkpoint saved, restart me to free memory" (EX_TEMPFAIL).
+RESTART_EXIT_CODE = 75
+
+
+def _restart_if_memory_high(config: dict[str, Any], memory: dict[str, float], update: int, maximum: int) -> None:
+    """After a checkpoint: exit with RESTART_EXIT_CODE once RSS passes the limit.
+
+    On Kaggle the phase-2 process grew by ~6.7 MiB per update until the kernel
+    killed it at update 4097 of 5000 -- the same code shows no growth on CPU, so
+    the leak is in the GPU runtime path. A restart from the checkpoint just
+    saved frees it, and resume is exact (weights, optimizer, RNG, data position),
+    so the run ends where an uninterrupted one would. Off unless
+    runtime.restart_above_rss_gib is set; runtime keys are outside the hash.
+    """
+    limit = config["runtime"].get("restart_above_rss_gib")
+    if limit is None or update >= maximum or memory["rss_mib"] <= float(limit) * 1024:
+        return
+    print(f"  RSS {memory['rss_mib'] / 1024:.1f} GiB > {limit} GiB: checkpoint da luu o update {update};"
+          f" thoat de khoi dong lai va resume (exit {RESTART_EXIT_CODE}).", flush=True)
+    sys.exit(RESTART_EXIT_CODE)
+
+
 def _progress(update: int, maximum: int) -> str:
     """Tien do dang 1340/10000 13%, canh phai de log thang cot khi cuon."""
     width = len(str(maximum))
@@ -718,6 +740,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     "Latent diversity/scale gate failed on consecutive checks; inspect phase1/train.jsonl"
                 )
+            _restart_if_memory_high(config, memory, update, maximum)
     plot_training(output)
     print(f"Saved phase-1 checkpoint and training_curves.png: {output}")
 
@@ -1006,6 +1029,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             if improved_guarded:
                 atomic_torch_save(payload, output / "best_guarded_validation.pt")
             atomic_torch_save(payload, output / "last.pt")
+            _restart_if_memory_high(config, memory, update, maximum)
     plot_training(output)
     print(f"Saved phase-2 checkpoints and training_curves.png: {output}")
 
