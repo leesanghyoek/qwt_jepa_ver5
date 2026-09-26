@@ -46,8 +46,13 @@ def select_backend() -> bool:
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         matplotlib.use("Agg")
         return False
+    import importlib
+
     for candidate in ("QtAgg", "TkAgg", "GTK3Agg"):
         try:
+            # use() alone does not load the backend, so a missing Qt only surfaced
+            # at the first figure. Importing its module fails here instead.
+            importlib.import_module(f"matplotlib.backends.backend_{candidate.lower()}")
             matplotlib.use(candidate)
             return True
         except Exception:
