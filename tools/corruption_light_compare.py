@@ -4,8 +4,8 @@ Mỗi frame được làm hỏng hai lần:
 
     A — nhiễu train: đúng corruption.image của configs/pipeline_v3.yaml, cùng phân phối
         model thấy lúc train
-    B — nhiễu nhẹ:   bộ thông số NOISE_B bên dưới — ít mờ hơn rõ rệt, ít hạt nhiễu hơn
-        rõ rệt, phần còn lại nhẹ hơn một chút
+    B — nhiễu nhẹ:   bộ thông số NOISE_B bên dưới — ít mờ hơn A, ít hạt nhiễu hơn rõ rệt,
+        phần còn lại nhẹ hơn một chút
 
 Hai ảnh dùng CHUNG một lượt bốc thông số: cùng frame nào bị defocus / motion blur /
 thu nhỏ / JPEG, cùng hướng vệt mờ. Mỗi giá trị đã bốc trong khoảng của A được ánh xạ
@@ -57,10 +57,10 @@ DEFAULT_ROOT = Path("/home/buidinhkhoi/Datasets/tartanair-v2-jepa")
 # Nhiễu B: khoá = khoá trong corruption.image, giá trị = khoảng mới.
 # Sửa ở đây để thử mức khác; các khoá không có ở đây giữ nguyên như A.
 NOISE_B: dict[str, tuple[float, float]] = {
-    # Độ mờ — giảm rõ.
-    "defocus_sigma_px": (0.30, 0.80),     # A 0.30–1.45 px
-    "motion_length_px": (2, 5),           # A 3–9 px
-    "downsample_scale": (0.85, 0.98),     # A 0.72–0.96 (1.0 = không thu nhỏ)
+    # Độ mờ — nhẹ hơn A, nhưng nhỉnh hơn bản đầu của B (0.30–0.80 px · 2–5 px · ×0.85–0.98).
+    "defocus_sigma_px": (0.30, 0.95),     # A 0.30–1.45 px
+    "motion_length_px": (2, 6),           # A 3–9 px
+    "downsample_scale": (0.82, 0.97),     # A 0.72–0.96 (1.0 = không thu nhỏ)
     # Hạt nhiễu — giảm rõ. Nhiễu photon có σ = sqrt(độ sáng / số photon): gấp ~4 lần
     # số photon thì hạt còn ~1/2. Nhiễu hàng là sọc ngang mảnh, hot pixel là chấm lẻ.
     "photon_count": (2500.0, 15000.0),    # A 550–4000
