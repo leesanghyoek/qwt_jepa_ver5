@@ -12,7 +12,15 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p11** (OUT `outputs/p11_unet_edge`), theo hướng của mentor: nhánh
+Run Kaggle hiện tại là **p12** (OUT `outputs/p12_noise_b`): train lại **cả hai phase** trên
+**nhiễu B** — ít mờ hơn (defocus σ 0,30–0,95 px, motion 2–6 px, thu nhỏ ×0,82–0,97), ít hạt
+nhiễu hơn (2.500–15.000 photon, nhiễu đọc 0,3–1,2/255, 8 bit), tối nhẹ hơn một chút; và mỗi
+frame một biến thể: phần lớn vừa tối vừa nhiễu, 10% **chỉ nhiễu** (không tối), 10% **chỉ tối**
+(không hạt). Nhiễu A (p5–p11) vẫn so được bằng `tools/corruption_light_compare.py`. Đổi nhiễu
+làm đổi hash cả hai phase, nên phase 1 train lại theo recipe p10 và phase 2 theo p11. Đầu vào dễ
+hơn nên PSNR/SSIM tuyệt đối **không** so thẳng với p8; so mức **cải thiện so với input**.
+
+p11 (OUT `outputs/p11_unet_edge`), theo hướng của mentor: nhánh
 **đường nét** là **U-Net** 5 tầng (256² → 16², 32/64/64/96/128 kênh, 2,9 M tham số, tính toán
 ngang p8) để học cả **đặc trưng nhỏ** lẫn **đặc trưng tổng thể**; nhánh màu giữ ResNet của p8
 (`split_branch_arch: unet_edge`). p11 **dùng lại phase 1 của p8** (tức của p5) nên chỉ train

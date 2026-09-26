@@ -65,10 +65,20 @@ class LowLightImageCorruptionConfig:
     quantization_bits: tuple[int, int] = (6, 8)
     jpeg_probability: float = 0.35
     jpeg_quality: tuple[int, int] = (35, 80)
+    # Per-frame variety in mode "full": a frame may skip the low-light stage (bright,
+    # sensor noise only) or the sensor stage (dark, no grain); the rest get both.
+    # Drawn LAST in `_parameters`, so every earlier draw -- and a config without
+    # these keys -- is bit-identical to before they existed.
+    noise_only_probability: float = 0.0
+    low_light_only_probability: float = 0.0
 
     def validate(self) -> None:
         if not 0 <= self.clean_probability <= 1:
             raise ValueError("clean_probability must be in [0,1]")
+        if (not 0 <= self.noise_only_probability <= 1 or not 0 <= self.low_light_only_probability <= 1
+                or self.noise_only_probability + self.low_light_only_probability > 1):
+            raise ValueError("noise_only_probability and low_light_only_probability must be in [0,1] "
+                             "and sum to at most 1")
         if self.segment_seconds <= 0:
             raise ValueError("segment_seconds must be positive")
         if self.exposure_gain[0] <= 0 or self.exposure_gain[1] > 1:
@@ -193,6 +203,11 @@ class LowLightImageCorruptor:
             "jpeg": bool(rng.random() < cfg.jpeg_probability),
             "jpeg_quality": int(rng.integers(cfg.jpeg_quality[0], cfg.jpeg_quality[1] + 1)),
         }
+        variant = float(rng.random())
+        noise_only = variant < cfg.noise_only_probability
+        low_light_only = (cfg.noise_only_probability <= variant
+                          < cfg.noise_only_probability + cfg.low_light_only_probability)
+        parameters.update(variant_draw=variant, low_light=not noise_only, sensor_noise=not low_light_only)
         return parameters
 
     def __call__(
@@ -224,8 +239,9 @@ class LowLightImageCorruptor:
             return image_clean.astype(np.float32, copy=True), params
 
         optical = mode in ("full", "blur_only", "blur_low_light")
-        low_light = mode in ("full", "low_light_only", "blur_low_light")
-        sensor_noise = mode in ("full", "sensor_noise_only")
+        # The named scenarios keep their meaning; only "full" draws the per-frame variant.
+        low_light = mode in ("low_light_only", "blur_low_light") or (mode == "full" and params["low_light"])
+        sensor_noise = mode == "sensor_noise_only" or (mode == "full" and params["sensor_noise"])
         image = image_clean.astype(np.float64, copy=True)
 
         if optical and params["defocus"]:

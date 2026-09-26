@@ -46,15 +46,19 @@ model:
 
 corruption:
   image:
+    # NHIEU B (quyet dinh cua nguoi dung, 26/09/2026): it mo hon, it hat nhieu hon, toi
+    # nhe hon mot chut so voi NHIEU A ma p5-p11 da train (gia tri A ghi o cuoi moi dong).
+    # So sanh truc quan: tools/corruption_light_compare.py. Doi muc nay lam doi hash CA HAI
+    # phase: checkpoint p5-p11 khong dung lai duoc.
     clean_probability: 0.02
     segment_seconds: 0.05
-    exposure_gain: [0.21, 0.63]
-    tone_gamma: [0.46, 0.79]
+    exposure_gain: [0.26, 0.68]         # A: [0.21, 0.63]
+    tone_gamma: [0.52, 0.82]            # A: [0.46, 0.79]
     white_balance_gain: [0.82, 1.18]
     black_level: [-0.01, 0.01]
     vignette_strength: [0.0, 0.45]
     defocus_probability: 0.68
-    defocus_sigma_px: [0.30, 1.45]
+    defocus_sigma_px: [0.30, 0.95]      # A: [0.30, 1.45]
     # QUYET DINH CUA NGUOI DUNG (23/09/2026): coi anh mo la do CAMERA va nhieu IMU
     # la do MOI TRUONG — hai nguyen nhan doc lap. Vi vay blur quay ve boc ngau
     # nhien bang motion_probability/motion_length_px/motion_angle ben duoi.
@@ -76,16 +80,21 @@ corruption:
     motion_max_radius_px: 16.0
     # Duong blur dang hoat dong (motion_from_imu: false).
     motion_probability: 0.55
-    motion_length_px: [3, 9]
+    motion_length_px: [2, 6]            # A: [3, 9]
     downsample_probability: 0.32
-    downsample_scale: [0.72, 0.96]
-    photon_count: [550.0, 4000.0]
-    read_noise_std: [0.0027450980, 0.0125490196]
-    row_noise_std: [0.0, 0.0039215686]
-    hot_pixel_probability: [0.0, 0.00015]
-    quantization_bits: [6, 8]
+    downsample_scale: [0.82, 0.97]      # A: [0.72, 0.96]
+    photon_count: [2500.0, 15000.0]     # A: [550, 4000]
+    read_noise_std: [0.0011764706, 0.0047058824]   # 0.3-1.2 /255; A: 0.7-3.2 /255
+    row_noise_std: [0.0, 0.0011764706]  # 0-0.3 /255; A: 0-1 /255
+    hot_pixel_probability: [0.0, 0.00003]   # A: [0, 0.00015]
+    quantization_bits: [8, 8]           # A: [6, 8]
     jpeg_probability: 0.35
-    jpeg_quality: [35, 80]
+    jpeg_quality: [50, 85]              # A: [35, 80]
+    # Moi frame mot bien the: phan lon vua TOI vua NHIEU; 10% chi co nhieu cam bien, KHONG
+    # toi (bo exposure/gamma/can bang trang/vignette); 10% chi TOI, KHONG hat nhieu (bo
+    # photon/doc/hang/hot pixel/luong tu/JPEG). Mo quang hoc van theo xac suat rieng cua no.
+    noise_only_probability: 0.10        # A: 0
+    low_light_only_probability: 0.10    # A: 0
   imu:
     clean_probability: 0.05
     accel_white_noise_std: [0.06, 0.50]

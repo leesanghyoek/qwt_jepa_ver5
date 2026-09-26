@@ -1,11 +1,11 @@
-"""So sánh nhiễu TRAIN (A) với nhiễu NHẸ (B), trên cùng một frame.
+"""So sánh nhiễu A (p5–p11 đã train) với nhiễu B (recipe train từ p12), trên cùng một frame.
 
 Mỗi frame được làm hỏng hai lần:
 
-    A — nhiễu train: đúng corruption.image của configs/pipeline_v3.yaml, cùng phân phối
-        model thấy lúc train
-    B — nhiễu nhẹ:   bộ thông số NOISE_B bên dưới — ít mờ hơn A, ít hạt nhiễu hơn rõ rệt,
-        phần còn lại nhẹ hơn một chút
+    A — nhiễu cũ:  NOISE_A bên dưới, đúng như p5–p11 đã train
+    B — nhiễu nhẹ: corruption.image của configs/pipeline_v3.yaml — ít mờ hơn A, ít hạt nhiễu
+        hơn rõ rệt, tối nhẹ hơn một chút; và mỗi frame một biến thể: phần lớn vừa tối vừa
+        nhiễu, ~10% CHỈ NHIỄU (không tối), ~10% CHỈ TỐI (không hạt)
 
 Hai ảnh dùng CHUNG một lượt bốc thông số: cùng frame nào bị defocus / motion blur /
 thu nhỏ / JPEG, cùng hướng vệt mờ. Mỗi giá trị đã bốc trong khoảng của A được ánh xạ
@@ -21,8 +21,7 @@ khi chưa có nhiễu cảm biến (cùng lượt bốc) — theo đơn vị /25
     python3 tools/corruption_light_compare.py
     python3 tools/corruption_light_compare.py --samples 4 --seed 7 --brighten 2
 
-Không import torch; numpy, scipy, Pillow, matplotlib là đủ. Cuối cùng script in đoạn
-YAML của B để dán vào corruption.image nếu muốn train với nó.
+Không import torch; numpy, scipy, Pillow, matplotlib là đủ.
 """
 
 from __future__ import annotations
@@ -54,25 +53,23 @@ from qjepa.corruptions.rng import generator
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_ROOT = Path("/home/buidinhkhoi/Datasets/tartanair-v2-jepa")
 
-# Nhiễu B: khoá = khoá trong corruption.image, giá trị = khoảng mới.
-# Sửa ở đây để thử mức khác; các khoá không có ở đây giữ nguyên như A.
-NOISE_B: dict[str, tuple[float, float]] = {
-    # Độ mờ — nhẹ hơn A, nhưng nhỉnh hơn bản đầu của B (0.30–0.80 px · 2–5 px · ×0.85–0.98).
-    "defocus_sigma_px": (0.30, 0.95),     # A 0.30–1.45 px
-    "motion_length_px": (2, 6),           # A 3–9 px
-    "downsample_scale": (0.82, 0.97),     # A 0.72–0.96 (1.0 = không thu nhỏ)
-    # Hạt nhiễu — giảm rõ. Nhiễu photon có σ = sqrt(độ sáng / số photon): gấp ~4 lần
-    # số photon thì hạt còn ~1/2. Nhiễu hàng là sọc ngang mảnh, hot pixel là chấm lẻ.
-    "photon_count": (2500.0, 15000.0),    # A 550–4000
-    "read_noise_std": (0.3 / 255, 1.2 / 255),   # A 0.7–3.2 / 255
-    "row_noise_std": (0.0, 0.3 / 255),    # A 0–1 / 255
-    "hot_pixel_probability": (0.0, 3e-5), # A 0–1.5e-4
-    "quantization_bits": (8, 8),          # A 6–8 bit (6 bit trên ảnh tối thành bậc thang)
-    # Phần còn lại — nhẹ hơn một chút.
-    "exposure_gain": (0.26, 0.68),        # A 0.21–0.63 (cao hơn = sáng hơn)
-    "tone_gamma": (0.52, 0.82),           # A 0.46–0.79 (gần 1 hơn = ít nhạt màu hơn)
-    "jpeg_quality": (50, 85),             # A 35–80
+# Nhiễu A — nhiễu p5–p11 đã train, trước khi recipe chuyển sang B (26/09/2026).
+# Nhiễu B đọc từ corruption.image của --config; các khoá không có ở đây giống nhau ở A và B.
+NOISE_A: dict[str, tuple[float, float]] = {
+    "defocus_sigma_px": (0.30, 1.45),
+    "motion_length_px": (3, 9),
+    "downsample_scale": (0.72, 0.96),
+    "photon_count": (550.0, 4000.0),
+    "read_noise_std": (0.7 / 255, 3.2 / 255),
+    "row_noise_std": (0.0, 1.0 / 255),
+    "hot_pixel_probability": (0.0, 1.5e-4),
+    "quantization_bits": (6, 8),
+    "exposure_gain": (0.21, 0.63),
+    "tone_gamma": (0.46, 0.79),
+    "jpeg_quality": (35, 80),
 }
+# A không có biến thể: frame nào cũng vừa tối vừa nhiễu.
+VARIANTS = ("noise_only_probability", "low_light_only_probability")
 # Tên trong bảng thông số đã bốc, và cách bốc: tuyến tính, log (photon), hay số nguyên.
 PARAMETER = {
     "defocus_sigma_px": ("defocus_sigma", "linear"),
@@ -111,15 +108,19 @@ class RemappedCorruptor(LowLightImageCorruptor):
     """
 
     def __init__(self, config: LowLightImageCorruptionConfig, master_seed: int,
-                 ranges: dict[str, tuple[float, float]]):
+                 target: LowLightImageCorruptionConfig):
         super().__init__(config, master_seed)
-        self.ranges = ranges
+        self.target = target
 
     def _parameters(self, split, realization, trajectory, timestamp, mode):
         params = super()._parameters(split, realization, trajectory, timestamp, mode)
-        for key, target in self.ranges.items():
-            name, kind = PARAMETER[key]
-            params[name] = remap(params[name], getattr(self.config, key), target, kind)
+        for key, (name, kind) in PARAMETER.items():
+            params[name] = remap(params[name], getattr(self.config, key), getattr(self.target, key), kind)
+        # Biến thể của B, từ chính số ngẫu nhiên đã bốc cho A (A luôn "cả hai").
+        noise_only, low_light_only = (getattr(self.target, key) for key in VARIANTS)
+        variant = params["variant_draw"]
+        params["low_light"] = not variant < noise_only
+        params["sensor_noise"] = not noise_only <= variant < noise_only + low_light_only
         return params
 
 
@@ -167,9 +168,15 @@ def describe(params: dict) -> str:
     if params["downsample"]:
         blur.append(f"thu nhỏ ×{params['downsample_scale']:.2f}")
     line1 = " · ".join(blur) if blur else "không mờ quang học"
-    line2 = (f"sáng ×{params['exposure_gain']:.2f} · gamma {params['tone_gamma']:.2f} · "
-             f"{params['photon_count']:.0f} photon · {params['quantization_bits']} bit"
-             + (f" · JPEG q{params['jpeg_quality']}" if params["jpeg"] else ""))
+    dark = f"sáng ×{params['exposure_gain']:.2f} · gamma {params['tone_gamma']:.2f}"
+    grainy = (f"{params['photon_count']:.0f} photon · {params['quantization_bits']} bit"
+              + (f" · JPEG q{params['jpeg_quality']}" if params["jpeg"] else ""))
+    if not params.get("low_light", True):
+        line2 = f"CHỈ NHIỄU, không tối · {grainy}"
+    elif not params.get("sensor_noise", True):
+        line2 = f"CHỈ TỐI, không hạt · {dark}"
+    else:
+        line2 = f"{dark} · {grainy}"
     return f"{line1}\n{line2}"
 
 
@@ -194,7 +201,7 @@ def build_figure(sample: dict, brighten: float, crop: int):
     lit = f" (hiển thị sáng ×{brighten:g})" if brighten != 1 else ""
     show(figure.add_subplot(grid[0, 0]), clean, "ẢNH SẠCH", "tham chiếu", 1.0)
     show(figure.add_subplot(grid[1, 0]), clean[region], "", f"phóng to {crop}×{crop} px", 1.0)
-    for column, key, title in ((1, "A", "A — NHIỄU TRAIN"), (2, "B", "B — NHIỄU NHẸ")):
+    for column, key, title in ((1, "A", "A — NHIỄU CŨ (p5–p11)"), (2, "B", "B — NHIỄU NHẸ (train từ p12)")):
         image, params = sample[key], sample[key + "_params"]
         caption = (describe(params) + f"\nPSNR {psnr(clean, image):.2f} dB · đường nét 4–16 px "
                    f"{edge_power(image) / reference:.2f}× ảnh sạch")
@@ -206,14 +213,6 @@ def build_figure(sample: dict, brighten: float, crop: int):
                     "cùng một lượt bốc ngẫu nhiên: A và B chỉ khác nhau ở độ mạnh",
                     color=INK, fontsize=12.5, x=0.03, ha="left", y=0.985)
     return figure
-
-
-def noise_b_yaml(base: LowLightImageCorruptionConfig) -> str:
-    lines = ["corruption:", "  image:"]
-    for key, target in NOISE_B.items():
-        value = [round(v, 6) if isinstance(v, float) else v for v in target]
-        lines.append(f"    {key}: {value}    # A: {list(getattr(base, key))}")
-    return "\n".join(lines)
 
 
 def main() -> int:
@@ -236,18 +235,15 @@ def main() -> int:
 
     raw = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     # clean_probability 0: lúc train 2% frame được để sạch; ở đây frame nào cũng phải bị làm hỏng.
-    base = replace(LowLightImageCorruptionConfig(**raw["corruption"]["image"]), clean_probability=0.0)
-    if base.motion_from_imu:
+    noise_b = replace(LowLightImageCorruptionConfig(**raw["corruption"]["image"]), clean_probability=0.0)
+    if noise_b.motion_from_imu:
         raise SystemExit("Config dùng motion_from_imu: true; tool này so motion blur bốc ngẫu nhiên.")
-    for key, target in NOISE_B.items():
-        if key not in PARAMETER:
-            raise SystemExit(f"NOISE_B có khoá lạ: {key}")
-        if target[0] > target[1]:
-            raise SystemExit(f"NOISE_B[{key}] phải là [thấp, cao]")
+    noise_a = replace(noise_b, **NOISE_A, **{key: 0.0 for key in VARIANTS})
     seed_master = raw["data"]["corruption_seed"]
     image_size = tuple(raw["data"].get("image_size", (256, 256)))
-    corruptors = {"A": LowLightImageCorruptor(base, master_seed=seed_master),
-                  "B": RemappedCorruptor(base, seed_master, NOISE_B)}
+    # B không bốc lại: nó lấy đúng lượt bốc của A rồi đưa về khoảng của B, để hai ảnh so từng cặp.
+    corruptors = {"A": LowLightImageCorruptor(noise_a, master_seed=seed_master),
+                  "B": RemappedCorruptor(noise_a, seed_master, noise_b)}
 
     manifest = args.data_root / args.split / "manifest.csv"
     if not manifest.is_file():
@@ -275,7 +271,9 @@ def main() -> int:
             sample[key], sample[key + "_params"] = corruptor(clean, **shared)
             if args.mode == "full":
                 # Cùng lượt bốc, dừng trước nhiễu cảm biến: hiệu hai ảnh là đúng phần hạt nhiễu.
-                before, _ = corruptor(clean, **dict(shared, mode="blur_low_light"))
+                params = sample[key + "_params"]
+                before_mode = "blur_low_light" if params["low_light"] else "blur_only"
+                before, _ = corruptor(clean, **dict(shared, mode=before_mode))
                 sample[key + "_grain"] = grain(sample[key], before)
         stem = args.out / f"{number:02d}_{name}"
         for suffix, image in (("clean", clean), ("A_train", sample["A"]), ("B_light", sample["B"])):
@@ -285,15 +283,14 @@ def main() -> int:
         figures.append(figure)
         reference = edge_power(clean)
         print(name)
-        for key, label in (("A", "A train"), ("B", "B nhẹ  ")):
+        for key, label in (("A", "A cũ   "), ("B", "B nhẹ  ")):
             noise = f" · hạt nhiễu σ {sample[key + '_grain']:4.1f}/255" if key + "_grain" in sample else ""
             print(f"   {label}: PSNR {psnr(clean, sample[key]):5.2f} dB · đường nét 4–16 px "
                   f"{edge_power(sample[key]) / reference:4.2f}×{noise} · "
                   f"{describe(sample[key + '_params']).replace(chr(10), ' · ')}")
         print(f"   -> {stem}_compare.png\n")
 
-    print("Nhiễu B (dán vào configs nếu muốn train với nó; xác suất giữ nguyên như A):")
-    print(noise_b_yaml(base))
+    print(f"B = corruption.image trong {args.config} — recipe train từ p12.")
     show_or_close(figures, args.no_show)
     return 0
 
