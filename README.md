@@ -12,7 +12,14 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p12** (OUT `outputs/p12_noise_b`): train lại **cả hai phase** trên
+Run Kaggle mới nhất là **p13** (OUT `outputs/p13_nafnet_edge`), chỉ đổi phase 2 so với p12 và
+dùng lại phase 1 của p12: nhánh đường nét là **NAFNet** (Chen và cộng sự, ECCV 2022) — cùng khung
+U-Net 5 tầng, ZI vào đáy 16×16, nhưng mỗi khối là NAFBlock (LayerNorm, conv depthwise, SimpleGate,
+channel attention); 26 khối, 3,1 M tham số, 6,5 GMAC/ảnh (U-Net p11: 2,9 M, 12,0 GMAC). Thêm
+**giám sát nhiều tỉ lệ** (tầng decoder 128² và 64² cũng phải ra chi tiết đúng, trọng số 0,5) và
+**L1 trên phổ FFT phức** (cả biên độ lẫn pha, trọng số 1,0) cho chi tiết cao tần.
+
+**p12** (OUT `outputs/p12_noise_b`): train lại **cả hai phase** trên
 **nhiễu B** — ít mờ hơn (defocus σ 0,30–0,95 px, motion 2–6 px, thu nhỏ ×0,82–0,97), ít hạt
 nhiễu hơn (2.500–15.000 photon, nhiễu đọc 0,3–1,2/255, 8 bit), tối nhẹ hơn một chút; và mỗi
 frame một biến thể: phần lớn vừa tối vừa nhiễu, 10% **chỉ nhiễu** (không tối), 10% **chỉ tối**

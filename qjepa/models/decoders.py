@@ -357,6 +357,131 @@ class UNetBranch(nn.Module):
         return (x if base is None else base) + self.tail(h)
 
 
+class LayerNorm2d(nn.Module):
+    """LayerNorm over the channels of every pixel, as NAFNet uses it."""
+
+    def __init__(self, channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(1, channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=1, keepdim=True)
+        variance = (x - mean).square().mean(dim=1, keepdim=True)
+        return self.weight * (x - mean) / torch.sqrt(variance + self.eps) + self.bias
+
+
+class NAFBlock(nn.Module):
+    """NAFNet's block (Chen et al., "Simple Baselines for Image Restoration", ECCV 2022).
+
+    Norm -> 1x1 -> depthwise 3x3 -> SimpleGate (one half of the channels times the
+    other, in place of an activation) -> simplified channel attention (a 1x1 conv
+    on the image-wide mean: every channel sees the whole frame) -> 1x1, then a gated
+    feed-forward the same way. Both paths are scaled by zero-initialised
+    per-channel factors, so a fresh block is the identity.
+    """
+
+    def __init__(self, channels: int, expand: int = 2) -> None:
+        super().__init__()
+        hidden = channels * expand
+        self.norm1 = LayerNorm2d(channels)
+        self.conv1 = nn.Conv2d(channels, hidden, 1)
+        self.conv2 = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden)
+        self.attention = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(hidden // 2, hidden // 2, 1))
+        self.conv3 = nn.Conv2d(hidden // 2, channels, 1)
+        self.norm2 = LayerNorm2d(channels)
+        self.conv4 = nn.Conv2d(channels, hidden, 1)
+        self.conv5 = nn.Conv2d(hidden // 2, channels, 1)
+        self.beta = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    @staticmethod
+    def _gate(x: torch.Tensor) -> torch.Tensor:
+        first, second = x.chunk(2, dim=1)
+        return first * second
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self._gate(self.conv2(self.conv1(self.norm1(x))))
+        y = x + self.conv3(h * self.attention(h)) * self.beta
+        return y + self.conv5(self._gate(self.conv4(self.norm2(y)))) * self.gamma
+
+
+class NAFNetBranch(nn.Module):
+    """NAFNet's U-Net for the edge branch, with the JEPA latent at its bottom.
+
+    Level i works at 1/2^i of the input with ``widths[i]`` channels: the top
+    levels see single edges and small objects, the bottom one (16x16 for a 256x256
+    frame, ZI's grid) layout and what the objects are. Depthwise convolutions make
+    blocks cheap, so the bottom can be deep (``middle_blocks``). Down: 2x2 stride-2
+    conv; up: 1x1 conv + PixelShuffle; skips are added, as in NAFNet.
+
+    ``aux_factors`` adds a head on the decoder level at 1/f resolution that
+    predicts the output downsampled by f (MIMO-UNet's coarse-to-fine supervision):
+    the deep levels must fix large blur themselves instead of leaving it to the top.
+    All heads and the last conv are zero-initialised: the branch starts as the
+    identity on ``base``.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, latent_channels: int,
+                 widths: tuple[int, ...], enc_blocks: tuple[int, ...], middle_blocks: int,
+                 dec_blocks: tuple[int, ...], aux_factors: tuple[int, ...] = ()) -> None:
+        super().__init__()
+        levels = len(widths)
+        if levels < 2 or len(enc_blocks) != levels - 1 or len(dec_blocks) != levels - 1:
+            raise ValueError("NAFNet needs len(enc_blocks) == len(dec_blocks) == len(widths) - 1")
+        for factor in aux_factors:
+            level = int(factor).bit_length() - 1
+            if factor < 2 or 2 ** level != factor or level > levels - 2:
+                raise ValueError(f"aux factor {factor} must be a power of two with a decoder level")
+        self.levels = levels
+        self.intro = nn.Conv2d(in_channels, widths[0], 3, padding=1)
+        self.encoders = nn.ModuleList(
+            nn.Sequential(*[NAFBlock(w) for _ in range(n)]) for w, n in zip(widths[:-1], enc_blocks))
+        self.downs = nn.ModuleList(nn.Conv2d(widths[i], widths[i + 1], 2, stride=2) for i in range(levels - 1))
+        self.latent = nn.Conv2d(latent_channels, widths[-1], 1)
+        self.middle = nn.Sequential(*[NAFBlock(widths[-1]) for _ in range(middle_blocks)])
+        self.ups = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(widths[i + 1], 4 * widths[i], 1, bias=False), nn.PixelShuffle(2))
+            for i in range(levels - 1))
+        self.decoders = nn.ModuleList(
+            nn.Sequential(*[NAFBlock(w) for _ in range(n)]) for w, n in zip(widths[:-1], dec_blocks))
+        self.ending = nn.Conv2d(widths[0], out_channels, 3, padding=1)
+        self.aux_heads = nn.ModuleDict({
+            str(f): nn.Conv2d(widths[int(f).bit_length() - 1], out_channels, 3, padding=1) for f in aux_factors})
+        for head in (self.ending, *self.aux_heads.values()):
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+
+    def forward_with_aux(
+        self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        step = 2 ** (self.levels - 1)
+        if x.shape[-2] % step or x.shape[-1] % step:
+            raise ValueError(f"NAFNet with {self.levels} levels needs sides divisible by {step}")
+        base = x if base is None else base
+        h = self.intro(x)
+        skips = []
+        for encoder, down in zip(self.encoders, self.downs):
+            h = encoder(h)
+            skips.append(h)
+            h = down(h)
+        z = self.latent(latent)
+        if z.shape[-2:] != h.shape[-2:]:
+            z = F.interpolate(z, size=h.shape[-2:], mode="bilinear", align_corners=False)
+        h = self.middle(h + z)
+        aux = {}
+        for level in reversed(range(self.levels - 1)):
+            h = self.decoders[level](self.ups[level](h) + skips[level])
+            key = str(2 ** level)
+            if key in self.aux_heads:
+                aux[2 ** level] = F.avg_pool2d(base, 2 ** level) + self.aux_heads[key](h)
+        return base + self.ending(h), aux
+
+    def forward(self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None) -> torch.Tensor:
+        return self.forward_with_aux(latent, x, base)[0]
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -379,7 +504,7 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_width: int = 64, edge_blocks: int = 6, color_scale: int = 2, illumination_scale: int = 8,
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
-        color_global: bool = False,
+        color_global: bool = False, naf: dict | None = None,
     ) -> None:
         super().__init__()
         if color_global and branch_arch == "unet":
@@ -397,13 +522,22 @@ class SplitColorEdgeDecoder(nn.Module):
             # object is, exposure) at the bottom. Colour keeps p8's branch and names.
             self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
             self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
+        elif branch_arch == "nafnet_edge":
+            # NAFNet on the edges (deep and cheap: depthwise blocks, channel attention),
+            # p8's colour branch; ``naf`` holds widths, block counts and aux factors.
+            if not naf:
+                raise ValueError("nafnet_edge needs its naf settings")
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
+            self.edge = NAFNetBranch(2, 1, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
+                                     int(naf["middle_blocks"]), tuple(naf["dec_blocks"]),
+                                     tuple(naf.get("aux_factors", ())))
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
             self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
             self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
                                            in_channels=2, out_channels=1)
         else:
-            raise ValueError("branch_arch must be resnet, unet or unet_edge")
+            raise ValueError("branch_arch must be resnet, unet, unet_edge or nafnet_edge")
 
     def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         size = image.shape[-2:]
@@ -413,8 +547,15 @@ class SplitColorEdgeDecoder(nn.Module):
         light = illumination(base, self.illumination_scale)
         y = luminance(image)
         detail_in = y - illumination(color_base(image, self.color_scale), self.illumination_scale)
-        detail = self.edge(latent, torch.cat((y, light.detach()), dim=1), base=detail_in)
+        edge_in = torch.cat((y, light.detach()), dim=1)
+        aux = {}
+        if isinstance(self.edge, NAFNetBranch):
+            detail, aux = self.edge.forward_with_aux(latent, edge_in, base=detail_in)
+        else:
+            detail = self.edge(latent, edge_in, base=detail_in)
         parts = {"image_color_base": base, "image_illumination": light, "image_detail": detail}
+        # Flat keys: only tensors cross DataParallel's gather.
+        parts.update({f"image_detail_aux{factor}": value for factor, value in aux.items()})
         return compose(base, light, detail), parts
 
 

@@ -54,6 +54,7 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "jepa_image_fine", "je
 PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
                 "image_detail_energy", "image_detail_invisible_fraction",
                 "image_color_l1", "image_color_stats_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
+                "image_edge_fft_l1", "image_edge_aux_l1",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -448,6 +449,11 @@ def config_section(run: Path) -> None:
         ("phase2.split_edge_unet_widths", ("phase2", "split_edge_unet_widths")),
         ("phase2.split_color_global", ("phase2", "split_color_global")),
         ("phase2.split_color_stats_weight", ("phase2", "split_color_stats_weight")),
+        ("phase2.split_edge_naf_widths", ("phase2", "split_edge_naf_widths")),
+        ("phase2.split_edge_fft_weight", ("phase2", "split_edge_fft_weight")),
+        ("phase2.split_edge_aux_weight", ("phase2", "split_edge_aux_weight")),
+        ("corruption.image.photon_count", ("corruption", "image", "photon_count")),
+        ("corruption.image.noise_only_probability", ("corruption", "image", "noise_only_probability")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
         ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]

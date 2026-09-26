@@ -126,6 +126,10 @@ class Phase2Trainer:
                     edge_weight=float(self.phase["split_edge_weight"]),
                     gradient_weight=float(self.phase["split_gradient_weight"]),
                     stats_weight=float(self.phase.get("split_color_stats_weight", 0.0)),
+                    fft_weight=float(self.phase.get("split_edge_fft_weight", 0.0)),
+                    aux_details={int(key[len("image_detail_aux"):]): value for key, value in restored.items()
+                                 if key.startswith("image_detail_aux")},
+                    aux_weight=float(self.phase.get("split_edge_aux_weight", 0.0)),
                 )
                 loss = loss + split_loss
                 parts.update(split_parts)

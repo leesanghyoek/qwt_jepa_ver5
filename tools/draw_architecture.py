@@ -97,7 +97,7 @@ def unet_block(x, yc, kind, title, below=False):
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · U-Net · 256² · Y', below=True)
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet · 256² · Y', below=True)
 join = node(1172, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1272, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)

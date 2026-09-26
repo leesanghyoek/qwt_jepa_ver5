@@ -186,8 +186,15 @@ def validate_config(config: dict[str, Any]) -> None:
             if side % phase2["split_color_scale"] or side % phase2["split_illumination_scale"]:
                 raise ValueError("phase2 split scales must divide the image sides")
         arch = phase2.get("split_branch_arch", "resnet")
-        if arch not in ("resnet", "unet", "unet_edge"):
-            raise ValueError("phase2.split_branch_arch must be resnet, unet or unet_edge")
+        if arch not in ("resnet", "unet", "unet_edge", "nafnet_edge"):
+            raise ValueError("phase2.split_branch_arch must be resnet, unet, unet_edge or nafnet_edge")
+        # The aux settings only mean something to the NAFNet branch, the only one with
+        # decoder heads; other branches produce no aux outputs, so the term is absent.
+        if arch == "nafnet_edge":
+            _validate_nafnet_edge(phase2, data["image_size"])
+        fft_weight = phase2.get("split_edge_fft_weight", 0.0)
+        if isinstance(fft_weight, bool) or not isinstance(fft_weight, (int, float)) or fft_weight < 0:
+            raise ValueError("phase2.split_edge_fft_weight must be a nonnegative number")
         if arch in ("unet", "unet_edge"):
             unet_keys = (("split_color_unet_widths", phase2["split_color_scale"]),
                          ("split_edge_unet_widths", 1))
@@ -295,6 +302,35 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
     )
 
 
+def _positive_ints(value: Any, length: int | None = None) -> bool:
+    return (isinstance(value, (list, tuple)) and (length is None or len(value) == length)
+            and all(isinstance(v, int) and not isinstance(v, bool) and v >= 1 for v in value))
+
+
+def _validate_nafnet_edge(phase2: dict[str, Any], image_size: list[int]) -> None:
+    """Widths, block counts and auxiliary factors of the NAFNet edge branch."""
+    widths = phase2.get("split_edge_naf_widths")
+    if not _positive_ints(widths) or len(widths) < 2:
+        raise ValueError("phase2.split_edge_naf_widths must list at least two positive channel counts")
+    if any(side % 2 ** (len(widths) - 1) for side in image_size):
+        raise ValueError(f"phase2.split_edge_naf_widths: image sides must divide by {2 ** (len(widths) - 1)}")
+    for key in ("split_edge_naf_enc_blocks", "split_edge_naf_dec_blocks"):
+        if not _positive_ints(phase2.get(key), len(widths) - 1):
+            raise ValueError(f"phase2.{key} must list len(split_edge_naf_widths) - 1 positive block counts")
+    middle = phase2.get("split_edge_naf_middle_blocks")
+    if isinstance(middle, bool) or not isinstance(middle, int) or middle < 1:
+        raise ValueError("phase2.split_edge_naf_middle_blocks must be a positive integer")
+    factors = phase2.get("split_edge_aux_factors", [])
+    if not isinstance(factors, (list, tuple)) or any(
+            not isinstance(f, int) or f < 2 or f & (f - 1) or f > 2 ** (len(widths) - 2) for f in factors):
+        raise ValueError("phase2.split_edge_aux_factors must be powers of two that have a decoder level")
+    weight = phase2.get("split_edge_aux_weight", 0.0)
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight < 0:
+        raise ValueError("phase2.split_edge_aux_weight must be a nonnegative number")
+    if weight > 0 and not factors:
+        raise ValueError("phase2.split_edge_aux_weight > 0 needs split_edge_aux_factors")
+
+
 def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
     """Predictor shape, token masking and the multi-scale JEPA terms."""
     predictor = phase1.get("predictor_type", "token")
@@ -399,6 +435,13 @@ def build_decoders(
             "edge_widths": tuple(config["phase2"].get("split_edge_unet_widths", (16, 24, 32, 48, 56))),
             "unet_blocks": int(config["phase2"].get("split_unet_blocks", 1)),
             "color_global": bool(config["phase2"].get("split_color_global", False)),
+            "naf": {
+                "widths": tuple(config["phase2"].get("split_edge_naf_widths", ())),
+                "enc_blocks": tuple(config["phase2"].get("split_edge_naf_enc_blocks", ())),
+                "middle_blocks": int(config["phase2"].get("split_edge_naf_middle_blocks", 0)),
+                "dec_blocks": tuple(config["phase2"].get("split_edge_naf_dec_blocks", ())),
+                "aux_factors": tuple(config["phase2"].get("split_edge_aux_factors", ())),
+            } if config["phase2"].get("split_branch_arch") == "nafnet_edge" else None,
         },
     )
 

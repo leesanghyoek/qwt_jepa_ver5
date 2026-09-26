@@ -263,6 +263,9 @@ def color_edge_split_loss(
     edge_weight: float,
     gradient_weight: float,
     stats_weight: float = 0.0,
+    fft_weight: float = 0.0,
+    aux_details: dict[int, torch.Tensor] | None = None,
+    aux_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Separate targets for the two branches of the split decoder.
 
@@ -270,6 +273,11 @@ def color_edge_split_loss(
     the clean frame, with L1. Edges: the luminance detail against the clean
     frame's. Optionally the luminance gradient of the whole output, which scores
     edge slopes directly, and ``stats_weight`` for color_statistics_l1.
+
+    ``fft_weight`` adds fft_l1 on the luminance detail; ``aux_details`` maps a
+    factor f to the edge branch's prediction at 1/f resolution, scored (L1, and
+    fft_l1 at ``fft_weight``) against the detail averaged down by f, mean over the
+    factors times ``aux_weight``.
     """
     with torch.no_grad():
         base_t, light_t, detail_t = split_targets(clean, color_scale, illumination_scale)
@@ -281,11 +289,39 @@ def color_edge_split_loss(
         stats = color_statistics_l1(base, light, base_t, light_t)
         total = total + stats_weight * stats
         parts["image_color_stats_l1"] = stats
+    if fft_weight > 0:
+        spectrum = fft_l1(detail, detail_t)
+        total = total + fft_weight * spectrum
+        parts["image_edge_fft_l1"] = spectrum
+    if aux_details and aux_weight > 0:
+        terms = []
+        for factor, predicted in sorted(aux_details.items()):
+            target = F.avg_pool2d(detail_t, factor)
+            term = F.l1_loss(predicted, target)
+            if fft_weight > 0:
+                term = term + fft_weight * fft_l1(predicted, target)
+            terms.append(term)
+        aux = torch.stack(terms).mean()
+        total = total + aux_weight * aux
+        parts["image_edge_aux_l1"] = aux
     if gradient_weight > 0:
         gradient = luminance_gradient_l1(restored, clean)
         total = total + gradient_weight * gradient
         parts["image_edge_gradient_l1"] = gradient
     return total, parts
+
+
+def fft_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """L1 on the real and imaginary parts of the 2-D spectrum (orthonormal FFT).
+
+    Phase-aware: a shifted or striped image changes the complex coefficients even
+    where their modulus matches, so this cannot be satisfied the way the modulus
+    and energy terms were (they bought period-2 stripes). Against pixel L1 it
+    weighs the many small high-frequency coefficients -- the missing detail -- far
+    more. On noise B frames it starts at ~0.73x the detail L1.
+    """
+    difference = torch.fft.rfft2(predicted.float(), norm="ortho") - torch.fft.rfft2(target.float(), norm="ortho")
+    return torch.view_as_real(difference).abs().mean()
 
 
 def _color_statistics(base: torch.Tensor, light: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:

@@ -138,10 +138,10 @@ def test_the_edge_loss_cannot_train_the_colour_branch_with_unet_edge():
     assert any(p.grad is not None and float(p.grad.abs().max()) > 0.0 for p in decoder.edge.parameters())
 
 
-def test_the_recipe_edge_unet_bottom_sits_on_the_latent_grid():
+def test_the_p11_edge_unet_bottom_sits_on_the_latent_grid():
     config = load_config("configs/kaggle_tartanair_v2.yaml")
     phase2 = config["phase2"]
-    assert phase2["split_branch_arch"] == "unet_edge"
+    phase2["split_branch_arch"] = "unet_edge"          # p11; the recipe moved on to nafnet_edge
     levels = len(phase2["split_edge_unet_widths"])
     side = config["data"]["image_size"][0]
     assert side // 2 ** (levels - 1) == 16             # ZI is 128 x 16 x 16
