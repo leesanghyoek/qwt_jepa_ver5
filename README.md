@@ -1,8 +1,8 @@
 # QWT–JEPA v3 cho ảnh thiếu sáng, mờ và IMU nhiễu
 
-Source: [leesanghyoek/qwt_jepa_ver4](https://github.com/leesanghyoek/qwt_jepa_ver4),
+Source: [leesanghyoek/qwt_jepa_ver5](https://github.com/leesanghyoek/qwt_jepa_ver5),
 nhánh `main`. Trên Kaggle dùng notebook
-[`qwt-jaco-jepa-ver4.ipynb`](qwt-jaco-jepa-ver4.ipynb): Cell 1 clone source và ghim
+[`qwt-jaco-jepa-ver5.ipynb`](qwt-jaco-jepa-ver5.ipynb): Cell 1 clone source và ghim
 commit, rồi chạy lần lượt các cell.
 
 Pipeline hai giai đoạn. **Phase 1**: JEPA học latent — encoder đọc ảnh + IMU
@@ -12,19 +12,30 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p9** (`configs/kaggle_tartanair_v2.yaml`, OUT
-`outputs/p9_vicreg`): **train lại phase 1** (5.000 update) với covariance VICReg
-**gộp** thay cho covariance theo từng vị trí, 64 vị trí ảnh mỗi update (trước 16); neo
-0,45, detail 2,0, Jacobian tỉ số 0,05 giữ nguyên. Phase 2 giữ nguyên recipe p8 (hash
-phase 2 không đổi): 5.000 update với **decoder tách màu + đường nét**, loss màu và loss
-đường nét riêng, cộng loss toàn ảnh chấm trên ảnh khôi phục (L1 hệ số · 2,0, energy ·
-1,0); IMU giữ decoder hệ số với skip có cổng, sai phân bậc một IMU · 2,0.
+Run Kaggle hiện tại là **p10** (`configs/kaggle_tartanair_v2.yaml`, OUT
+`outputs/p10_jepa_context`): **train lại phase 1** (5.000 update) với năm thay đổi cho
+JEPA, mỗi cái một khoá trong `phase1` để tắt riêng:
+
+- **A** — log *JEPA chuẩn hoá* (JEPA ÷ JEPA của cách đoán một token cố định) và cosine,
+  vì JEPA thô **tăng** khi latent mang nhiều thông tin hơn;
+- **B** — predictor **nhìn lân cận 5×5 token** (conv depthwise, 71k tham số, cũ 66k);
+- **C** — teacher EMA chậm hơn ở cuối (0,999 → 0,9995);
+- **E** — **che token** trên latent (ảnh: khối 2–4 token tới 30%, IMU: đoạn 1–2 token tới
+  25%), predictor đoán token bị che từ lân cận;
+- **F** — JEPA **nhiều tỉ lệ** cho ảnh: đích mịn 32×32 (stage trước của teacher) · 0,5 và
+  đích thô 8×8 (trung bình 2×2 token) · 0,25.
+
+Covariance VICReg **gộp** (p9, 64 vị trí mỗi update), neo 0,45, detail 2,0, Jacobian tỉ
+số 0,05 giữ nguyên. Phase 2 giữ nguyên recipe p8 (hash phase 2 không đổi): 5.000 update
+với **decoder tách màu + đường nét**, loss màu và loss đường nét riêng, cộng loss toàn
+ảnh chấm trên ảnh khôi phục (L1 hệ số · 2,0, energy · 1,0); IMU giữ decoder hệ số với
+skip có cổng, sai phân bậc một IMU · 2,0.
 
 ## Tài liệu
 
 - [**Kiến trúc: trước và sau**](KIEN_TRUC_TRUOC_VA_SAU.md) — so sánh từng thay đổi
   kèm phép đo.
-- Notebook Kaggle [`qwt-jaco-jepa-ver4.ipynb`](qwt-jaco-jepa-ver4.ipynb). Cell 18 in
+- Notebook Kaggle [`qwt-jaco-jepa-ver5.ipynb`](qwt-jaco-jepa-ver5.ipynb). Cell 18 in
   báo cáo train (`tools/training_report.py`), gồm cả độ nét thật và độ sọc so với ảnh
   sạch.
 
@@ -49,13 +60,16 @@ Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng địn
 | **Loss chi tiết ảnh** | chấm trên 48 kênh hệ số decoder xuất ra — QWT dư 4 lần nên decoder hạ được loss bằng năng lượng ảnh **không hiện ra** | chấm trên **ảnh khôi phục** (`image_detail_source: restored_image`); modulus `\|q\|` đã thử ở p5 và bỏ vì sinh **sọc** | `tests/test_image_detail_source.py` |
 | **Decoder ảnh** | từ latent 16×16 dựng lên 48 kênh hệ số QWT rồi synthesis; ba biến thể đều dừng ở cùng một mức chi tiết | **Tách màu + đường nét** (`image_decoder: split_color_edge`): màu ở 128×128, đường nét trên Y ở 256×256, ghép lại; đường nét đúng chỗ 0,309 → 0,465 (ResNet một khối: 0,360) | `tests/test_color_edge_decoder.py` |
 | **Covariance VICReg (phase 1)** | ước ở từng vị trí từ 8 mẫu: ma trận 128×128 hạng ≤ 7, trên đặc trưng **không tương quan** vẫn đọc **8,2** (đúng là 0) và tăng theo std⁴, nên gradient chủ yếu ép đặc trưng nhỏ lại, chống variance | gộp mẫu (đã trừ trung bình theo vị trí) của mọi vị trí được lấy (`covariance_pooling: pooled`), 64 vị trí: sàn nhiễu **0,13**. A/B 1.000 update: effective rank ZI 0,59 → 0,77, variance loss 0,24 → 0,15; phase 2 ngắn ngang nhau | `tests/test_pooled_covariance.py` |
+| **JEPA phase 1** (p10) | predictor nhìn **từng token**; JEPA thô không so được giữa các run | predictor lân cận 5×5 (`predictor_type: spatial`), che token trên latent (`image_mask_ratio` 0,3, `imu_mask_ratio` 0,25), đích mịn 32×32 + thô 8×8 (`multiscale_*`), EMA cuối 0,9995; báo cáo có JEPA chuẩn hoá và cosine, tách token thấy/bị che | `tests/test_phase1_jepa_options.py` |
 
 **Phase 1 nào dùng lại được.** Đổi QWT (db4 → Hilbert) là đứt gãy thật:
 `model.image_transform` nằm trong configuration hash, nên checkpoint thời db4 không
 dùng được. Từ p5 trở đi phase 1 không đổi (hash `ef8ef433`); ba thay đổi sau đó — loss
 chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7/p8 dùng lại phase 1 của p5. p9 đổi
-covariance VICReg nên hash phase 1 đổi (`4389b3c6`): p9 train lại cả hai phase. Run sau
-chỉ đổi phase 2 thì dùng lại phase 1 của p9.
+covariance VICReg nên hash phase 1 đổi (`4389b3c6`); p10 đổi thêm predictor, masking,
+đích nhiều tỉ lệ và EMA (`679dffff`), nên p10 train lại cả hai phase. Các khoá mới nằm
+trong `phase1`, nên hash phase 2 không đổi. Run sau chỉ đổi phase 2 thì dùng lại phase 1
+của p10.
 
 **Kiểm tra trước khi train:**
 

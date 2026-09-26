@@ -104,10 +104,10 @@ imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổn
 imu_out = node(1272, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
-teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['bản sao 2 encoder', 'đọc bản SẠCH'])
-loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA = ½ (ảnh + IMU)', 'VICReg · neo · Jacobian'])
-pred_u = node(705, 555, 110, 70, 'p1', 'Predictor', ['IMU'])
-pred_i = node(862, 555, 115, 70, 'p1', 'Predictor', ['ảnh'])
+teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])
+loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg · neo · Jacobian'])
+pred_u = node(705, 555, 110, 70, 'p1', 'Predictor', ['IMU · lân cận', 'che 25% token'])
+pred_i = node(862, 555, 115, 70, 'p1', 'Predictor', ['ảnh · lân cận 5×5', 'che 30% token'])
 
 # ---------------- arrows: backbone
 arrow([mid_right(img_in), mid_left(qwt)]); arrow([mid_right(imu_in), mid_left(haar)])

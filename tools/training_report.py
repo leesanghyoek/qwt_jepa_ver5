@@ -46,7 +46,8 @@ IMU_METRICS = {
     "accel_variation_rmse": ("accel variation RMSE", False),
     "gyro_variation_rmse": ("gyro variation RMSE", False),
 }
-PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "variance", "covariance",
+PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "jepa_image_fine", "jepa_image_coarse",
+                "variance", "covariance",
                 "reconstruction", "reconstruction_image", "reconstruction_image_detail",
                 "reconstruction_imu", "reconstruction_imu_detail",
                 "encoder_sensitivity", "gradient_norm")
@@ -168,6 +169,43 @@ def sensitivity_section(steps: list[dict]) -> list[str]:
     if valid is not None and valid < 0.7:
         findings.append(f"sensitivity_valid_fraction cuối = {valid:.2f}: nhiều mẫu không có "
                         "hướng nhiễu để đo (clean_probability quá cao?).")
+    return findings
+
+
+def jepa_quality_section(steps: list[dict], checkpoints: list[dict], reference: dict | None) -> list[str]:
+    """JEPA that can be compared across runs: normalized, cosine, visible vs masked."""
+    rows = [("ảnh · JEPA chuẩn hoá", "jepa_image_normalized"), ("ảnh · cosine", "jepa_image_cosine"),
+            ("IMU · JEPA chuẩn hoá", "jepa_imu_normalized"), ("IMU · cosine", "jepa_imu_cosine"),
+            ("ảnh mịn 2× · chuẩn hoá", "jepa_image_fine_normalized")]
+    checked = [c for c in checkpoints if "validation_jepa_image_normalized" in c]
+    if not checked and not any("jepa_image_normalized" in r for r in steps):
+        print("\n  (run này chưa log JEPA chuẩn hoá — code cũ hơn phương án A)")
+        return []
+    print("\n  Chất lượng JEPA — so được giữa các run")
+    print("    JEPA chuẩn hoá = JEPA ÷ JEPA của cách đoán một token cố định (collapse):"
+          "\n    1 = không hơn collapse, 0 = hoàn hảo. JEPA thô tăng khi latent mang nhiều hơn;"
+          "\n    số này thì không. Validation không che token, nên so thẳng với run cũ.")
+    print(f"    {'':<26}{'khởi tạo':>12}{'val cuối':>12}{'train 5% cuối':>16}")
+    final = checked[-1] if checked else {}
+    for label, key in rows:
+        start = (reference or {}).get(f"validation_{key}")
+        last = final.get(f"validation_{key}")
+        train = window_median(steps, key, False)
+        if start is None and last is None and train is None:
+            continue
+        print(f"    {label:<26}{fmt(start, 12, 4)}{fmt(last, 12, 4)}{fmt(train, 16, 4)}")
+    split = [(branch, window_median(steps, f"jepa_{branch}_visible", False),
+              window_median(steps, f"jepa_{branch}_masked", False)) for branch in ("image", "imu")]
+    if any(visible is not None for _, visible, _ in split):
+        print("    Train, token thấy vs token bị che (5% cuối; token che khó hơn, cao hơn là bình thường):")
+        for branch, visible, masked in split:
+            if visible is not None:
+                print(f"      {branch:<6}thấy {fmt(visible, 10, 4)}   che {fmt(masked, 10, 4)}")
+    findings = []
+    image_last = final.get("validation_jepa_image_normalized")
+    if isinstance(image_last, (int, float)) and image_last > 0.8:
+        findings.append(f"JEPA ảnh chuẩn hoá cuối = {image_last:.2f}: predictor gần như không hơn "
+                        "việc đoán một token cố định — latent nhiễu gần như không nói gì về đích sạch.")
     return findings
 
 
@@ -371,6 +409,12 @@ def config_section(run: Path) -> None:
         ("phase1.batch_size", ("phase1", "batch_size")),
         ("phase1.covariance_pooling", ("phase1", "covariance_pooling")),
         ("phase1.image_positions_per_update", ("phase1", "image_positions_per_update")),
+        ("phase1.teacher_momentum_end", ("phase1", "teacher_momentum_end")),
+        ("phase1.predictor_type", ("phase1", "predictor_type")),
+        ("phase1.image_mask_ratio", ("phase1", "image_mask_ratio")),
+        ("phase1.imu_mask_ratio", ("phase1", "imu_mask_ratio")),
+        ("phase1.multiscale_fine_weight", ("phase1", "multiscale_fine_weight")),
+        ("phase1.multiscale_coarse_weight", ("phase1", "multiscale_coarse_weight")),
         ("phase1.coefficient_reconstruction_loss_weight",
          ("phase1", "coefficient_reconstruction_loss_weight")),
         ("encoder_sensitivity.weight_max", ("encoder_sensitivity", "weight_max")),
@@ -443,6 +487,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
     if phase1_steps:
         term_table(phase1_steps, PHASE1_TERMS, "Thành phần loss (trung vị 5% đầu và 5% cuối)")
         findings += sensitivity_section(phase1_steps)
+    findings += jepa_quality_section(phase1_steps, phase1_checks, reference)
     findings += latent_gate_section(phase1_checks, reference)
 
     phase2_steps, phase2_checks, _ = split_records(read_jsonl(run / "phase2/train.jsonl"))
@@ -457,7 +502,9 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
         "successful_updates", "skipped", "reason", "learning_rate", "teacher_momentum",
         "encoder_source", "encoder_sensitivity_weight", "probe_clipped_fraction",
         "sensitivity_noise_gain", "sensitivity_signal_gain", "sensitivity_ratio",
-        "sensitivity_valid_fraction",
+        "sensitivity_valid_fraction", "jepa_image_normalized", "jepa_imu_normalized",
+        "jepa_image_cosine", "jepa_imu_cosine", "jepa_image_visible", "jepa_image_masked",
+        "jepa_imu_visible", "jepa_imu_masked", "jepa_image_fine_normalized",
     }
     extra = sorted({k for r in phase1_steps + phase2_steps for k in r} - known)
     if extra:

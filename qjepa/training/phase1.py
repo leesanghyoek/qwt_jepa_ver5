@@ -7,11 +7,15 @@ from typing import Any
 
 import torch
 
+from ..models.masking import sample_seeds
 from ..models.pipeline import LatentPretrainingModel
 from ..execution import Phase1Forward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from .losses import (
     dense_positions,
+    jepa_coarse_loss,
+    jepa_diagnostics,
+    jepa_fine_loss,
     jepa_latent_loss,
     phase1_reconstruction_loss,
     variance_covariance_loss,
@@ -43,6 +47,32 @@ def _position_indices(total: int, maximum: int, seed: int, *context: object) -> 
     return torch.randperm(total, generator=generator)[:maximum].sort().values
 
 
+def phase1_masking(phase: dict[str, Any]) -> dict[str, Any] | None:
+    """The Phase1Forward masking settings, or None when nothing is masked."""
+    image_ratio = float(phase.get("image_mask_ratio", 0.0))
+    imu_ratio = float(phase.get("imu_mask_ratio", 0.0))
+    if image_ratio <= 0 and imu_ratio <= 0:
+        return None
+    return {"image_ratio": image_ratio, "image_block": tuple(phase.get("image_mask_block", (2, 4))),
+            "imu_ratio": imu_ratio, "imu_span": tuple(phase.get("imu_mask_span", (1, 2)))}
+
+
+def jepa_report_terms(features: dict[str, torch.Tensor]) -> dict[str, float]:
+    """Normalized JEPA, cosine and the visible/masked split, for the log only."""
+    report: dict[str, float] = {}
+    for name, prediction, target, mask in (
+        ("image", features["prediction_i"], features["target_i"], features.get("image_mask")),
+        ("imu", features["prediction_u"], features["target_u"], features.get("imu_mask")),
+    ):
+        for key, value in jepa_diagnostics(prediction, target, mask).items():
+            report[f"jepa_{name}_{key}"] = float(value)
+    if "prediction_i_fine" in features:
+        fine_tokens = features["prediction_i_fine"].flatten(2).transpose(1, 2)
+        diagnostics = jepa_diagnostics(fine_tokens, features["target_i_fine"])
+        report["jepa_image_fine_normalized"] = float(diagnostics["normalized"])
+    return report
+
+
 def _finite_gradients(parameters: list[torch.nn.Parameter]) -> bool:
     return all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in parameters)
 
@@ -53,6 +83,17 @@ class Phase1Trainer:
         "jepa",
         "jepa_image",
         "jepa_imu",
+        "jepa_image_normalized",
+        "jepa_imu_normalized",
+        "jepa_image_cosine",
+        "jepa_imu_cosine",
+        "jepa_image_visible",
+        "jepa_image_masked",
+        "jepa_imu_visible",
+        "jepa_imu_masked",
+        "jepa_image_fine",
+        "jepa_image_fine_normalized",
+        "jepa_image_coarse",
         "variance",
         "covariance",
         "encoder_sensitivity",
@@ -80,8 +121,9 @@ class Phase1Trainer:
         self.phase = config["phase1"]
         self.sensitivity = config["encoder_sensitivity"]
         self.device = device
+        self.masking = phase1_masking(self.phase)
         self.forward_model, self.device_ids = parallel_forward(
-            Phase1Forward(self.model), device, config["runtime"].get("gpu_count", "auto")
+            Phase1Forward(self.model, self.masking), device, config["runtime"].get("gpu_count", "auto")
         )
         self.manifest_hash = manifest_hash
         self.decoder_forward_calls = 0
@@ -158,16 +200,35 @@ class Phase1Trainer:
             probe_signal, signal_energy, _ = make_probe(
                 base_input, source, signal_direction, **probe_kwargs
             )
+        mask_seeds = None
+        if self.masking is not None:
+            mask_seeds = sample_seeds(self.phase["position_seed"], self.successful_updates, batch_size)
         # Gather dense features, not per-device scalar losses. Statistics below
         # see all B samples even when each GPU processed only B/2 samples.
         features = self.forward_model(
             batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
             batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
             probe_noise=probe_noise, probe_signal=probe_signal, probe_source=source,
+            mask_seeds=mask_seeds,
         )
+        # Masked tokens count like any other: the loss is still the mean over all
+        # tokens, only the predictor's view of them changed.
         jepa, jepa_image, jepa_imu = jepa_latent_loss(
             features["prediction_i"], features["prediction_u"], features["target_i"], features["target_u"]
         )
+        jepa_report = jepa_report_terms(features)
+        multiscale = jepa.new_zeros(())
+        fine_weight = float(self.phase.get("multiscale_fine_weight", 0.0))
+        coarse_weight = float(self.phase.get("multiscale_coarse_weight", 0.0))
+        if fine_weight > 0:
+            fine = jepa_fine_loss(features["prediction_i_fine"], features["target_i_fine"])
+            multiscale = multiscale + fine_weight * fine
+            jepa_report["jepa_image_fine"] = float(fine.detach())
+        if coarse_weight > 0:
+            coarse = jepa_coarse_loss(features["prediction_i"], features["target_i"],
+                                      int(self.phase["multiscale_coarse_pool"]))
+            multiscale = multiscale + coarse_weight * coarse
+            jepa_report["jepa_image_coarse"] = float(coarse.detach())
 
         image_total = features["FI"].shape[-2] * features["FI"].shape[-1]
         image_indices = _position_indices(
@@ -243,6 +304,7 @@ class Phase1Trainer:
 
         total = (
             self.phase["jepa_weight"] * jepa
+            + multiscale
             + self.phase["variance_weight"] * variance
             + self.phase["covariance_weight"] * covariance
             + encoder_weight * encoder_term
@@ -271,6 +333,7 @@ class Phase1Trainer:
             "jepa": float(jepa.detach()),
             "jepa_image": float(jepa_image.detach()),
             "jepa_imu": float(jepa_imu.detach()),
+            **jepa_report,
             "variance": float(variance.detach()),
             "covariance": float(covariance.detach()),
             "encoder_sensitivity": float(encoder_term.detach()),

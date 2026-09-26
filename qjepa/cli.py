@@ -53,8 +53,8 @@ from .training.checkpoints import (
     restore_rng_state,
     state_dict_hash,
 )
-from .training.losses import jepa_latent_loss
-from .training.phase1 import Phase1Trainer, _to_device
+from .training.losses import jepa_fine_loss, jepa_latent_loss
+from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
 from .training.phase2 import Phase2Trainer
 
 
@@ -384,7 +384,12 @@ def _validate_latent(
             outputs["prediction_i"], outputs["prediction_u"], outputs["target_i"], outputs["target_u"]
         )
         counts.append(batch["image_clean"].shape[0])
-        values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu)}
+        # No mask here: validation JEPA stays comparable with runs that never masked.
+        values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu),
+                  **jepa_report_terms(outputs)}
+        if "prediction_i_fine" in outputs:
+            values["jepa_image_fine"] = float(jepa_fine_loss(outputs["prediction_i_fine"],
+                                                             outputs["target_i_fine"]))
         features = (
             ("noisy_FI", outputs["FI"]),
             ("noisy_FU", outputs["FU"]),

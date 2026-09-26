@@ -141,6 +141,32 @@ phase1:
   variance_gamma: 1.0
   variance_eps: 0.0001
   image_positions_per_update: 64         # 16 vi tri x 8 mau qua it cho covariance gop
+  # (B) Predictor khong gian. Predictor cu nhin TUNG token rieng le; anh mo lam moi
+  # duong net loang sang cac token ben canh nen mot token khong gom lai duoc.
+  # 'spatial' = cung MLP do nhung lop an tron them lan can bang conv depthwise:
+  # kernel 3 x 2 lop -> doc vung 5x5 token (80 px). 71k tham so (cu 66k), nen no
+  # gom duoc ngu canh ma khong du suc khu nhieu thay encoder. Bo di sau phase 1.
+  predictor_type: spatial
+  predictor_kernel: 3
+  predictor_mixing_layers: 2
+  # (E) Che token (kieu I-JEPA) tren LATENT, khong tren anh: encoder van doc ca anh
+  # nhieu nen ZI giu du cho phase 2, nhung predictor phai doan dich sach cua token
+  # bi che tu lan can -> token phai mang ca hinh khoi xung quanh. Anh che cac khoi
+  # 2-4 token (32-64 px) toi 30%; IMU che doan 1-2 token toi 25%. Loss van la
+  # trung binh tren moi token; log tach jepa_*_visible / jepa_*_masked.
+  image_mask_ratio: 0.3
+  image_mask_block: [2, 4]
+  imu_mask_ratio: 0.25
+  imu_mask_span: [1, 2]
+  # (F) JEPA nhieu ti le (chi anh). Min: doan stage truoc cua teacher (96 kenh,
+  # 32x32, moi o 8x8 px) -> moi token phai noi ca bon goc 8x8 cua no chua gi, tuc
+  # duong net nho hon mot token. Tho: so trung binh 2x2 token (8x8) -> sai so bo
+  # cuc/do sang vung. Voi (A): log jepa_*_normalized = JEPA / JEPA cua viec doan
+  # mot token co dinh (collapse): 1 = khong hon collapse, 0 = hoan hao. So sanh
+  # giua cac run bang so nay, khong bang JEPA tho.
+  multiscale_fine_weight: 0.5
+  multiscale_coarse_weight: 0.25
+  multiscale_coarse_pool: 2
   imu_positions_per_update: 8
   position_seed: 73132
   minimum_statistics_batch: 8
@@ -153,7 +179,9 @@ phase1:
   minimum_lr: 0.000001
   gradient_clip_norm: 5.0
   teacher_momentum_start: 0.99
-  teacher_momentum_end: 0.999
+  # (C) Teacher cham hon o cuoi run: dich it troi hon, JEPA on dinh va thap hon.
+  # 0.999 -> 0.9995 (hang so thoi gian cuoi ~2000 update thay vi ~1000).
+  teacher_momentum_end: 0.9995
   precision: fp32
 
 encoder_sensitivity:

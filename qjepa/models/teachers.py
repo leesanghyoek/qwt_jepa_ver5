@@ -28,10 +28,17 @@ class EMATeachers(nn.Module):
         online: MultimodalBackbone,
         image_clean: torch.Tensor,
         imu_clean_normalized: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        image_fine: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        """TI, TU; with ``image_fine`` also the image encoder's previous stage,
+        which the same forward computes anyway (twice TI's resolution)."""
         image_coeff, _ = online.image_transform.analysis(image_clean)
         imu_coeff, _ = online.imu_transform.analysis(imu_clean_normalized)
-        return self.image_encoder(image_coeff), self.imu_encoder(imu_coeff)
+        if not image_fine:
+            return self.image_encoder(image_coeff), self.imu_encoder(imu_coeff)
+        target_image, stages = self.image_encoder(image_coeff, return_stages=True)
+        return target_image, self.imu_encoder(imu_coeff), stages[0]
 
     @torch.no_grad()
     def update(self, online: MultimodalBackbone, momentum: float) -> None:

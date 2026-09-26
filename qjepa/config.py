@@ -22,6 +22,7 @@ from .corruptions import (
 from .data.normalize import ImuNormalizer
 from .transforms import QWT_BACKENDS
 from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
+from .models.predictors import PREDICTOR_TYPES
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -110,6 +111,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Phase 1 requires the gradient-enabled clean online branch")
     if phase1.get("covariance_pooling", "per_position") not in ("per_position", "pooled"):
         raise ValueError("phase1.covariance_pooling must be per_position or pooled")
+    _validate_phase1_predictor(phase1)
     if phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0:
         raise ValueError("Main latent training requires explicit variance and covariance losses")
     if phase1.get("jepa_weight") != 1.0 or phase1.get("precision") != "fp32":
@@ -279,12 +281,55 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
     )
 
 
+def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
+    """Predictor shape, token masking and the multi-scale JEPA terms."""
+    predictor = phase1.get("predictor_type", "token")
+    if predictor not in PREDICTOR_TYPES:
+        raise ValueError(f"phase1.predictor_type must be one of {PREDICTOR_TYPES}")
+    kernel = phase1.get("predictor_kernel", 3)
+    layers = phase1.get("predictor_mixing_layers", 2)
+    if not isinstance(kernel, int) or kernel < 1 or kernel % 2 == 0:
+        raise ValueError("phase1.predictor_kernel must be an odd positive integer")
+    if not isinstance(layers, int) or layers < 1:
+        raise ValueError("phase1.predictor_mixing_layers must be a positive integer")
+    for key, size_key in (("image_mask_ratio", "image_mask_block"), ("imu_mask_ratio", "imu_mask_span")):
+        ratio = phase1.get(key, 0.0)
+        if not 0.0 <= ratio <= 0.75:
+            raise ValueError(f"phase1.{key} must be in [0, 0.75]")
+        if ratio > 0:
+            # A token-wise predictor sees nothing of a hidden token: it could only
+            # learn the mean target there.
+            if predictor != "spatial":
+                raise ValueError(f"phase1.{key} > 0 needs phase1.predictor_type: spatial")
+            size = phase1.get(size_key)
+            if (not isinstance(size, (list, tuple)) or len(size) != 2
+                    or not all(isinstance(v, int) and v >= 1 for v in size) or size[0] > size[1]):
+                raise ValueError(f"phase1.{size_key} must be [min, max] token counts, 1 <= min <= max")
+    fine = phase1.get("multiscale_fine_weight", 0.0)
+    coarse = phase1.get("multiscale_coarse_weight", 0.0)
+    if fine < 0 or coarse < 0:
+        raise ValueError("phase1 multi-scale JEPA weights cannot be negative")
+    if fine > 0 and predictor != "spatial":
+        raise ValueError("phase1.multiscale_fine_weight > 0 needs phase1.predictor_type: spatial")
+    if coarse > 0:
+        pool = phase1.get("multiscale_coarse_pool")
+        if not isinstance(pool, int) or pool < 2:
+            raise ValueError("phase1.multiscale_coarse_pool must be an integer >= 2")
+
+
 def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> LatentPretrainingModel:
     enabled = bool(config["phase1"].get("decoder_enabled", False))
+    phase1 = config["phase1"]
     return LatentPretrainingModel(
         backbone=build_backbone(config),
         normalizer=normalizer,
         predictor_hidden=config["model"]["predictor_hidden_dim"],
+        # The predictor never leaves phase 1, so its shape lives in phase1: the
+        # phase-2 contract does not move when it changes.
+        predictor_type=phase1.get("predictor_type", "token"),
+        predictor_kernel=int(phase1.get("predictor_kernel", 3)),
+        predictor_layers=int(phase1.get("predictor_mixing_layers", 2)),
+        fine_scale=float(phase1.get("multiscale_fine_weight", 0.0)) > 0,
         # Neo phase 1 khong bao gio nhan skip: neu no co duong vong tu encoder thi
         # no thoa man duoc neo ma khong ep gi vao latent — dung cai ma neo sinh ra
         # de ngan. Cung ly do voi viec no giu he so tuyet doi thay vi residual.

@@ -12,6 +12,7 @@ import os
 import torch
 from torch import nn
 
+from .models.masking import block_mask, span_mask
 from .models.pipeline import LatentPretrainingModel, RestorationSystem
 
 
@@ -47,19 +48,45 @@ def execution_metadata(device: torch.device, ids: list[int]) -> dict:
 
 
 class Phase1Forward(nn.Module):
-    def __init__(self, model: LatentPretrainingModel):
+    def __init__(self, model: LatentPretrainingModel, masking: dict | None = None):
         super().__init__()
         self.model = model
+        # image_ratio, image_block, imu_ratio, imu_span; None = no masking.
+        self.masking = masking
+
+    def _masks(self, mask_seeds, latent):
+        """Masks built here, per sample, because only here is the token grid known."""
+        if mask_seeds is None or self.masking is None:
+            return None, None
+        seeds = mask_seeds.tolist()
+        device = latent.ZI.device
+        image_mask = imu_mask = None
+        if self.masking["image_ratio"] > 0:
+            height, width = latent.ZI.shape[-2:]
+            image_mask = torch.stack([block_mask(height, width, self.masking["image_ratio"],
+                                                 self.masking["image_block"], seed) for seed in seeds]).to(device)
+        if self.masking["imu_ratio"] > 0:
+            length = latent.ZU.shape[-1]
+            imu_mask = torch.stack([span_mask(length, self.masking["imu_ratio"],
+                                              self.masking["imu_span"], seed) for seed in seeds]).to(device)
+        return image_mask, imu_mask
 
     def forward(self, image_noisy, imu_noisy_phys, image_clean, imu_clean_phys,
                 image_time, imu_times, probe_noise=None, probe_signal=None,
-                probe_source="off") -> dict[str, torch.Tensor]:
+                probe_source="off", mask_seeds=None) -> dict[str, torch.Tensor]:
         noisy = self.model.encode_online(image_noisy, imu_noisy_phys, image_time, imu_times)
         clean = self.model.encode_online(image_clean, imu_clean_phys, image_time, imu_times)
-        prediction_i, prediction_u = self.model.predictions(noisy)
-        target_i, target_u = self.model.targets(image_clean, imu_clean_phys)
+        image_mask, imu_mask = self._masks(mask_seeds, noisy)
+        prediction_i, prediction_u, prediction_i_fine = self.model.predictions(noisy, image_mask, imu_mask)
+        targets = self.model.targets(image_clean, imu_clean_phys, fine=self.model.fine_scale)
         result = {"prediction_i": prediction_i, "prediction_u": prediction_u,
-                  "target_i": target_i, "target_u": target_u}
+                  "target_i": targets[0], "target_u": targets[1]}
+        if self.model.fine_scale:
+            result["prediction_i_fine"] = prediction_i_fine
+            result["target_i_fine"] = targets[2]
+        for name, mask in (("image_mask", image_mask), ("imu_mask", imu_mask)):
+            if mask is not None:
+                result[name] = mask
         for name in ("FI", "FU", "ZI", "ZU"):
             result[name] = getattr(noisy, name)
             result[name + "_clean"] = getattr(clean, name)

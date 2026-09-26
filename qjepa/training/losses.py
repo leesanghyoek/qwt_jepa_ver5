@@ -31,6 +31,70 @@ def jepa_latent_loss(
     return 0.5 * (image_term + imu_term), image_term, imu_term
 
 
+def _dense_tokens(dense: torch.Tensor) -> torch.Tensor:
+    return dense.flatten(2).transpose(1, 2)
+
+
+@torch.no_grad()
+def jepa_diagnostics(
+    predicted: torch.Tensor,
+    target_dense: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    beta: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """What the raw JEPA number cannot say on its own.
+
+    * ``normalized`` -- JEPA / the JEPA of one constant token (the mean target
+      token): what a collapsed predictor scores. 1 = no better than collapse,
+      0 = perfect. A latent that carries more gets harder targets and a higher
+      raw JEPA; this ratio does not reward shedding information, so it is the one
+      to compare across runs.
+    * ``cosine`` -- mean cosine between LayerNorm'd prediction and target.
+    * ``visible`` / ``masked`` -- JEPA over the tokens the predictor saw and the
+      ones it had to infer, when a mask is given.
+    """
+    target = layer_norm_no_affine(_dense_tokens(target_dense).float())
+    prediction = layer_norm_no_affine(predicted.float())
+    per_token = F.smooth_l1_loss(prediction, target, beta=beta, reduction="none").mean(-1)
+    constant = layer_norm_no_affine(target.mean(dim=(0, 1), keepdim=True)).expand_as(target)
+    collapse = F.smooth_l1_loss(constant, target, beta=beta)
+    result = {
+        "normalized": per_token.mean() / collapse.clamp_min(1e-12),
+        "cosine": F.cosine_similarity(prediction, target, dim=-1).mean(),
+    }
+    if mask is not None:
+        result["visible"] = per_token[~mask].mean()
+        result["masked"] = per_token[mask].mean()
+    return result
+
+
+def jepa_fine_loss(predicted_dense: torch.Tensor, target_dense: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
+    """JEPA against the teacher's previous stage: twice the grid's resolution, so
+    each 16x16-pixel token must also say what its four 8x8 quarters hold."""
+    return F.smooth_l1_loss(
+        layer_norm_no_affine(_dense_tokens(predicted_dense)),
+        layer_norm_no_affine(_dense_tokens(target_dense).detach()),
+        beta=beta,
+    )
+
+
+def jepa_coarse_loss(
+    predicted_tokens: torch.Tensor, target_dense: torch.Tensor, pool: int, beta: float = 1.0
+) -> torch.Tensor:
+    """JEPA after averaging ``pool`` x ``pool`` tokens of prediction and target.
+
+    Token errors that cancel over a region leave it; errors shared across the
+    region -- wrong layout, wrong regional brightness -- stay. It weights exactly
+    what a masked block has to be inferred from.
+    """
+    predicted_dense = predicted_tokens.transpose(1, 2).reshape(target_dense.shape)
+    return F.smooth_l1_loss(
+        layer_norm_no_affine(_dense_tokens(F.avg_pool2d(predicted_dense, pool))),
+        layer_norm_no_affine(_dense_tokens(F.avg_pool2d(target_dense.detach(), pool))),
+        beta=beta,
+    )
+
+
 def dense_positions(feature: torch.Tensor, indices: torch.Tensor | None = None) -> torch.Tensor:
     """Convert channel-first dense features to aligned [B,K,D] positions."""
     if feature.ndim == 4:

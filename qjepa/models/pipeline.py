@@ -10,7 +10,7 @@ import torch.nn as nn
 from ..data.normalize import ImuNormalizer
 from .backbone import LatentBatch, MultimodalBackbone
 from .decoders import PIXEL_IMAGE_DECODERS, LatentDecoders
-from .predictors import LatentPredictor, image_tokens, imu_tokens
+from .predictors import PREDICTOR_TYPES, LatentPredictor, SpatialPredictor, image_tokens, imu_tokens
 from .teachers import EMATeachers
 
 
@@ -29,13 +29,37 @@ class LatentPretrainingModel(nn.Module):
         normalizer: ImuNormalizer | None = None,
         predictor_hidden: int = 256,
         decoders: LatentDecoders | None = None,
+        *,
+        predictor_type: str = "token",
+        predictor_kernel: int = 3,
+        predictor_layers: int = 2,
+        fine_scale: bool = False,
     ) -> None:
         super().__init__()
+        if predictor_type not in PREDICTOR_TYPES:
+            raise ValueError(f"predictor_type must be one of {PREDICTOR_TYPES}")
+        if fine_scale and predictor_type != "spatial":
+            raise ValueError("The fine-scale JEPA target needs the spatial predictor")
         self.backbone = backbone or MultimodalBackbone()
         self.normalizer = normalizer or ImuNormalizer()
         embedding_dim = self.backbone.image_encoder.out_channels
-        self.image_predictor = LatentPredictor(embedding_dim, predictor_hidden)
-        self.imu_predictor = LatentPredictor(embedding_dim, predictor_hidden)
+        self.predictor_type = predictor_type
+        self.fine_scale = fine_scale
+        if predictor_type == "token":
+            # Layer names unchanged: checkpoints up to p9 load strictly.
+            self.image_predictor = LatentPredictor(embedding_dim, predictor_hidden)
+            self.imu_predictor = LatentPredictor(embedding_dim, predictor_hidden)
+        else:
+            # The fine target is the stage before the last: skip_channels[0].
+            fine_channels = self.backbone.image_encoder.skip_channels[0] if fine_scale else 0
+            self.image_predictor = SpatialPredictor(
+                embedding_dim, predictor_hidden, spatial_dims=2, kernel=predictor_kernel,
+                layers=predictor_layers, fine_channels=fine_channels,
+            )
+            self.imu_predictor = SpatialPredictor(
+                embedding_dim, predictor_hidden, spatial_dims=1, kernel=predictor_kernel,
+                layers=predictor_layers,
+            )
         self.teachers = EMATeachers(self.backbone)
         self.decoders = decoders
         self.register_buffer("decoder_forward_calls", torch.zeros((), dtype=torch.long))
@@ -65,13 +89,31 @@ class LatentPretrainingModel(nn.Module):
             image, self.normalizer.normalize(imu_phys), image_time, imu_times
         )
 
-    def predictions(self, latent: LatentBatch) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.image_predictor(image_tokens(latent.ZI)), self.imu_predictor(imu_tokens(latent.ZU))
+    def predictions(
+        self,
+        latent: LatentBatch,
+        image_mask: torch.Tensor | None = None,
+        imu_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Predicted tokens (image, IMU) and, with ``fine_scale``, the fine image map.
+
+        Masks [B, N] hide tokens from the predictor; only the spatial predictor
+        can take them, as a token-wise one would have nothing left to predict from.
+        """
+        if self.predictor_type == "token":
+            if image_mask is not None or imu_mask is not None:
+                raise ValueError("Token masking needs the spatial predictor")
+            return (self.image_predictor(image_tokens(latent.ZI)),
+                    self.imu_predictor(imu_tokens(latent.ZU)), None)
+        image, fine = self.image_predictor(latent.ZI, image_mask)
+        imu, _ = self.imu_predictor(latent.ZU, imu_mask)
+        return image, imu, fine
 
     @torch.no_grad()
-    def targets(self, image_clean: torch.Tensor, imu_clean_phys: torch.Tensor):
+    def targets(self, image_clean: torch.Tensor, imu_clean_phys: torch.Tensor, *, fine: bool = False):
+        """Teacher TI, TU from the clean pair; with ``fine``, also the fine image target."""
         return self.teachers.encode_clean(
-            self.backbone, image_clean, self.normalizer.normalize(imu_clean_phys)
+            self.backbone, image_clean, self.normalizer.normalize(imu_clean_phys), image_fine=fine
         )
 
 
