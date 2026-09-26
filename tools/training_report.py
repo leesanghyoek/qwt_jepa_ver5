@@ -53,7 +53,7 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "jepa_image_fine", "je
                 "encoder_sensitivity", "gradient_norm")
 PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
                 "image_detail_energy", "image_detail_invisible_fraction",
-                "image_color_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
+                "image_color_l1", "image_color_stats_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -307,6 +307,24 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
                 "không xét vị trí (modulus, detail_energy): một hệ số chi tiết lệch đều tổng hợp "
                 "ra đúng sọc chu kỳ 2 px.")
 
+    # Colour error cannot tell a washed-out frame from a colour cast; these can.
+    if isinstance(final.get("validation_image_saturation_clean"), (int, float)):
+        print("\n  Độ tươi màu và tương phản — so với ảnh clean (1.00 = như clean)")
+        print(f"  {'':<34}{'input':>12}{'khôi phục':>12}")
+        for key, label in (("image_saturation", "độ đậm màu (Cb, Cr)"),
+                           ("image_contrast", "tương phản (độ lệch Y)")):
+            clean_value = final.get(f"validation_{key}_clean") or 0.0
+            ratio = lambda prefix: (final.get(f"{prefix}{key}") / clean_value
+                                    if clean_value and isinstance(final.get(f"{prefix}{key}"), (int, float))
+                                    else None)
+            print(f"  {label:<34}{fmt(ratio('validation_baseline_'), 12, 3)}{fmt(ratio('validation_'), 12, 3)}")
+            restored = ratio("validation_")
+            if restored is not None and restored < 0.9:
+                findings.append(
+                    f"{label} của ảnh khôi phục chỉ bằng {restored:.2f}x ảnh clean — ảnh "
+                    f"{'nhạt màu' if key == 'image_saturation' else 'phẳng, thiếu tương phản'}. "
+                    "L1 từng pixel trả lời màu/độ sáng không chắc bằng trung vị, nghiêng về xám/phẳng.")
+
     # The variation metric is a rate (diff / 0.01 s), so scaling it back to a
     # per-sample difference makes it comparable with the absolute error. Near 1.0
     # the consecutive errors are uncorrelated -- jitter, not offset -- and no
@@ -426,6 +444,10 @@ def config_section(run: Path) -> None:
         ("phase2.image_detail_loss", ("phase2", "image_detail_loss")),
         ("phase2.image_detail_source", ("phase2", "image_detail_source")),
         ("phase2.image_decoder", ("phase2", "image_decoder")),
+        ("phase2.split_branch_arch", ("phase2", "split_branch_arch")),
+        ("phase2.split_edge_unet_widths", ("phase2", "split_edge_unet_widths")),
+        ("phase2.split_color_global", ("phase2", "split_color_global")),
+        ("phase2.split_color_stats_weight", ("phase2", "split_color_stats_weight")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),
         ("phase2.residual_sees_input", ("phase2", "residual_sees_input")),
     ]

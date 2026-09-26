@@ -331,6 +331,18 @@ phase2:
   split_branch_arch: unet_edge
   split_edge_unet_widths: [32, 64, 64, 96, 128]
   split_unet_blocks: 1
+  # Mau nhat (p8: anh khoi phuc nhat mau hon anh goc). Hai nguyen nhan: (1) L1 tung
+  # pixel tra loi mot mau khong chac bang trung vi, ma trung vi nghieng ve XAM; (2) hong
+  # anh la TOAN CUC — gain tung kenh (white balance), exposure, gamma 0.46-0.79 (x^0.6
+  # keo cac kenh cua mot pixel lai gan nhau = nhat mau) — con than nhanh mau chi nhin
+  # ~66 px, khong du de biet ca anh bi am mau/gamma bao nhieu.
+  # split_color_global: mot duong cong tone + mot ma tran mau CHO CA ANH (out = M.x^p + b),
+  # tinh tu toan anh + ZI, dat truoc than nhanh mau; zero-init = identity.
+  split_color_global: true
+  # split_color_stats_weight: L1 giua thong ke tung anh (do dam mau, do trai Cb/Cr, do
+  # tuong phan) cua anh nen va anh sach — khong doi khi mau chi bi xao giua cac pixel,
+  # nhung giam khi anh xam di hoac phang di, dung cai L1 tung pixel bo lot.
+  split_color_stats_weight: 1.0
   # Van chon duoc: image_decoder: resnet_pixel dung hai khoa duoi.
   image_resnet_width: 64
   image_resnet_blocks: 8

@@ -219,18 +219,68 @@ class PixelResNetDecoder(nn.Module):
         return (image if base is None else base) + self.tail(torch.cat((self.up(x), head), dim=1))
 
 
+class GlobalToneColor(nn.Module):
+    """One tone curve and one colour matrix per image, set from the whole frame.
+
+    The low-light corruption is global: a gain per channel (white balance), an
+    exposure gain and a tone gamma, the same everywhere in the frame. The gamma
+    alone washes colours out -- x^0.6 pulls the channels of a pixel towards each
+    other. Undoing it needs the whole frame: the colour trunk sees about 66 px,
+    too little to tell a dim red wall from a white one under a red cast, and
+    where it cannot tell, L1 answers with the grey in between. Here a small
+    funnel and the latent are pooled into one vector per image, which sets
+    ``out = M . x^p + b``: ``p`` undoes the gamma, ``M`` the channel gains.
+    Zero-initialised: it starts as the identity.
+    """
+
+    def __init__(self, latent_channels: int = 128, width: int = 32) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, width, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU(),
+        )
+        self.latent = nn.Conv2d(latent_channels, width, 1)
+        # + per-channel mean and std of the input: the statistics a gain and a gamma move.
+        self.head = nn.Sequential(nn.Linear(2 * width + 6, width), nn.ReLU(), nn.Linear(width, 13))
+        nn.init.zeros_(self.head[-1].weight)
+        nn.init.zeros_(self.head[-1].bias)
+
+    def parameters_for(self, latent: torch.Tensor, image: torch.Tensor):
+        """(exponent [B], matrix [B,3,3], bias [B,3]) for each image."""
+        pooled = torch.cat((
+            self.features(image).mean(dim=(-2, -1)),
+            F.relu(self.latent(latent)).mean(dim=(-2, -1)),
+            image.mean(dim=(-2, -1)), image.flatten(2).std(dim=-1),
+        ), dim=1)
+        raw = self.head(pooled)
+        exponent = torch.exp(raw[:, 0].clamp(-1.0, 1.0))        # 0.37 .. 2.7; gamma 0.46..0.79 needs 1.3..2.2
+        matrix = torch.eye(3, dtype=raw.dtype, device=raw.device) + raw[:, 1:10].view(-1, 3, 3)
+        return exponent, matrix, raw[:, 10:13]
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        exponent, matrix, bias = self.parameters_for(latent, image)
+        curved = image.clamp_min(1e-4).pow(exponent[:, None, None, None])
+        return torch.einsum("bij,bjhw->bihw", matrix, curved) + bias[:, :, None, None]
+
+
 class ColorBranch(nn.Module):
     """Colour and brightness at reduced resolution: a residual on the averaged input.
 
-    Colour is what a mean loss restores well -- the average of the plausible
-    colours IS the right colour -- so this branch is trained with L1 and kept
-    away from edges. Working at reduced resolution also averages away most of
-    the colour noise a dark frame carries. Zero-initialised tail: it starts as
-    the averaged input.
+    Trained with L1 and kept away from edges. Working at reduced resolution also
+    averages away most of the colour noise a dark frame carries. Zero-initialised
+    tail: it starts as the averaged input. L1's answer is the median colour, which
+    is the right one only where the hue is certain; where it is not, the median
+    leans to grey -- p8's restored colours were washed out. ``global_tone`` puts a
+    GlobalToneColor in front, which removes the part of that uncertainty that is
+    one global setting per image.
     """
 
-    def __init__(self, latent_channels: int = 128, width: int = 32, blocks: int = 6) -> None:
+    def __init__(self, latent_channels: int = 128, width: int = 32, blocks: int = 6,
+                 global_tone: bool = False) -> None:
         super().__init__()
+        # Only when asked: p8 checkpoints have no such layers.
+        self.global_tone = GlobalToneColor(latent_channels, width) if global_tone else None
         self.head = nn.Sequential(nn.Conv2d(3, width, 3, padding=1), nn.ReLU())
         self.latent = nn.Conv2d(latent_channels, width, 1)
         self.fuse = nn.Conv2d(2 * width, width, 3, padding=1)
@@ -240,6 +290,8 @@ class ColorBranch(nn.Module):
         nn.init.zeros_(self.tail.bias)
 
     def forward(self, latent: torch.Tensor, small: torch.Tensor) -> torch.Tensor:
+        if self.global_tone is not None:
+            small = self.global_tone(latent, small)
         x = self.head(small)
         z = upsample(self.latent(latent), x.shape[-2:])
         return small + self.tail(self.trunk(self.fuse(torch.cat((x, z), dim=1))))
@@ -327,8 +379,11 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_width: int = 64, edge_blocks: int = 6, color_scale: int = 2, illumination_scale: int = 8,
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
+        color_global: bool = False,
     ) -> None:
         super().__init__()
+        if color_global and branch_arch == "unet":
+            raise ValueError("color_global works on the ResNet colour branch (resnet or unet_edge)")
         self.color_scale = int(color_scale)
         self.illumination_scale = int(illumination_scale)
         self.branch_arch = branch_arch
@@ -340,11 +395,11 @@ class SplitColorEdgeDecoder(nn.Module):
             # Multi-scale CNN where the edges are: near features (single edges,
             # small objects) at the top levels, overall features (layout, what an
             # object is, exposure) at the bottom. Colour keeps p8's branch and names.
-            self.color = ColorBranch(latent_channels, color_width, color_blocks)
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
             self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
-            self.color = ColorBranch(latent_channels, color_width, color_blocks)
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
             self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
                                            in_channels=2, out_channels=1)
         else:

@@ -262,13 +262,14 @@ def color_edge_split_loss(
     color_weight: float,
     edge_weight: float,
     gradient_weight: float,
+    stats_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Separate targets for the two branches of the split decoder.
 
     Colour: chroma of the base and the illumination against the same pieces of
-    the clean frame -- L1, whose mean answer is the right colour. Edges: the
-    luminance detail against the clean frame's. Optionally the luminance
-    gradient of the whole output, which scores edge slopes directly.
+    the clean frame, with L1. Edges: the luminance detail against the clean
+    frame's. Optionally the luminance gradient of the whole output, which scores
+    edge slopes directly, and ``stats_weight`` for color_statistics_l1.
     """
     with torch.no_grad():
         base_t, light_t, detail_t = split_targets(clean, color_scale, illumination_scale)
@@ -276,11 +277,40 @@ def color_edge_split_loss(
     edge = F.l1_loss(detail, detail_t)
     total = color_weight * color + edge_weight * edge
     parts = {"image_color_l1": color, "image_edge_detail_l1": edge}
+    if stats_weight > 0:
+        stats = color_statistics_l1(base, light, base_t, light_t)
+        total = total + stats_weight * stats
+        parts["image_color_stats_l1"] = stats
     if gradient_weight > 0:
         gradient = luminance_gradient_l1(restored, clean)
         total = total + gradient_weight * gradient
         parts["image_edge_gradient_l1"] = gradient
     return total, parts
+
+
+def _color_statistics(base: torch.Tensor, light: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # eps inside every sqrt: clipped-black pixels have chroma exactly 0 and flat
+    # frames a variance of 0, where a bare sqrt has an infinite gradient.
+    colour = chroma(base).flatten(2)
+    return torch.cat((
+        (colour.square().sum(1) + eps).sqrt().mean(-1, keepdim=True),      # saturation
+        (colour.var(-1) + eps).sqrt(),                                    # spread of Cb, Cr
+        (light.flatten(1).var(-1, keepdim=True) + eps).sqrt(),            # contrast
+    ), dim=1)
+
+
+def color_statistics_l1(
+    base: torch.Tensor, light: torch.Tensor, base_target: torch.Tensor, light_target: torch.Tensor
+) -> torch.Tensor:
+    """L1 between per-image colour statistics: saturation, chroma spread, contrast.
+
+    Per-pixel L1 answers an uncertain hue with the median, which leans to grey,
+    and an uncertain brightness with a flatter one: a washed-out image scores
+    well there. These per-image numbers do not move when colours are only
+    shuffled between pixels, but they drop when the image goes grey or flat --
+    exactly what per-pixel L1 lets through.
+    """
+    return F.l1_loss(_color_statistics(base, light), _color_statistics(base_target, light_target))
 
 
 def first_difference_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

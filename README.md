@@ -18,6 +18,14 @@ ngang p8) để học cả **đặc trưng nhỏ** lẫn **đặc trưng tổng 
 (`split_branch_arch: unet_edge`). p11 **dùng lại phase 1 của p8** (tức của p5) nên chỉ train
 phase 2 và so thẳng được với báo cáo p8 — notebook lấy luôn recipe phase 1 từ archive.
 
+p11 cũng sửa **màu nhạt** của p8 (chỉ ở nhánh màu, nên tách được với U-Net: nhánh đường nét
+không đổi được màu). L1 từng pixel trả lời một màu không chắc bằng trung vị — nghiêng về xám; và
+hỏng ảnh là toàn cục (gain từng kênh, exposure, gamma 0,46–0,79 kéo các kênh lại gần nhau) trong
+khi thân nhánh màu chỉ nhìn ~66 px. Hai sửa: **đầu tone/màu toàn ảnh** (`split_color_global`:
+`out = M·x^p + b` cho cả ảnh, tính từ toàn ảnh + ZI, zero-init) và **loss thống kê màu từng ảnh**
+(`split_color_stats_weight`: độ đậm màu, độ trải Cb/Cr, tương phản). Báo cáo có thêm dòng **độ
+đậm màu** và **tương phản** so với ảnh sạch (1,00 = như ảnh sạch).
+
 Recipe phase 1 trong repo là **p10** (chạy khi đặt `REUSE_PHASE1_FROM = None`), năm thay đổi
 cho JEPA, mỗi cái một khoá trong `phase1` để tắt riêng:
 

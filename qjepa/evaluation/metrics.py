@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from ..models.color_edge import color_error
+from ..models.color_edge import chroma, color_error, downsample, luminance
 
 
 def _ssim(restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
@@ -66,6 +66,25 @@ def spectral_ratios(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, fl
     }
 
 
+def color_vividness(restored: torch.Tensor, clean: torch.Tensor, scale: int = 4) -> dict[str, float]:
+    """How vivid and how contrasty ``restored`` is, with the clean frame's values.
+
+    ``image_saturation`` is the mean chroma magnitude sqrt(Cb^2 + Cr^2) and
+    ``image_contrast`` the standard deviation of luminance, both after averaging
+    ``scale`` x ``scale`` blocks so colour noise and fine texture do not count.
+    The ``_clean`` keys hold the clean frame's values; the report divides the
+    means, so 1.00 = as vivid / as contrasty as clean. L1 on chroma pulls the hue
+    towards grey wherever it is uncertain, and the colour error cannot tell that
+    washed-out look from a colour cast -- these can.
+    """
+    values = {}
+    for name, image in (("", restored), ("_clean", clean)):
+        small = downsample(image, scale)
+        values[f"image_saturation{name}"] = float(chroma(small).square().sum(1).sqrt().mean())
+        values[f"image_contrast{name}"] = float(luminance(small).flatten(1).std(dim=1).mean())
+    return values
+
+
 def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, float]:
     restored = restored.clamp(0.0, 1.0)
     clean = clean.clamp(0.0, 1.0)
@@ -80,6 +99,7 @@ def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, floa
         **spectral_ratios(restored, clean),
         # Chroma after 4x4 averaging: colour cast and colour noise, not sharpness.
         "image_color_error": float(color_error(restored, clean)),
+        **color_vividness(restored, clean),
     }
 
 

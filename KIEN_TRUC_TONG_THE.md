@@ -14,7 +14,8 @@
    JEPA, cùng VICReg, decoder neo và **Jacobian**, dùng để train backbone. Jacobian ép encoder
    nhạy với đường nét và bỏ qua nhiễu.
 3. **③ Phase 2 (xanh lá).** Backbone **đóng băng**. Decoder ảnh nhận ZI và **chính ảnh mờ**
-   (mũi tên skip), gồm hai nhánh rồi **ghép**. Nhánh **màu** là ResNet ở 128×128 (như p8). Nhánh
+   (mũi tên skip), gồm hai nhánh rồi **ghép**. Nhánh **màu** ở 128×128: trước hết một đường cong
+   tone + ma trận màu **cho cả ảnh** (gỡ gamma, cân bằng trắng), rồi ResNet sửa màu từng vùng. Nhánh
    **đường nét** (kênh sáng Y, 256×256) là một **U-Net** 5 tầng: **Encoder** thu nhỏ ÷2 mỗi tầng, từ
    **đặc trưng nhỏ** (cạnh, vật nhỏ) tới **đặc trưng tổng thể** (bố cục, vật là gì, độ sáng chung);
    **Bottleneck** 16×16 nhận **ZI**; **Decoder** phóng ×2 trở lại; **skip connection** mang đặc trưng

@@ -167,7 +167,8 @@ def test_unet_edge_needs_only_the_edge_widths():
 def test_phase2_trains_both_unet_branches_and_leaves_the_backbone_alone(arch):
     config = copy.deepcopy(load_config("configs/smoke.yaml"))
     config["phase2"].update(split_branch_arch=arch, split_color_unet_widths=[4, 6, 8],
-                            split_edge_unet_widths=[4, 6, 8, 12], split_unet_blocks=1)
+                            split_edge_unet_widths=[4, 6, 8, 12], split_unet_blocks=1,
+                            split_color_global=arch != "unet")   # the global head needs the ResNet colour branch
     validate_config(config)
     seed_everything(3)
     phase1 = build_phase1_model(config, ImuNormalizer())

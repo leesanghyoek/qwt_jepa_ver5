@@ -125,6 +125,7 @@ class Phase2Trainer:
                     color_weight=float(self.phase["split_color_weight"]),
                     edge_weight=float(self.phase["split_edge_weight"]),
                     gradient_weight=float(self.phase["split_gradient_weight"]),
+                    stats_weight=float(self.phase.get("split_color_stats_weight", 0.0)),
                 )
                 loss = loss + split_loss
                 parts.update(split_parts)

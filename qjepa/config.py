@@ -198,6 +198,15 @@ def validate_config(config: dict[str, Any]) -> None:
             blocks = phase2.get("split_unet_blocks")
             if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < 1:
                 raise ValueError("phase2.split_unet_blocks must be a positive integer")
+        # Absent in p8-era configs: off, so their checkpoints and hashes stay as they were.
+        color_global = phase2.get("split_color_global", False)
+        if not isinstance(color_global, bool):
+            raise ValueError("phase2.split_color_global must be true or false")
+        if color_global and arch == "unet":
+            raise ValueError("phase2.split_color_global needs the ResNet colour branch (resnet or unet_edge)")
+        stats = phase2.get("split_color_stats_weight", 0.0)
+        if isinstance(stats, bool) or not isinstance(stats, (int, float)) or stats < 0:
+            raise ValueError("phase2.split_color_stats_weight must be a nonnegative number")
     if image_decoder == "resnet_pixel":
         # Explicit, like skip_gating: the hash must record the trained width/depth.
         for key in ("image_resnet_width", "image_resnet_blocks"):
@@ -385,6 +394,7 @@ def build_decoders(
             "color_widths": tuple(config["phase2"].get("split_color_unet_widths", (12, 16, 24, 32))),
             "edge_widths": tuple(config["phase2"].get("split_edge_unet_widths", (16, 24, 32, 48, 56))),
             "unet_blocks": int(config["phase2"].get("split_unet_blocks", 1)),
+            "color_global": bool(config["phase2"].get("split_color_global", False)),
         },
     )
 
