@@ -320,6 +320,17 @@ phase2:
   split_color_weight: 1.0       # L1 cua Cb, Cr va do sang nen
   split_edge_weight: 1.0        # L1 cua chi tiet kenh sang
   split_gradient_weight: 1.0    # L1 do doc canh cua Y: nhanh C, tot nhat trong A/B
+  # Huong cua mentor: nhanh DUONG NET la CNN nhieu tang (U-Net, "pheu-loa") de hoc
+  # ca dac trung NHO (canh don, vat nho — tang tren, o nhin 7-18 px) lan dac trung
+  # TONG THE (bo cuc, vat la gi, do sang chung — tang duoi, o nhin 204 px, noi ZI
+  # 16x16 vao). Nhanh MAU giu ResNet cua p8 (unet_edge). 5 tang 256->16.
+  # A/B cuc bo truoc day (cung 0,63 M tham so voi p8) THUA p8 vi tang 256/128 chi
+  # con 16-24 kenh. Ban nay giu 64 kenh o 128x128 nhu p8, them tang 256x256 (32
+  # kenh) va cac tang sau: 2,9 M tham so (p8: 0,65 M), tinh toan 12,0 GMAC/anh
+  # (p8: 11,5) — cung thoi gian, nhieu tang sau hon.
+  split_branch_arch: unet_edge
+  split_edge_unet_widths: [32, 64, 64, 96, 128]
+  split_unet_blocks: 1
   # Van chon duoc: image_decoder: resnet_pixel dung hai khoa duoi.
   image_resnet_width: 64
   image_resnet_blocks: 8

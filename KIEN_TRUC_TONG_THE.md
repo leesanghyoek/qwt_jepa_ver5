@@ -14,15 +14,15 @@
    JEPA, cùng VICReg, decoder neo và **Jacobian**, dùng để train backbone. Jacobian ép encoder
    nhạy với đường nét và bỏ qua nhiễu.
 3. **③ Phase 2 (xanh lá).** Backbone **đóng băng**. Decoder ảnh nhận ZI và **chính ảnh mờ**
-   (mũi tên skip), gồm hai nhánh, mỗi nhánh là một **U-Net** (phễu–loa): **Encoder** thu nhỏ ÷2 mỗi
-   tầng (đặc trưng nông → sâu), **Bottleneck** 16×16 nhận **ZI**, **Decoder** phóng ×2 trở lại, **skip
-   connection** mang đặc trưng nông từ Encoder sang Decoder. Nhánh **màu** ở 128×128, nhánh **đường
-   nét** trên kênh sáng Y ở 256×256, rồi **ghép**. Decoder IMU nhận ZU. Recipe p8 hiện train mỗi nhánh
-   bằng CNN một tầng; U-Net bật bằng `split_branch_arch: unet`.
+   (mũi tên skip), gồm hai nhánh rồi **ghép**. Nhánh **màu** là ResNet ở 128×128 (như p8). Nhánh
+   **đường nét** (kênh sáng Y, 256×256) là một **U-Net** 5 tầng: **Encoder** thu nhỏ ÷2 mỗi tầng, từ
+   **đặc trưng nhỏ** (cạnh, vật nhỏ) tới **đặc trưng tổng thể** (bố cục, vật là gì, độ sáng chung);
+   **Bottleneck** 16×16 nhận **ZI**; **Decoder** phóng ×2 trở lại; **skip connection** mang đặc trưng
+   nhỏ từ Encoder sang Decoder (`split_branch_arch: unet_edge`, từ p11). Decoder IMU nhận ZU.
 
 | | Phase 1 | Phase 2 |
 |---|---|---|
-| Train | backbone 1,33 M (+ 2 predictor 0,24 M, bỏ sau phase 1) | decoder ảnh 0,79 M + decoder IMU 0,36 M |
+| Train | backbone 1,33 M (+ 2 predictor 0,24 M, bỏ sau phase 1) | decoder ảnh 3,02 M (màu 0,14 M + đường nét U-Net 2,88 M) + decoder IMU 0,36 M |
 | Loss | JEPA (+ mịn 0,5, thô 0,25) · VICReg (covariance gộp) · decoder neo 0,45 · Jacobian 0,05 | L1 ảnh · chi tiết QWT · màu · đường nét · độ dốc cạnh · IMU |
 
 Chi tiết từng lớp: [README](README.md#kiến-trúc-chi-tiết). Vẽ lại hình:

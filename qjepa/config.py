@@ -182,11 +182,12 @@ def validate_config(config: dict[str, Any]) -> None:
             if side % phase2["split_color_scale"] or side % phase2["split_illumination_scale"]:
                 raise ValueError("phase2 split scales must divide the image sides")
         arch = phase2.get("split_branch_arch", "resnet")
-        if arch not in ("resnet", "unet"):
-            raise ValueError("phase2.split_branch_arch must be resnet or unet")
-        if arch == "unet":
-            for key, scale in (("split_color_unet_widths", phase2["split_color_scale"]),
-                               ("split_edge_unet_widths", 1)):
+        if arch not in ("resnet", "unet", "unet_edge"):
+            raise ValueError("phase2.split_branch_arch must be resnet, unet or unet_edge")
+        if arch in ("unet", "unet_edge"):
+            unet_keys = (("split_color_unet_widths", phase2["split_color_scale"]),
+                         ("split_edge_unet_widths", 1))
+            for key, scale in unet_keys if arch == "unet" else unet_keys[1:]:
                 widths = phase2.get(key)
                 if (not isinstance(widths, (list, tuple)) or len(widths) < 2
                         or any(isinstance(w, bool) or not isinstance(w, int) or w < 1 for w in widths)):

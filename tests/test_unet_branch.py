@@ -4,7 +4,8 @@ The funnel halves the resolution down to the latent's grid, where ZI joins;
 the loudspeaker doubles it back with a skip at every level. These pin what the
 branches must keep from p8: an identity start, colour the edge branch cannot
 touch, an edge loss that cannot train the colour branch, and p8 checkpoints
-that still load (split_branch_arch defaults to resnet).
+that still load (split_branch_arch defaults to resnet). ``unet_edge`` -- the
+recipe since p11 -- puts the U-Net on the edge branch only and keeps p8's colour.
 """
 
 from __future__ import annotations
@@ -107,9 +108,65 @@ def test_invalid_unet_settings_are_rejected():
         validate_config(config)
 
 
-def test_phase2_trains_both_unet_branches_and_leaves_the_backbone_alone():
+def test_unet_edge_keeps_the_p8_colour_branch_and_puts_the_unet_on_the_edges():
+    torch.manual_seed(0)
+    decoder = SplitColorEdgeDecoder(32, color_width=8, color_blocks=2, branch_arch="unet_edge",
+                                    edge_widths=(4, 6, 8, 12))
+    p8 = SplitColorEdgeDecoder(32, color_width=8, color_blocks=2)
+    assert isinstance(decoder.color, ColorBranch) and isinstance(decoder.edge, UNetBranch)
+    assert set(decoder.color.state_dict()) == set(p8.color.state_dict())
+    latent, image = _inputs()
+    out, _ = decoder(latent, image)                  # identity start, as p8
+    assert torch.allclose(luminance(out), luminance(image), atol=1e-6)
+
+
+def test_the_edge_loss_cannot_train_the_colour_branch_with_unet_edge():
+    torch.manual_seed(0)
+    decoder = SplitColorEdgeDecoder(32, color_width=8, color_blocks=2, branch_arch="unet_edge",
+                                    edge_widths=(4, 6, 8, 12))
+    with torch.no_grad():
+        for parameter in list(decoder.color.tail.parameters()) + list(decoder.edge.tail.parameters()):
+            parameter.normal_(0.0, 0.1)
+    latent, image = _inputs()
+    out, parts = decoder(latent, image)
+    _, loss_parts = color_edge_split_loss(parts["image_color_base"], parts["image_illumination"],
+                                          parts["image_detail"], out, torch.rand_like(image), color_scale=2,
+                                          illumination_scale=8, color_weight=1.0, edge_weight=1.0,
+                                          gradient_weight=0.0)
+    loss_parts["image_edge_detail_l1"].backward()
+    assert all(p.grad is None or float(p.grad.abs().max()) == 0.0 for p in decoder.color.parameters())
+    assert any(p.grad is not None and float(p.grad.abs().max()) > 0.0 for p in decoder.edge.parameters())
+
+
+def test_the_recipe_edge_unet_bottom_sits_on_the_latent_grid():
+    config = load_config("configs/kaggle_tartanair_v2.yaml")
+    phase2 = config["phase2"]
+    assert phase2["split_branch_arch"] == "unet_edge"
+    levels = len(phase2["split_edge_unet_widths"])
+    side = config["data"]["image_size"][0]
+    assert side // 2 ** (levels - 1) == 16             # ZI is 128 x 16 x 16
+    edge = build_decoders(config).image.edge
+    assert isinstance(edge, UNetBranch)
+    latent = torch.randn(1, 128, 16, 16)
+    x = torch.rand(1, 2, side, side)                   # luminance + illumination
+    assert edge(latent, x, base=x[:, :1]).shape == (1, 1, side, side)
+
+
+def test_unet_edge_needs_only_the_edge_widths():
     config = copy.deepcopy(load_config("configs/smoke.yaml"))
-    config["phase2"].update(split_branch_arch="unet", split_color_unet_widths=[4, 6, 8],
+    config["phase2"].update(split_branch_arch="unet_edge", split_edge_unet_widths=[4, 6, 8, 12],
+                            split_unet_blocks=1)
+    config["phase2"].pop("split_color_unet_widths", None)
+    validate_config(config)
+    config["phase2"].pop("split_edge_unet_widths")
+    with pytest.raises(ValueError, match="split_edge_unet_widths"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("arch", ["unet", "unet_edge"])
+def test_phase2_trains_both_unet_branches_and_leaves_the_backbone_alone(arch):
+    config = copy.deepcopy(load_config("configs/smoke.yaml"))
+    config["phase2"].update(split_branch_arch=arch, split_color_unet_widths=[4, 6, 8],
                             split_edge_unet_widths=[4, 6, 8, 12], split_unet_blocks=1)
     validate_config(config)
     seed_everything(3)

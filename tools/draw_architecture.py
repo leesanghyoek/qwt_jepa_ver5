@@ -72,7 +72,7 @@ fus = node(535, 280, 125, 80, 'bb', 'Fusion', ['có cổng'])
 # ---------------- latent
 zi = node(705, 205, 110, 70, 'lat', 'ZI', ['128 × 16 × 16'])
 zu = node(705, 365, 110, 70, 'lat', 'ZU', ['128 × 8'])
-# ---------------- phase 2: image decoder = two U-Net branches (encoder / bottleneck / decoder)
+# ---------------- phase 2: image decoder = colour ResNet + edge U-Net (encoder / bottleneck / decoder)
 def unet_block(x, yc, kind, title, below=False):
     """One branch as a U-Net at block level: Encoder -> Bottleneck (ZI joins) -> Decoder, skip across."""
     fill, stroke = C[kind]
@@ -96,8 +96,8 @@ def unet_block(x, yc, kind, title, below=False):
 
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
-colb = unet_block(FX, 200, 'color', 'Nhánh MÀU (U-Net) · 128²')
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT (U-Net) · 256² · Y', below=True)
+colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet', ['128² · màu + độ sáng nền'], title_size=14)
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · U-Net · 256² · Y', below=True)
 join = node(1172, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1272, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
@@ -121,9 +121,9 @@ arrow([(660, 335), (685, 335), (685, 400), (705, 400)])
 DX = FX + 116
 el.append(f'<path d="M 815 240 L 845 240 L 845 260 L 878 260 A 7 7 0 0 1 892 260 L {DX} 260" '
           f'fill="none" stroke="#8E24AA" stroke-width="2.4"/>')
-arrow([(DX, 260), (DX, 213)], color='#8E24AA', width=2.4)
+arrow([(DX, 260), (DX, 232)], color='#8E24AA', width=2.4)
 arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
-text(962, 254, 'ZI → Bottleneck', size=12, weight='bold', color='#8E24AA')
+text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA')
 # the blurry image into the funnel of both branches
 arrow([(95, 205), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
       label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)

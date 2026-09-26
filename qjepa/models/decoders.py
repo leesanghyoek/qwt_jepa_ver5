@@ -336,13 +336,19 @@ class SplitColorEdgeDecoder(nn.Module):
             # Funnel and loudspeaker on both branches, latent at the bottom.
             self.color = UNetBranch(3, 3, latent_channels, tuple(color_widths), unet_blocks)
             self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
+        elif branch_arch == "unet_edge":
+            # Multi-scale CNN where the edges are: near features (single edges,
+            # small objects) at the top levels, overall features (layout, what an
+            # object is, exposure) at the bottom. Colour keeps p8's branch and names.
+            self.color = ColorBranch(latent_channels, color_width, color_blocks)
+            self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
             self.color = ColorBranch(latent_channels, color_width, color_blocks)
             self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
                                            in_channels=2, out_channels=1)
         else:
-            raise ValueError("branch_arch must be resnet or unet")
+            raise ValueError("branch_arch must be resnet, unet or unet_edge")
 
     def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         size = image.shape[-2:]

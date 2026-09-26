@@ -12,9 +12,14 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle hiện tại là **p10** (`configs/kaggle_tartanair_v2.yaml`, OUT
-`outputs/p10_jepa_context`): **train lại phase 1** (5.000 update) với năm thay đổi cho
-JEPA, mỗi cái một khoá trong `phase1` để tắt riêng:
+Run Kaggle hiện tại là **p11** (OUT `outputs/p11_unet_edge`), theo hướng của mentor: nhánh
+**đường nét** là **U-Net** 5 tầng (256² → 16², 32/64/64/96/128 kênh, 2,9 M tham số, tính toán
+ngang p8) để học cả **đặc trưng nhỏ** lẫn **đặc trưng tổng thể**; nhánh màu giữ ResNet của p8
+(`split_branch_arch: unet_edge`). p11 **dùng lại phase 1 của p8** (tức của p5) nên chỉ train
+phase 2 và so thẳng được với báo cáo p8 — notebook lấy luôn recipe phase 1 từ archive.
+
+Recipe phase 1 trong repo là **p10** (chạy khi đặt `REUSE_PHASE1_FROM = None`), năm thay đổi
+cho JEPA, mỗi cái một khoá trong `phase1` để tắt riêng:
 
 - **A** — log *JEPA chuẩn hoá* (JEPA ÷ JEPA của cách đoán một token cố định) và cosine,
   vì JEPA thô **tăng** khi latent mang nhiều thông tin hơn;
@@ -67,7 +72,8 @@ Mỗi thay đổi đều kèm phép đo chứ không phải lời khẳng địn
 dùng được. Từ p5 trở đi phase 1 không đổi (hash `ef8ef433`); ba thay đổi sau đó — loss
 chi tiết, cách chấm, decoder ảnh — chỉ ở phase 2, nên p6/p7/p8 dùng lại phase 1 của p5. p9 đổi
 covariance VICReg nên hash phase 1 đổi (`4389b3c6`); p10 đổi thêm predictor, masking,
-đích nhiều tỉ lệ và EMA (`679dffff`), nên p10 train lại cả hai phase. Các khoá mới nằm
+đích nhiều tỉ lệ và EMA (`679dffff`), nên p10 train lại cả hai phase. p11 chỉ đổi phase 2
+nên dùng lại phase 1 của p5 (`ef8ef433`), recipe phase 1 lấy từ archive. Các khoá mới nằm
 trong `phase1`, nên hash phase 2 không đổi. Run sau chỉ đổi phase 2 thì dùng lại phase 1
 của p10.
 
@@ -187,6 +193,11 @@ có skip ở mỗi tầng. Cùng phase 1, cùng 600 update, **cùng số tham s�
 32×32), còn tầng 256×256 và 128×128 — nơi có đường nét — chỉ còn 16–24 kênh, so với 64 kênh ở
 128×128 của p8. Dải 2–4 px (chi tiết của vật nhỏ, vật ở xa) đứng yên ở mức ảnh vào với **mọi**
 kiến trúc đã thử: thông tin đó đã mất trong ảnh mờ. Recipe giữ p8; tùy chọn vẫn chọn được.
+
+**p11: U-Net chỉ ở nhánh đường nét** (`split_branch_arch: unet_edge`, hướng của mentor). Rút từ
+phép thử trên: giữ 64 kênh ở 128×128 như p8, thêm tầng 256×256 (32 kênh) và các tầng sâu
+(64/96/128): 2,9 M tham số, 12,0 GMAC/ảnh (p8: 0,65 M, 11,5 GMAC). Nhánh màu giữ ResNet p8.
+Chưa có số đo — kết quả trên Kaggle quyết định.
 
 ## Decoder ảnh ResNet (p7)
 
