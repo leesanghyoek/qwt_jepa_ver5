@@ -226,6 +226,9 @@ def validate_config(config: dict[str, Any]) -> None:
                 raise ValueError(f"phase2.image_decoder resnet_pixel needs a positive integer phase2.{key}")
         if data["image_size"][0] % 2 or data["image_size"][1] % 2:
             raise ValueError("phase2.image_decoder resnet_pixel needs even image sides")
+    perceptual = phase2.get("perceptual_weight", 0.0)
+    if isinstance(perceptual, bool) or not isinstance(perceptual, (int, float)) or perceptual < 0:
+        raise ValueError("phase2.perceptual_weight must be a nonnegative number")
     if phase2.get("smooth_l1_beta", 0.0) <= 0:
         raise ValueError("phase2.smooth_l1_beta must be positive")
     scenarios = phase2.get("train_scenarios")

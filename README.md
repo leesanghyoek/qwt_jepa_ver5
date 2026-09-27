@@ -12,7 +12,16 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle mới nhất là **p13** (OUT `outputs/p13_nafnet_edge`), chỉ đổi phase 2 so với p12 và
+Run Kaggle mới nhất là **p14** (OUT `outputs/p14_fine_detail`), chỉ đổi phase 2 so với p13 và
+dùng lại phase 1 của p12/p13. p13 khôi phục đường nét 4–16 px tới 0,94 ảnh sạch nhưng giữ chi tiết
+2 px ở 0,47 — thấp hơn cả ảnh vào (0,66): vật nhỏ, vật xa vẫn mờ. p14: (1) tầng 256² của NAFNet —
+tầng duy nhất vẽ được chi tiết 2 px — rộng và sâu hơn, 48 kênh × (3 + 3) khối (p13: 32 × (2 + 2));
+3,2 M tham số, 10,7 GMAC/ảnh; (2) **loss đặc trưng VGG16** (relu1_2/2_2/3_3, không phải GAN),
+trọng số 0,05 — phạt mảng phẳng, đổi lại có thể thưởng texture hợp lý thay vì texture thật; cần
+Internet lần đầu để tải trọng số (528 MB); (3) chỉ số **đúng chỗ** có tính pha: đường nét 4–16 px
+và **vật nhỏ/xa 2–4 px** — nhiễu và texture bịa không được tính điểm.
+
+p13 (OUT `outputs/p13_nafnet_edge`), chỉ đổi phase 2 so với p12 và
 dùng lại phase 1 của p12: nhánh đường nét là **NAFNet** (Chen và cộng sự, ECCV 2022) — cùng khung
 U-Net 5 tầng, ZI vào đáy 16×16, nhưng mỗi khối là NAFBlock (LayerNorm, conv depthwise, SimpleGate,
 channel attention); 26 khối, 3,1 M tham số, 6,5 GMAC/ảnh (U-Net p11: 2,9 M, 12,0 GMAC). Thêm

@@ -344,10 +344,13 @@ phase2:
   # so, 6,5 GMAC/anh (U-Net p11: ~10 khoi, 2,9 M, 12,0 GMAC). Ban U-Net p11: unet_edge +
   # split_edge_unet_widths/split_unet_blocks ben duoi.
   split_branch_arch: nafnet_edge
-  split_edge_naf_widths: [32, 64, 96, 128, 160]
-  split_edge_naf_enc_blocks: [2, 2, 4, 4]
+  # p14: tang 256x256 — tang DUY NHAT ve duoc chi tiet chu ky 2 px (vat nho, vat xa) — rong
+  # hon va sau hon: 48 kenh x (3 + 3) khoi (p13: 32 x (2 + 2)). 3,2 M tham so, 10,7 GMAC/anh.
+  # p13 giu chi tiet 2 px o 0,47 ảnh sach, con thap hon ca anh vao (0,66).
+  split_edge_naf_widths: [48, 64, 96, 128, 160]      # p13: [32, 64, 96, 128, 160]
+  split_edge_naf_enc_blocks: [3, 2, 4, 4]            # p13: [2, 2, 4, 4]
   split_edge_naf_middle_blocks: 8
-  split_edge_naf_dec_blocks: [2, 2, 2, 2]
+  split_edge_naf_dec_blocks: [3, 2, 2, 2]            # p13: [2, 2, 2, 2]
   # Giam sat nhieu ti le (MIMO-UNet): tang decoder o 128x128 va 64x64 cung phai ra chi tiet
   # dung (so voi chi tiet sach thu nho), nen tang sau tu sua vet mo lon.
   split_edge_aux_factors: [2, 4]
@@ -356,6 +359,13 @@ phase2:
   # cho qua. Khac modulus/energy (bo qua pha -> soc 2 px). Tren anh nhieu B no bat dau o
   # ~0,73x L1 chi tiet, nen trong so 1,0 = hai so hang cung co.
   split_edge_fft_weight: 1.0
+  # p14: loss dac trung VGG16 (relu1_2, relu2_2, relu3_3; Johnson va cong su 2016) tren anh
+  # khoi phuc — KHONG phai GAN. Loss tung pixel tra loi texture khong chac bang mot mang
+  # phang; trong khong gian VGG mang phang va mang co texture khac nhau ro. Danh doi: o cho
+  # anh vao da mat chi tiet, no thuong texture HOP LY chu khong chac la texture THAT. Moi
+  # tang chia cho do lon kich hoat cua anh sach, nen 0.05 ~ 5% sai so tuong doi. Can Internet
+  # lan dau de tai trong so ImageNet (528 MB); tat bang 0.0.
+  perceptual_weight: 0.05
   split_edge_unet_widths: [32, 64, 64, 96, 128]
   split_unet_blocks: 1
   # Mau nhat (p8: anh khoi phuc nhat mau hon anh goc). Hai nguyen nhan: (1) L1 tung

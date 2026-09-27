@@ -54,7 +54,7 @@ PHASE1_TERMS = ("loss", "jepa", "jepa_image", "jepa_imu", "jepa_image_fine", "je
 PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1",
                 "image_detail_energy", "image_detail_invisible_fraction",
                 "image_color_l1", "image_color_stats_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
-                "image_edge_fft_l1", "image_edge_aux_l1",
+                "image_edge_fft_l1", "image_edge_aux_l1", "image_perceptual",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -300,6 +300,13 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
                            ("image_stripe_power", "sọc (chu kỳ 2 px) — ~1 là tốt")):
             print(f"  {label:<34}{fmt(final.get('validation_baseline_' + key), 12, 3)}"
                   f"{fmt(final.get('validation_' + key), 12, 3)}")
+        # Power counts noise and invented texture; these count only detail at the right place.
+        if isinstance(final.get("validation_image_fine_detail_in_place"), (int, float)):
+            print("  — đúng chỗ (có tính pha: nhiễu và texture bịa không được tính) —")
+            for key, label in (("image_edge_in_place", "đường nét 4-16 px đúng chỗ ↑"),
+                               ("image_fine_detail_in_place", "vật nhỏ/xa 2-4 px đúng chỗ ↑")):
+                print(f"  {label:<34}{fmt(final.get('validation_baseline_' + key), 12, 3)}"
+                      f"{fmt(final.get('validation_' + key), 12, 3)}")
         stripe = final["validation_image_stripe_power"]
         if stripe > 1.5:
             findings.append(
@@ -452,6 +459,7 @@ def config_section(run: Path) -> None:
         ("phase2.split_edge_naf_widths", ("phase2", "split_edge_naf_widths")),
         ("phase2.split_edge_fft_weight", ("phase2", "split_edge_fft_weight")),
         ("phase2.split_edge_aux_weight", ("phase2", "split_edge_aux_weight")),
+        ("phase2.perceptual_weight", ("phase2", "perceptual_weight")),
         ("corruption.image.photon_count", ("corruption", "image", "photon_count")),
         ("corruption.image.noise_only_probability", ("corruption", "image", "noise_only_probability")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),

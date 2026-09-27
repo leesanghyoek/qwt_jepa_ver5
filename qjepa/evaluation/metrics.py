@@ -30,8 +30,8 @@ def _ssim(restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
     return score.mean()
 
 
-def _luma_power(image: torch.Tensor) -> torch.Tensor:
-    """Windowed luma power spectrum, summed over the batch."""
+def _luma_spectrum(image: torch.Tensor) -> torch.Tensor:
+    """Windowed complex luma spectrum per image, [B, H, W]."""
     luma = image[:, 0] * 0.299 + image[:, 1] * 0.587 + image[:, 2] * 0.114
     height, width = luma.shape[-2:]
     window = torch.outer(
@@ -39,11 +39,12 @@ def _luma_power(image: torch.Tensor) -> torch.Tensor:
         torch.hann_window(width, periodic=False, dtype=luma.dtype, device=luma.device),
     )
     luma = (luma - luma.mean(dim=(-2, -1), keepdim=True)) * window
-    return torch.fft.fft2(luma).abs().square().sum(0)
+    return torch.fft.fft2(luma)
 
 
 def spectral_ratios(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, float]:
-    """Edge-band and stripe power of ``restored``, each relative to ``clean``.
+    """Edge-band and stripe power of ``restored``, each relative to ``clean``, and
+    how much of the clean detail sits in place.
 
     PSNR/SSIM cannot tell real sharpening from a fixed high-frequency pattern.
     ``image_edge_power`` is the power at periods of 4-16 px, where edges and
@@ -52,17 +53,30 @@ def spectral_ratios(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, fl
     detail band lands in full: LH -> horizontal stripes, HL -> vertical, HH ->
     checkerboard. It is floored at 0.1% of the clean frame's power so smooth
     frames do not divide by ~0. Well above 1 means stripes the clean frame lacks.
+
+    Power counts noise and invented texture as detail. The ``_in_place`` ratios do
+    not: Re sum(F_restored * conj(F_clean)) / sum(|F_clean|^2) over a band -- the
+    part of the clean frame's detail the output reproduces with the right phase,
+    i.e. at the right place. Noise and made-up texture are uncorrelated with the
+    clean frame and add ~0. 1.0 = all of it, 0 = none. ``image_fine_detail_in_place``
+    covers periods of 2-4 px: small and distant objects. Same 0.1% floor.
     """
-    got, want = _luma_power(restored), _luma_power(clean)
+    got_spectrum, want_spectrum = _luma_spectrum(restored), _luma_spectrum(clean)
+    got, want = got_spectrum.abs().square().sum(0), want_spectrum.abs().square().sum(0)
+    shared = (got_spectrum * want_spectrum.conj()).real.sum(0)
     height, width = got.shape
     fy = torch.fft.fftfreq(height, device=got.device).abs()[:, None]
     fx = torch.fft.fftfreq(width, device=got.device).abs()[None, :]
     band = torch.maximum(fy, fx)
     edge = (band >= 1 / 16) & (band < 1 / 4)
+    fine = band >= 1 / 4
     stripe = (fy >= 0.5 - 2 / height) | (fx >= 0.5 - 2 / width)
+    floor = 1e-3 * want.sum()
     return {
         "image_edge_power": float(got[edge].sum() / want[edge].sum().clamp_min(1e-12)),
-        "image_stripe_power": float(got[stripe].sum() / (want[stripe].sum() + 1e-3 * want.sum()).clamp_min(1e-12)),
+        "image_stripe_power": float(got[stripe].sum() / (want[stripe].sum() + floor).clamp_min(1e-12)),
+        "image_edge_in_place": float(shared[edge].sum() / (want[edge].sum() + floor).clamp_min(1e-12)),
+        "image_fine_detail_in_place": float(shared[fine].sum() / (want[fine].sum() + floor).clamp_min(1e-12)),
     }
 
 

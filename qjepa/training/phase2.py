@@ -11,6 +11,7 @@ from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from ..models.decoders import PIXEL_IMAGE_DECODERS
 from .losses import color_edge_split_loss, invisible_detail_fraction, phase2_reconstruction_loss
+from .perceptual import PerceptualLoss
 from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
@@ -41,6 +42,10 @@ class Phase2Trainer:
             lr=self.phase["learning_rate"],
             weight_decay=self.phase["weight_decay"],
         )
+        # Frozen VGG16 feature loss; held by the trainer, not the system, so it never
+        # reaches a checkpoint. Absent from configs written before the key existed.
+        self.perceptual_weight = float(self.phase.get("perceptual_weight", 0.0))
+        self.perceptual = PerceptualLoss().to(device) if self.perceptual_weight > 0 else None
         self.frozen_backbone_hash = state_dict_hash(self.system.backbone)
         self.frozen_normalizer_hash = state_dict_hash(self.system.normalizer)
         self.decoder_initialization_hash = state_dict_hash(self.system.decoders)
@@ -133,6 +138,10 @@ class Phase2Trainer:
                 )
                 loss = loss + split_loss
                 parts.update(split_parts)
+            if self.perceptual is not None:
+                perceptual = self.perceptual(restored["image"], batch["image_clean"])
+                loss = loss + self.perceptual_weight * perceptual
+                parts["image_perceptual"] = perceptual
             with torch.no_grad():
                 parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                     restored["image_coefficients"], visible_coefficients)

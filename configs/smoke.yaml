@@ -37,6 +37,8 @@ encoder_sensitivity:
   ramp_updates: 1
 
 phase2:
+  # Khong tai trong so VGG16 (528 MB) trong smoke/test; tests/test_perceptual.py thu no rieng.
+  perceptual_weight: 0.0
   batch_size: 1
   gradient_accumulation: 1
   max_successful_updates: 1
