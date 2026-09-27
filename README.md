@@ -278,14 +278,14 @@ dùng lại được.
 ```mermaid
 flowchart LR
     CL["Ảnh + IMU<br/><b>SẠCH</b>"]
-    CAM["<b>Camera</b><br/>mờ · tối · nhiễu hạt<br/>JPEG"]
+    CAM["<b>Camera · nhiễu B</b><br/>mờ · tối · nhiễu hạt · JPEG<br/>10% chỉ nhiễu · 10% chỉ tối"]
     ENV["<b>Môi trường</b><br/>nhiễu trắng · bias<br/>rung · spike"]
     XB["<b>Ảnh MỜ</b><br/>3 × 256 × 256"]
     UN["<b>IMU NHIỄU</b><br/>6 × 128"]
     BB["<b>①</b> QWT Hilbert + Haar<br/>2 encoder + fusion"]
     Z["<b>②</b> latent JEPA<br/>ZI · ZU"]
-    L1["<b>Phase 1</b><br/>JEPA · VICReg<br/>Jacobian tỉ số · neo"]
-    RN["<b>③ Tách màu + đường nét</b> · phase 2<br/>màu 128² · đường nét Y 256²<br/>rồi ghép lại"]
+    L1["<b>Phase 1</b><br/>JEPA (che token · đích mịn/thô)<br/>VICReg gộp · Jacobian tỉ số · neo"]
+    RN["<b>③ Tách màu + đường nét</b> · phase 2<br/>màu 128² (tone toàn ảnh + ResNet)<br/>đường nét Y 256² (NAFNet) · ghép lại"]
     DU["decoder IMU<br/>phase 2"]
     RI["<b>Ảnh phục hồi</b>"]
     RU["<b>IMU phục hồi</b>"]
@@ -327,14 +327,16 @@ Phase 2 tải checkpoint phase 1 hợp lệ, đóng băng encoder/fusion/normali
 tạo **decoder hoàn toàn mới** và chỉ tối ưu hai decoder đó. Ảnh được khôi phục bởi
 decoder **tách màu và đường nét** ③: mũi tên đậm là skip đưa chính ảnh mờ 256×256 vào
 (cho biết đường nét nằm ở đâu), còn `ZI` là đặc trưng JEPA học ở phase 1 (cho biết ảnh
-sạch nên trông thế nào). Nhánh màu khôi phục màu và độ sáng nền ở 128×128, nhánh đường
-nét khôi phục mọi cạnh của kênh sáng Y ở 256×256, rồi hai phần được ghép lại. IMU dùng
+sạch nên trông thế nào). Nhánh màu khôi phục màu và độ sáng nền ở 128×128 (một đường cong
+tone + ma trận màu cho cả ảnh, rồi ResNet sửa từng vùng), nhánh đường nét — một **NAFNet** 5
+tầng — khôi phục mọi cạnh của kênh sáng Y ở 256×256, rồi hai phần được ghép lại. IMU dùng
 decoder hệ số Haar. Chi tiết ở sơ đồ 3 bên dưới.
 
 ## Kiến trúc chi tiết
 
 Mọi shape và số tham số dưới đây được **in ra từ chính model** dựng bằng
-`configs/pipeline_v3.yaml`, không phải tính tay. Batch `B` được lược khỏi bảng.
+`configs/pipeline_v3.yaml` (recipe p14), không phải tính tay. Batch `B` được lược khỏi bảng.
+Hình tổng thể một trang: [KIEN_TRUC_TONG_THE.md](KIEN_TRUC_TONG_THE.md).
 
 ### Sơ đồ kiến trúc
 
@@ -379,11 +381,11 @@ flowchart TB
     Z["<b>ZI · ZU</b><br/>latent từ nhánh NHIỄU"]
     F["<b>FI · FU</b><br/>dense feature TRƯỚC fusion"]
     CLEAN["Ảnh + IMU <b>SẠCH</b><br/>chỉ tồn tại lúc train"]
-    TE["<b>Teacher EMA</b><br/>bản sao 2 encoder · KHÔNG gradient<br/>m: 0,99 → 0,999"]
-    PR["<b>Predictor</b> mỗi modality · 66 K<br/>LN → 128→256 → GELU → 256→128<br/>256 token ảnh · 8 token IMU"]
+    TE["<b>Teacher EMA</b><br/>bản sao 2 encoder · KHÔNG gradient<br/>m: 0,99 → 0,9995 · đích 16² + mịn 32²"]
+    PR["<b>Predictor lân cận</b> · ảnh 0,17 M · IMU 0,07 M<br/>LN → 128→256 → 2 conv depthwise 3 → 256→128<br/>ảnh đọc 5×5 token · che 30% token ảnh, 25% IMU"]
     AN["<b>Decoder neo</b> · hệ số TUYỆT ĐỐI<br/>decoder hệ số, chỉ đọc latent<br/>bị vứt khi phase 1 kết thúc"]
-    JE(["<b>JEPA loss</b> · trọng số 1,0<br/>online nhiễu ≈ teacher sạch"])
-    VC(["<b>Variance 1,0 + Covariance 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch"])
+    JE(["<b>JEPA loss</b> · 1,0 + đích mịn 32² · 0,5 + thô 8² · 0,25<br/>online nhiễu ≈ teacher sạch"])
+    VC(["<b>Variance 1,0 + Covariance gộp 0,01</b><br/>8 raw map: FI FU ZI ZU + bản sạch · 64 vị trí"])
     PN["probe <b>NHIỄU</b><br/>clean + ε·(noisy−clean)"]
     PS["probe <b>TÍN HIỆU</b><br/>clean + ε·(clean−lowpass)"]
     FC["<b>FI_clean · FU_clean</b><br/>điểm gốc — đã tính sẵn"]
@@ -423,26 +425,27 @@ thứ*, kéo thẳng về collapse. Tỉ số hai gain thì **không thứ nguy�
 flowchart TB
     IB["<b>Ảnh mờ</b> · 3 × 256 × 256<br/>(QWT synthesis của Ci, tái tạo hoàn hảo)"]
     ZI["<b>ZI</b> · latent JEPA · 128 × 16 × 16<br/>backbone ĐÓNG BĂNG"]
-    subgraph COL["<b>① Nhánh MÀU</b> · 128 × 128 · 0,14 M tham số"]
+    subgraph COL["<b>① Nhánh MÀU</b> · 128 × 128 · 0,16 M tham số"]
         direction TB
         CD["trung bình 2×2<br/>3 × 128 × 128"]
+        CG["<b>tone + màu cho CẢ ẢNH</b> · 26 K<br/>3 conv stride 2 + pool, + ZI → M · x^p + b<br/>gỡ gamma, cân bằng trắng · <b>zero-init</b>"]
         CN["conv 3×3 + latent conv 1×1<br/>nối → 6 khối residual · 32 kênh<br/>conv cuối <b>zero-init</b>"]
         CB["<b>ảnh nền màu</b><br/>3 × 128 × 128 → phóng ×2"]
         CL["<b>độ sáng nền</b> = Y của ảnh nền<br/>trung bình 8×8 → phóng lại<br/>(chu kỳ ≥ 16 px, không có cạnh)"]
-        CD --> CN --> CB --> CL
+        CD --> CG --> CN --> CB --> CL
     end
-    subgraph EDG["<b>② Nhánh ĐƯỜNG NÉT</b> · 256 × 256 · kênh sáng Y · 0,65 M tham số"]
+    subgraph EDG["<b>② Nhánh ĐƯỜNG NÉT</b> · 256 × 256 · kênh sáng Y · NAFNet · 3,18 M tham số"]
         direction TB
         EY["<b>Y ảnh mờ</b> · 1 × 256 × 256<br/>+ độ sáng nền (không truyền gradient ngược)"]
-        EN["ResNet: head 256² → 6 khối residual ở 128²<br/>(latent trộn vào) → pixel shuffle → skip U-Net<br/>conv cuối <b>zero-init</b>"]
+        EN["<b>NAFNet U-Net 5 tầng</b> · 30 NAFBlock<br/>256² ×3 (48) → 128² ×2 (64) → 64² ×4 (96) → 32² ×4 (128)<br/>đáy 16² + ZI · 8 khối (160) · decoder 2·2·2·3 · skip cộng<br/>đầu phụ 128², 64² · conv cuối <b>zero-init</b>"]
         ED["<b>chi tiết đường nét</b> · 1 × 256 × 256<br/>= mọi cạnh của kênh sáng"]
         EY --> EN --> ED
     end
     CMP{{"<b>③ Ghép</b><br/>màu (Cb, Cr) ← ảnh nền<br/>độ sáng Y ← độ sáng nền + chi tiết<br/>cộng CÙNG một số vào R, G, B ⇒ màu không đổi"}}
     OUT["<b>Ảnh phục hồi</b> · 3 × 256 × 256"]
-    LC(["<b>Loss màu</b> · L1<br/>Cb, Cr của ảnh nền + độ sáng nền<br/>so với cùng phần đó của ảnh sạch"])
-    LE(["<b>Loss đường nét</b> · L1<br/>chi tiết Y so với chi tiết Y của ảnh sạch<br/>(+ độ dốc cạnh, tuỳ chọn)"])
-    LA(["<b>Loss toàn ảnh</b><br/>L1 pixel + L1 hệ số QWT chi tiết · 2,0<br/>+ khớp năng lượng · 1,0"])
+    LC(["<b>Loss màu</b> · L1 Cb, Cr + độ sáng nền<br/>+ thống kê màu từng ảnh · 1,0<br/>(độ đậm màu, độ trải Cb/Cr, tương phản)"])
+    LE(["<b>Loss đường nét</b><br/>L1 chi tiết Y · độ dốc cạnh 1,0<br/>FFT phức 1,0 · nhiều tỉ lệ 128², 64² · 0,5"])
+    LA(["<b>Loss toàn ảnh</b><br/>L1 pixel + L1 hệ số QWT chi tiết · 2,0<br/>+ năng lượng · 1,0 + VGG16 perceptual · 0,05"])
     IB --> CD
     IB --> EY
     ZI --> CN
@@ -462,7 +465,7 @@ flowchart TB
     classDef loss fill:#fce4ec,stroke:#d81b60,color:#1a1a1a
     class IB tf
     class ZI lat
-    class CD,CN,CB,CL col
+    class CD,CG,CN,CB,CL col
     class EY,EN,ED edg
     class CMP,OUT tf
     class LC,LE,LA loss
@@ -471,11 +474,15 @@ flowchart TB
 ```
 
 Nhánh màu chạy trước và cho nhánh đường nét biết **ảnh sạch sáng cỡ nào** (qua độ sáng
-nền, không truyền gradient ngược), để nhánh đường nét vẽ cạnh đúng cường độ. Hai conv
-cuối đều zero-init: trước khi học, đầu ra có đúng kênh sáng của ảnh mờ và màu của ảnh
-mờ ở 128×128. Nhánh đường nét dùng cùng cấu trúc ResNet của p7 (head 256², thân ở 128²
-có latent trộn vào, pixel shuffle, skip U-Net), chỉ khác 2 kênh vào (Y + độ sáng nền), 1
-kênh ra và 6 khối residual.
+nền, không truyền gradient ngược), để nhánh đường nét vẽ cạnh đúng cường độ. Mọi đầu ra
+cuối đều zero-init: trước khi học, đầu ra có đúng kênh sáng của ảnh mờ và màu của ảnh mờ
+ở 128×128. Nhánh đường nét là **NAFNet** (Chen và cộng sự, ECCV 2022): mỗi NAFBlock gồm
+LayerNorm, conv 1×1, conv depthwise 3×3, SimpleGate (nhân hai nửa kênh), channel attention
+(mỗi kênh nhìn cả ảnh), conv 1×1, rồi một nhánh feed-forward có cổng; hai nhánh nhân với hệ
+số zero-init nên khối mới là identity. Tầng 256² (48 kênh × 3 + 3 khối) là tầng duy nhất vẽ
+được chi tiết 2 px; đáy 16×16 nhận ZI và có 8 khối. Hai đầu phụ ở 128² và 64² dự đoán chi
+tiết thu nhỏ (giám sát nhiều tỉ lệ). Lịch sử: ResNet một tầng (p8), U-Net thường (p11),
+NAFNet (p13), tầng 256² rộng hơn (p14).
 
 #### 4. Phase 2 — decoder IMU, backbone đóng băng
 
@@ -611,12 +618,18 @@ Hai dòng này giải thích phần lớn kết quả đo được:
 ### Phase 1 — những khối chỉ tồn tại lúc train
 
 **Teacher EMA** (`EMATeachers`): bản `deepcopy` của hai encoder online, **không có
-gradient**, cập nhật bằng `θ_t ← m·θ_t + (1−m)·θ_o` với `m` đi từ 0,99 lên 0,999.
-Teacher ăn dữ liệu **sạch**, online ăn dữ liệu **nhiễu**.
+gradient**, cập nhật bằng `θ_t ← m·θ_t + (1−m)·θ_o` với `m` đi từ 0,99 lên 0,9995.
+Teacher ăn dữ liệu **sạch**, online ăn dữ liệu **nhiễu**. Ngoài đích 16×16, teacher cho
+thêm **đích mịn** 96 × 32 × 32 (stage ngay trước stage cuối của encoder ảnh).
 
-**Predictor** (`LatentPredictor`, mỗi modality một cái): MLP theo từng token,
-`LayerNorm → Linear(128→256) → GELU → Linear(256→128)`. Token ảnh là `16×16 = 256`
-vị trí, token IMU là `8` vị trí. Nó dự đoán latent của teacher từ latent online.
+**Predictor** (`SpatialPredictor`, `predictor_type: spatial`, mỗi modality một cái): MLP
+`LayerNorm → Linear(128→256) → GELU → Linear(256→128)` như bản cũ, nhưng lớp ẩn đi qua **2
+conv depthwise kernel 3** trên lưới token, nên mỗi dự đoán đọc vùng 5×5 token (ảnh, 171.072
+tham số kể cả đầu mịn) hoặc ±2 token (IMU, 68.352). **Che token**: 30% token ảnh (khối
+2–4 token) và 25% token IMU (đoạn 1–2 token) được thay bằng một token học được; predictor
+phải đoán đích sạch của chúng từ lân cận. Loss JEPA vẫn là trung bình trên mọi token, cộng
+**đích mịn** 32×32 (trọng số 0,5) và **đích thô** — trung bình 2×2 token — (0,25). Log có
+**JEPA chuẩn hoá** (so với đoán một token cố định) để so được giữa các run.
 
 **Decoder neo**: decoder hệ số (cùng loại decoder IMU phase 2, và decoder ảnh cũ
 `qwt_coefficients`), chỉ đọc latent, dự đoán **hệ số tuyệt đối**, chấm điểm trên hệ
@@ -661,15 +674,18 @@ con số như vậy không thể đọc ra từ khối Jacobian cũ, vì nó ch�
 Backbone (transform + 2 encoder + fusion) **đóng băng ở chế độ eval**. Chỉ hai
 decoder được cập nhật.
 
-**Decoder ảnh — tách màu + đường nét** (`image_decoder: split_color_edge`, 786.564 tham số):
+**Decoder ảnh — tách màu + đường nét** (`image_decoder: split_color_edge`,
+`split_branch_arch: nafnet_edge`, 3.346.099 tham số):
 
-| Bước | Nhánh màu (135.331) | Nhánh đường nét (651.233) |
+| Bước | Nhánh màu (161.552) | Nhánh đường nét — NAFNet (3.184.547) |
 |---|---|---|
 | vào | ảnh mờ trung bình 2×2 `[3, 128, 128]` + `ZI` | Y ảnh mờ + độ sáng nền `[2, 256, 256]` + `ZI` |
-| đầu | conv 3×3 + ReLU `[32, 128, 128]` | `head` conv 3×3 `[32, 256, 256]` → `down` stride 2 `[64, 128, 128]` |
-| latent | conv 1×1 + upsample `[32, 128, 128]` | conv 1×1 + upsample `[64, 128, 128]` |
-| thân | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | nối + conv 3×3, 6 khối residual `[64, 128, 128]` |
-| ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | `up` pixel shuffle, skip U-Net, conv **zero-init** → chi tiết Y `[1, 256, 256]` |
+| toàn ảnh | **tone + màu** (26.221): 3 conv stride 2 → pool, + ZI pool, + mean/std từng kênh → MLP → `M·x^p + b` cho cả ảnh (zero-init = identity) | — |
+| đầu | conv 3×3 + ReLU `[32, 128, 128]` | `intro` conv 3×3 `[48, 256, 256]` |
+| thu nhỏ | — | NAFBlock ×3 `[48, 256²]` → ×2 `[64, 128²]` → ×4 `[96, 64²]` → ×4 `[128, 32²]`, mỗi lần conv 2×2 stride 2 |
+| latent | conv 1×1 + upsample `[32, 128, 128]` | đáy `[160, 16, 16]` **+ conv 1×1(ZI)**, rồi 8 NAFBlock |
+| thân / phóng lại | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | conv 1×1 + pixel shuffle, **cộng** skip, NAFBlock ×2 `[128, 32²]` → ×2 `[96, 64²]` → ×2 `[64, 128²]` → ×3 `[48, 256²]` |
+| ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | conv 3×3 **zero-init** → chi tiết Y `[1, 256, 256]`; đầu phụ zero-init ở 128² và 64² |
 | ghép | màu (Cb, Cr) = của ảnh nền | Y = độ sáng nền (Y ảnh nền, trung bình 8×8) + chi tiết |
 
 **Decoder ảnh ResNet một khối** (`image_decoder: resnet_pixel`, p7, 799.811 tham số):
@@ -733,14 +749,15 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | `imu_encoder` | 248.832 | 1 |
 | `fusion` | 331.264 | 1 |
 | **backbone (tổng)** | **1.333.120** | 1, đóng băng ở phase 2 |
-| predictor ảnh | 66.176 | 1, rồi vứt |
-| predictor IMU | 66.176 | 1, rồi vứt |
+| predictor ảnh — lân cận 5×5, kể cả đầu mịn 32² | 171.072 | 1, rồi vứt |
+| predictor IMU — lân cận ±2 | 68.352 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 — tách màu + đường nét | 786.564 | 2 |
-| ↳ nhánh màu | 135.331 | 2 |
-| ↳ nhánh đường nét | 651.233 | 2 |
+| decoder ảnh phase 2 — tách màu + đường nét | 3.346.099 | 2 |
+| ↳ nhánh màu (kể cả đầu tone/màu toàn ảnh 26.221) | 161.552 | 2 |
+| ↳ nhánh đường nét — NAFNet 30 khối | 3.184.547 | 2 |
 | decoder IMU phase 2 | 358.012 | 2 |
-| **decoder phase 2 (tổng)** | **1.144.576** | 2 |
+| **decoder phase 2 (tổng)** | **3.704.111** | 2 |
+| *(VGG16 relu1_2–3_3 cho loss perceptual — đóng băng, không vào checkpoint)* | *1.735.488* | *—* |
 | *(decoder ảnh ResNet một khối `resnet_pixel`, nếu chọn)* | *799.811* | 2 |
 | *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |
 

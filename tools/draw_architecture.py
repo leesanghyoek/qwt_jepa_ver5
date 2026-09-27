@@ -61,7 +61,7 @@ region(842, 110, 543, 360, 'edge', '③ Phase 2 — decoder khôi phục', right
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
-img_in = node(20, 205, 150, 70, 'data', 'Ảnh mờ', ['3 × 256 × 256'])
+img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu B'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 # ---------------- backbone
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['48 × 128 × 128'])
@@ -97,7 +97,7 @@ def unet_block(x, yc, kind, title, below=False):
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet · 256² · Y', below=True)
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
 join = node(1172, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1272, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
@@ -105,7 +105,7 @@ imu_out = node(1272, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
 teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])
-loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg · neo · Jacobian'])
+loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg gộp · neo · Jacobian'])
 pred_u = node(705, 555, 110, 70, 'p1', 'Predictor', ['IMU · lân cận', 'che 25% token'])
 pred_i = node(862, 555, 115, 70, 'p1', 'Predictor', ['ảnh · lân cận 5×5', 'che 30% token'])
 
@@ -125,7 +125,7 @@ arrow([(DX, 260), (DX, 232)], color='#8E24AA', width=2.4)
 arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
 text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA')
 # the blurry image into the funnel of both branches
-arrow([(95, 205), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
+arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
       label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
 arrow([(885, 200), (FX, 200)], color='#2E7D32', width=3)
 arrow([mid_right(colb), (1152, 200), (1152, 251), (1172, 251)])
@@ -144,10 +144,18 @@ arrow([mid_left(pred_u), (650, 590)], label='đoán TU', lx=678, ly=582)
 arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', lx=740, ly=665)
 arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
 text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
+# ---------------- phase 2 losses (train only the two decoders)
+loss2 = node(1030, 528, 350, 132, 'loss', 'Loss phase 2', [
+    'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
+    'màu: L1 Cb/Cr + thống kê màu từng ảnh',
+    'nét: L1 · độ dốc · FFT phức · 128², 64²',
+    'IMU: L1 · chi tiết Haar · độ rung'])
+arrow([(1205, 528), (1205, 474)], color='#D81B60', dash='6 4', width=2)
+text(1213, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825', '#90A4AE', '#1E88E5', '#8E24AA'))
+    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825', '#90A4AE', '#1E88E5', '#8E24AA', '#D81B60'))
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" font-family="{FONT}">'
        f'<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
        f'<path d="M0,0 L10,5 L0,10 z" fill="#455A64"/></marker>{markers}</defs>'
