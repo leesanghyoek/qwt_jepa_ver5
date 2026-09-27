@@ -366,6 +366,19 @@ phase2:
   # tang chia cho do lon kich hoat cua anh sach, nen 0.05 ~ 5% sai so tuong doi. Can Internet
   # lan dau de tai trong so ImageNet (528 MB); tat bang 0.0.
   perceptual_weight: 0.05
+  # p15: CNN LAM NET + MUOT sau nhanh duong net. Chay tren ban do chi tiet Y (mau da tach
+  # rieng nen no khong cham duoc mau), o do phan giai day du, khong thu nho: 4 khoi residual
+  # x 32 kenh, o nhin 21 px, conv cuoi zero-init (bat dau = identity). Loss cu cham tren dau
+  # ra cua no; dau ra NAFNet giu L1 rieng (0.5) de khong troi.
+  split_edge_refiner_blocks: 4
+  split_edge_refiner_width: 32
+  split_edge_stage1_weight: 0.5
+  # "Go ghe thua": chi phat do doc VUOT anh sach, nang o vung phang (exp(-|grad sach|/0.01)).
+  # = 0 voi anh sach; tang voi hat nhieu (3/255: 0.0070), vong sang quanh canh (0.0025), vet
+  # mo loang ra vung phang (0.0014). TV thuong khong dung duoc: tren anh toi no doc gan nhu
+  # anh sach (0.0021 vs 0.0019) va se ep phang ca texture that. Trong so 2.0: hat 3/255 ~
+  # ngang L1 chi tiet cuoi p14 (0.014).
+  split_edge_smooth_weight: 2.0
   split_edge_unet_widths: [32, 64, 64, 96, 128]
   split_unet_blocks: 1
   # Mau nhat (p8: anh khoi phuc nhat mau hon anh goc). Hai nguyen nhan: (1) L1 tung

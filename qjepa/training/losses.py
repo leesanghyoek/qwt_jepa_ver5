@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from ..models.color_edge import chroma, luminance_gradient_l1, split_targets
+from ..models.color_edge import chroma, excess_roughness, luminance_gradient_l1, split_targets
 from ..models.predictors import image_tokens, imu_tokens
 
 
@@ -266,6 +266,9 @@ def color_edge_split_loss(
     fft_weight: float = 0.0,
     aux_details: dict[int, torch.Tensor] | None = None,
     aux_weight: float = 0.0,
+    detail_stage1: torch.Tensor | None = None,
+    stage1_weight: float = 0.0,
+    smooth_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Separate targets for the two branches of the split decoder.
 
@@ -278,6 +281,10 @@ def color_edge_split_loss(
     factor f to the edge branch's prediction at 1/f resolution, scored (L1, and
     fft_l1 at ``fft_weight``) against the detail averaged down by f, mean over the
     factors times ``aux_weight``.
+
+    With an edge refiner, ``detail`` is its output and ``detail_stage1`` the edge
+    branch's, kept on track by L1 at ``stage1_weight``. ``smooth_weight`` adds
+    excess_roughness of the final detail.
     """
     with torch.no_grad():
         base_t, light_t, detail_t = split_targets(clean, color_scale, illumination_scale)
@@ -293,6 +300,14 @@ def color_edge_split_loss(
         spectrum = fft_l1(detail, detail_t)
         total = total + fft_weight * spectrum
         parts["image_edge_fft_l1"] = spectrum
+    if detail_stage1 is not None and stage1_weight > 0:
+        stage1 = F.l1_loss(detail_stage1, detail_t)
+        total = total + stage1_weight * stage1
+        parts["image_edge_stage1_l1"] = stage1
+    if smooth_weight > 0:
+        roughness = excess_roughness(detail, detail_t)
+        total = total + smooth_weight * roughness
+        parts["image_edge_roughness"] = roughness
     if aux_details and aux_weight > 0:
         terms = []
         for factor, predicted in sorted(aux_details.items()):

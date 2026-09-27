@@ -192,6 +192,16 @@ def validate_config(config: dict[str, Any]) -> None:
         # decoder heads; other branches produce no aux outputs, so the term is absent.
         if arch == "nafnet_edge":
             _validate_nafnet_edge(phase2, data["image_size"])
+        for key in ("split_edge_refiner_blocks", "split_edge_refiner_width"):
+            value = phase2.get(key, 0 if key.endswith("blocks") else 32)
+            if isinstance(value, bool) or not isinstance(value, int) or value < (0 if key.endswith("blocks") else 1):
+                raise ValueError(f"phase2.{key} must be a {'nonnegative' if key.endswith('blocks') else 'positive'} integer")
+        for key in ("split_edge_stage1_weight", "split_edge_smooth_weight"):
+            value = phase2.get(key, 0.0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"phase2.{key} must be a nonnegative number")
+        if phase2.get("split_edge_stage1_weight", 0.0) and not phase2.get("split_edge_refiner_blocks", 0):
+            raise ValueError("phase2.split_edge_stage1_weight needs an edge refiner (split_edge_refiner_blocks > 0)")
         fft_weight = phase2.get("split_edge_fft_weight", 0.0)
         if isinstance(fft_weight, bool) or not isinstance(fft_weight, (int, float)) or fft_weight < 0:
             raise ValueError("phase2.split_edge_fft_weight must be a nonnegative number")
@@ -445,6 +455,10 @@ def build_decoders(
                 "dec_blocks": tuple(config["phase2"].get("split_edge_naf_dec_blocks", ())),
                 "aux_factors": tuple(config["phase2"].get("split_edge_aux_factors", ())),
             } if config["phase2"].get("split_branch_arch") == "nafnet_edge" else None,
+            "refiner": {
+                "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
+                "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),
+            } if int(config["phase2"].get("split_edge_refiner_blocks", 0)) > 0 else None,
         },
     )
 

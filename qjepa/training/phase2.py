@@ -135,6 +135,9 @@ class Phase2Trainer:
                     aux_details={int(key[len("image_detail_aux"):]): value for key, value in restored.items()
                                  if key.startswith("image_detail_aux")},
                     aux_weight=float(self.phase.get("split_edge_aux_weight", 0.0)),
+                    detail_stage1=restored.get("image_detail_stage1"),
+                    stage1_weight=float(self.phase.get("split_edge_stage1_weight", 0.0)),
+                    smooth_weight=float(self.phase.get("split_edge_smooth_weight", 0.0)),
                 )
                 loss = loss + split_loss
                 parts.update(split_parts)

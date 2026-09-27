@@ -55,6 +55,7 @@ PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1"
                 "image_detail_energy", "image_detail_invisible_fraction",
                 "image_color_l1", "image_color_stats_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
                 "image_edge_fft_l1", "image_edge_aux_l1", "image_perceptual",
+                "image_edge_stage1_l1", "image_edge_roughness",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")
@@ -307,6 +308,10 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
                                ("image_fine_detail_in_place", "vật nhỏ/xa 2-4 px đúng chỗ ↑")):
                 print(f"  {label:<34}{fmt(final.get('validation_baseline_' + key), 12, 3)}"
                       f"{fmt(final.get('validation_' + key), 12, 3)}")
+        if isinstance(final.get("validation_image_excess_roughness"), (int, float)):
+            print("  — độ mượt (0 = mượt như ảnh sạch ở vùng phẳng) —")
+            print(f"  {'gồ ghề thừa (/255) ↓':<34}{fmt(final.get('validation_baseline_image_excess_roughness'), 12, 3)}"
+                  f"{fmt(final.get('validation_image_excess_roughness'), 12, 3)}")
         stripe = final["validation_image_stripe_power"]
         if stripe > 1.5:
             findings.append(
@@ -460,6 +465,8 @@ def config_section(run: Path) -> None:
         ("phase2.split_edge_fft_weight", ("phase2", "split_edge_fft_weight")),
         ("phase2.split_edge_aux_weight", ("phase2", "split_edge_aux_weight")),
         ("phase2.perceptual_weight", ("phase2", "perceptual_weight")),
+        ("phase2.split_edge_refiner_blocks", ("phase2", "split_edge_refiner_blocks")),
+        ("phase2.split_edge_smooth_weight", ("phase2", "split_edge_smooth_weight")),
         ("corruption.image.photon_count", ("corruption", "image", "photon_count")),
         ("corruption.image.noise_only_probability", ("corruption", "image", "noise_only_probability")),
         ("phase2.smooth_l1_beta", ("phase2", "smooth_l1_beta")),

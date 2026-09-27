@@ -482,6 +482,29 @@ class NAFNetBranch(nn.Module):
         return self.forward_with_aux(latent, x, base)[0]
 
 
+class EdgeRefiner(nn.Module):
+    """A small full-resolution CNN that sharpens and smooths the edge map.
+
+    It runs after the edge branch, on the luminance detail alone -- colour has
+    already been split off, so nothing here can move it. Input: the branch's
+    detail, the blurry luminance and the illumination; no down-sampling, so every
+    layer works on the 2-4 px scale where small objects live. ``blocks`` residual
+    blocks of ``width`` channels, a receptive field of 4 * blocks + 5 px. The last
+    conv is zero-initialised: the refiner starts as the identity on the detail.
+    """
+
+    def __init__(self, in_channels: int = 3, width: int = 32, blocks: int = 4) -> None:
+        super().__init__()
+        self.head = nn.Sequential(nn.Conv2d(in_channels, width, 3, padding=1), nn.ReLU())
+        self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
+        self.tail = nn.Conv2d(width, 1, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, detail: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        return detail + self.tail(self.trunk(self.head(torch.cat((detail, context), dim=1))))
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -504,9 +527,11 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_width: int = 64, edge_blocks: int = 6, color_scale: int = 2, illumination_scale: int = 8,
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
-        color_global: bool = False, naf: dict | None = None,
+        color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
     ) -> None:
         super().__init__()
+        # Only when asked: earlier checkpoints have no refiner layers.
+        self.refiner = EdgeRefiner(3, int(refiner["width"]), int(refiner["blocks"])) if refiner else None
         if color_global and branch_arch == "unet":
             raise ValueError("color_global works on the ResNet colour branch (resnet or unet_edge)")
         self.color_scale = int(color_scale)
@@ -553,7 +578,11 @@ class SplitColorEdgeDecoder(nn.Module):
             detail, aux = self.edge.forward_with_aux(latent, edge_in, base=detail_in)
         else:
             detail = self.edge(latent, edge_in, base=detail_in)
-        parts = {"image_color_base": base, "image_illumination": light, "image_detail": detail}
+        parts = {}
+        if self.refiner is not None:
+            parts["image_detail_stage1"] = detail
+            detail = self.refiner(detail, edge_in)
+        parts.update(image_color_base=base, image_illumination=light, image_detail=detail)
         # Flat keys: only tensors cross DataParallel's gather.
         parts.update({f"image_detail_aux{factor}": value for factor, value in aux.items()})
         return compose(base, light, detail), parts

@@ -5,7 +5,7 @@ Usage: python3 tools/draw_architecture.py docs/kien_truc.svg
 import sys
 from xml.sax.saxutils import escape
 
-W, H = 1400, 720
+W, H = 1520, 720
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -57,7 +57,7 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 # ---------------- regions
 region(190, 150, 490, 320, 'bb', '① Backbone — train ở phase 1, đóng băng ở phase 2')
-region(842, 110, 543, 360, 'edge', '③ Phase 2 — decoder khôi phục', right=True)
+region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục', right=True)
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
@@ -98,10 +98,12 @@ el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF"
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
 edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
-join = node(1172, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
-img_out = node(1272, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
+# p15: small full-resolution CNN on the edge map only (colour already split off)
+refine = node(1160, 296, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
+join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
+img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
-imu_out = node(1272, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
+imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
 teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])
@@ -128,8 +130,9 @@ text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA'
 arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
       label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
 arrow([(885, 200), (FX, 200)], color='#2E7D32', width=3)
-arrow([mid_right(colb), (1152, 200), (1152, 251), (1172, 251)])
-arrow([mid_right(edgb), (1152, 320), (1152, 269), (1172, 269)])
+arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
+arrow([mid_right(edgb), mid_left(refine)])
+arrow([mid_right(refine), (1286, 320), (1286, 269), (1292, 269)])
 arrow([mid_right(join), mid_left(img_out)])
 arrow([mid_right(zu), (850, 400), (850, 428), (FX, 428)])
 arrow([mid_right(imu_dec), mid_left(imu_out)])
@@ -145,13 +148,13 @@ arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', 
 arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
 text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
 # ---------------- phase 2 losses (train only the two decoders)
-loss2 = node(1030, 528, 350, 132, 'loss', 'Loss phase 2', [
+loss2 = node(1150, 528, 350, 132, 'loss', 'Loss phase 2', [
     'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
     'màu: L1 Cb/Cr + thống kê màu từng ảnh',
-    'nét: L1 · độ dốc · FFT phức · 128², 64²',
+    'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
     'IMU: L1 · chi tiết Haar · độ rung'])
-arrow([(1205, 528), (1205, 474)], color='#D81B60', dash='6 4', width=2)
-text(1213, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
+arrow([(1325, 528), (1325, 474)], color='#D81B60', dash='6 4', width=2)
+text(1333, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'

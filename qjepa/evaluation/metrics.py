@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from ..models.color_edge import chroma, color_error, downsample, luminance
+from ..models.color_edge import chroma, color_error, downsample, excess_roughness, luminance
 
 
 def _ssim(restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
@@ -114,6 +114,9 @@ def image_metrics(restored: torch.Tensor, clean: torch.Tensor) -> dict[str, floa
         # Chroma after 4x4 averaging: colour cast and colour noise, not sharpness.
         "image_color_error": float(color_error(restored, clean)),
         **color_vividness(restored, clean),
+        # Grain, ringing and blur spill beyond the clean frame's own gradients, /255.
+        # 0 = as smooth as clean where clean is flat; lower is smoother.
+        "image_excess_roughness": float(excess_roughness(luminance(restored), luminance(clean))) * 255.0,
     }
 
 

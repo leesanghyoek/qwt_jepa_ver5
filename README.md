@@ -12,7 +12,17 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle mới nhất là **p14** (OUT `outputs/p14_fine_detail`), chỉ đổi phase 2 so với p13 và
+Run Kaggle mới nhất là **p15** (OUT `outputs/p15_edge_refiner`), chỉ đổi phase 2 so với p14 và
+dùng lại phase 1 của p12–p14. p14 đưa vật nhỏ/xa 2–4 px đúng chỗ từ 0,23 (ảnh vào) lên 0,49 và
+đường nét 4–16 px đúng chỗ lên 0,90, nhưng ảnh vẫn còn mờ. p15 thêm **CNN làm nét + mượt** sau
+nhánh đường nét: 4 khối residual × 32 kênh ở độ phân giải đầy đủ, chỉ chạy trên bản đồ chi tiết
+Y (màu đã tách riêng nên nó không chạm được màu), 75 K tham số, 4,9 GMAC/ảnh, zero-init. Loss
+cũ chấm trên đầu ra của nó; đầu ra NAFNet giữ L1 riêng (0,5). Thêm số hạng **gồ ghề thừa** (2,0):
+chỉ phạt độ dốc *vượt* ảnh sạch, nặng ở vùng phẳng — bằng 0 với ảnh sạch, tăng với hạt nhiễu,
+vòng sáng quanh cạnh và vệt mờ loang; TV thường thì không dùng được vì trên ảnh tối nó đọc gần
+như ảnh sạch và sẽ ép phẳng cả texture thật. Báo cáo có dòng **gồ ghề thừa (/255)**.
+
+**p14** (OUT `outputs/p14_fine_detail`), chỉ đổi phase 2 so với p13 và
 dùng lại phase 1 của p12/p13. p13 khôi phục đường nét 4–16 px tới 0,94 ảnh sạch nhưng giữ chi tiết
 2 px ở 0,47 — thấp hơn cả ảnh vào (0,66): vật nhỏ, vật xa vẫn mờ. p14: (1) tầng 256² của NAFNet —
 tầng duy nhất vẽ được chi tiết 2 px — rộng và sâu hơn, 48 kênh × (3 + 3) khối (p13: 32 × (2 + 2));
@@ -441,10 +451,11 @@ flowchart TB
         ED["<b>chi tiết đường nét</b> · 1 × 256 × 256<br/>= mọi cạnh của kênh sáng"]
         EY --> EN --> ED
     end
+    RF["<b>CNN làm nét + mượt</b> · 75 K · p15<br/>4 khối residual × 32 kênh ở 256², không thu nhỏ<br/>đọc chi tiết + Y + độ sáng nền · zero-init"]
     CMP{{"<b>③ Ghép</b><br/>màu (Cb, Cr) ← ảnh nền<br/>độ sáng Y ← độ sáng nền + chi tiết<br/>cộng CÙNG một số vào R, G, B ⇒ màu không đổi"}}
     OUT["<b>Ảnh phục hồi</b> · 3 × 256 × 256"]
     LC(["<b>Loss màu</b> · L1 Cb, Cr + độ sáng nền<br/>+ thống kê màu từng ảnh · 1,0<br/>(độ đậm màu, độ trải Cb/Cr, tương phản)"])
-    LE(["<b>Loss đường nét</b><br/>L1 chi tiết Y · độ dốc cạnh 1,0<br/>FFT phức 1,0 · nhiều tỉ lệ 128², 64² · 0,5"])
+    LE(["<b>Loss đường nét</b> (trên đầu ra CNN làm nét)<br/>L1 chi tiết Y · độ dốc cạnh 1,0 · FFT phức 1,0<br/>nhiều tỉ lệ 0,5 · gồ ghề thừa 2,0 · L1 đầu ra NAFNet 0,5"])
     LA(["<b>Loss toàn ảnh</b><br/>L1 pixel + L1 hệ số QWT chi tiết · 2,0<br/>+ năng lượng · 1,0 + VGG16 perceptual · 0,05"])
     IB --> CD
     IB --> EY
@@ -453,11 +464,11 @@ flowchart TB
     CL -. "biết ảnh sạch sáng cỡ nào" .-> EY
     CB --> CMP
     CL --> CMP
-    ED --> CMP
+    ED --> RF --> CMP
     CMP --> OUT --> LA
     CB -.-> LC
     CL -.-> LC
-    ED -.-> LE
+    RF -.-> LE
     classDef tf fill:#e8eaf6,stroke:#5c6bc0,color:#1a1a1a
     classDef lat fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#1a1a1a
     classDef col fill:#fff3e0,stroke:#ef6c00,color:#1a1a1a
@@ -466,7 +477,7 @@ flowchart TB
     class IB tf
     class ZI lat
     class CD,CG,CN,CB,CL col
-    class EY,EN,ED edg
+    class EY,EN,ED,RF edg
     class CMP,OUT tf
     class LC,LE,LA loss
     style COL fill:#fffaf2,stroke:#ef6c00,stroke-width:3px
@@ -686,6 +697,7 @@ decoder được cập nhật.
 | latent | conv 1×1 + upsample `[32, 128, 128]` | đáy `[160, 16, 16]` **+ conv 1×1(ZI)**, rồi 8 NAFBlock |
 | thân / phóng lại | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | conv 1×1 + pixel shuffle, **cộng** skip, NAFBlock ×2 `[128, 32²]` → ×2 `[96, 64²]` → ×2 `[64, 128²]` → ×3 `[48, 256²]` |
 | ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | conv 3×3 **zero-init** → chi tiết Y `[1, 256, 256]`; đầu phụ zero-init ở 128² và 64² |
+| làm nét + mượt (p15) | — | `EdgeRefiner` (75.169): nối chi tiết + Y + độ sáng nền `[3, 256²]` → conv 3×3 `[32, 256²]` → 4 khối residual → conv 3×3 **zero-init** → cộng vào chi tiết |
 | ghép | màu (Cb, Cr) = của ảnh nền | Y = độ sáng nền (Y ảnh nền, trung bình 8×8) + chi tiết |
 
 **Decoder ảnh ResNet một khối** (`image_decoder: resnet_pixel`, p7, 799.811 tham số):
@@ -752,11 +764,12 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | predictor ảnh — lân cận 5×5, kể cả đầu mịn 32² | 171.072 | 1, rồi vứt |
 | predictor IMU — lân cận ±2 | 68.352 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 — tách màu + đường nét | 3.346.099 | 2 |
+| decoder ảnh phase 2 — tách màu + đường nét | 3.421.268 | 2 |
 | ↳ nhánh màu (kể cả đầu tone/màu toàn ảnh 26.221) | 161.552 | 2 |
 | ↳ nhánh đường nét — NAFNet 30 khối | 3.184.547 | 2 |
+| ↳ CNN làm nét + mượt (p15) | 75.169 | 2 |
 | decoder IMU phase 2 | 358.012 | 2 |
-| **decoder phase 2 (tổng)** | **3.704.111** | 2 |
+| **decoder phase 2 (tổng)** | **3.779.280** | 2 |
 | *(VGG16 relu1_2–3_3 cho loss perceptual — đóng băng, không vào checkpoint)* | *1.735.488* | *—* |
 | *(decoder ảnh ResNet một khối `resnet_pixel`, nếu chọn)* | *799.811* | 2 |
 | *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |
