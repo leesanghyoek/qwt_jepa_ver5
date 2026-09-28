@@ -5,7 +5,7 @@ Usage: python3 tools/draw_architecture.py docs/kien_truc.svg
 import sys
 from xml.sax.saxutils import escape
 
-W, H = 1520, 720
+W, H = 1620, 720
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -57,7 +57,7 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 # ---------------- regions
 region(190, 150, 490, 320, 'bb', '① Backbone — train ở phase 1, đóng băng ở phase 2')
-region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục', right=True)
+region(842, 110, 763, 360, 'edge', '③ Phase 2 — decoder khôi phục', right=True)
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
@@ -94,16 +94,37 @@ def unet_block(x, yc, kind, title, below=False):
     text(x + 116, yc + (71 if below else -59), title, size=13, weight='bold', color=stroke)
     return (x, yc - 30, 232, 60)
 
+def loudspeaker_funnel(x, yc, kind):
+    """The edge refiner, the U-Net's shape reversed: loudspeaker x2 -> sharpen at 2x -> funnel /2."""
+    fill, stroke = C[kind]
+    el.append(f'<polygon points="{x},{yc - 13} {x + 50},{yc - 30} {x + 50},{yc + 30} {x},{yc + 13}" '
+              f'fill="{fill}" stroke="{stroke}" stroke-width="2"/>')
+    el.append(f'<rect x="{x + 56}" y="{yc - 30}" width="80" height="60" rx="4" fill="#FFFFFF" '
+              f'stroke="{stroke}" stroke-width="2"/>')
+    el.append(f'<polygon points="{x + 142},{yc - 30} {x + 192},{yc - 13} {x + 192},{yc + 13} {x + 142},{yc + 30}" '
+              f'fill="{fill}" stroke="{stroke}" stroke-width="2"/>')
+    for a, b in ((x + 50, x + 56), (x + 136, x + 142)):
+        el.append(f'<path d="M {a} {yc} L {b} {yc}" stroke="{stroke}" stroke-width="2"/>')
+    text(x + 27, yc + 5, '×2', size=13, weight='bold', color=stroke)
+    text(x + 96, yc - 4, 'làm nét', size=13, weight='bold', color=stroke)
+    text(x + 96, yc + 13, '512² · 4 khối', size=11, color='#37474F')
+    text(x + 167, yc + 5, '÷2', size=13, weight='bold', color=stroke)
+    text(x + 25, yc - 37, 'loa', size=12, weight='bold', color=stroke)
+    text(x + 167, yc - 37, 'phễu', size=12, weight='bold', color=stroke)
+    text(x + 96, yc + 53, 'CNN làm nét · loa → phễu', size=13, weight='bold', color=stroke)
+    text(x + 96, yc + 71, '256² → 512² → 256²', size=11, color='#37474F')
+    return (x, yc - 30, 192, 60)
+
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
 edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
 # p17: small CNN on the edge map only (colour already split off): enlarge x2, sharpen, shrink back
-refine = node(1160, 296, 118, 48, 'edge', 'CNN loa → phễu', ['×2 → nét → ÷2'], rx=8, title_size=13)
-join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
-img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
+refine = loudspeaker_funnel(1158, 320, 'edge')
+join = node(1392, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
+img_out = node(1492, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
-imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
+imu_out = node(1492, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
 teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])
@@ -130,9 +151,9 @@ text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA'
 arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
       label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
 arrow([(885, 200), (FX, 200)], color='#2E7D32', width=3)
-arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
+arrow([mid_right(colb), (1372, 200), (1372, 251), (1392, 251)])
 arrow([mid_right(edgb), mid_left(refine)])
-arrow([mid_right(refine), (1286, 320), (1286, 269), (1292, 269)])
+arrow([mid_right(refine), (1382, 320), (1382, 269), (1392, 269)])
 arrow([mid_right(join), mid_left(img_out)])
 arrow([mid_right(zu), (850, 400), (850, 428), (FX, 428)])
 arrow([mid_right(imu_dec), mid_left(imu_out)])
@@ -148,13 +169,13 @@ arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', 
 arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
 text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
 # ---------------- phase 2 losses (train only the two decoders)
-loss2 = node(1150, 528, 350, 132, 'loss', 'Loss phase 2', [
+loss2 = node(1250, 528, 350, 132, 'loss', 'Loss phase 2', [
     'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
     'màu: L1 Cb/Cr + thống kê màu từng ảnh',
     'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
     'IMU: L1 · chi tiết Haar · độ rung'])
-arrow([(1325, 528), (1325, 474)], color='#D81B60', dash='6 4', width=2)
-text(1333, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
+arrow([(1425, 528), (1425, 474)], color='#D81B60', dash='6 4', width=2)
+text(1433, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
