@@ -45,6 +45,26 @@ def test_the_parallel_setting_is_validated():
         validate_config(config)
 
 
+def test_a_rank_sees_one_gpu_and_launches_nothing(monkeypatch):
+    # Kaggle T4 x2, p18's first run: each rank is given only its own GPU, re-entered
+    # the launch check and died with "DDP asked for 2 GPUs; only 1 visible". The CPU
+    # runs never took that branch: it is CUDA only.
+    import qjepa.cli as cli
+
+    config = {"runtime": {"parallel": "ddp", "gpu_count": 2}}
+    args = type("Args", (), {"gpus": None})()
+    cuda = torch.device("cuda")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(cli, "rank_and_world", lambda: (1, 2))
+    assert cli._ddp_world(config, args, cuda) == 1
+    # The launcher still refuses two ranks when only one GPU is there.
+    monkeypatch.setattr(cli, "rank_and_world", lambda: (0, 1))
+    with pytest.raises(ValueError, match="only 1 visible"):
+        cli._ddp_world(config, args, cuda)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    assert cli._ddp_world(config, args, cuda) == 2
+
+
 def _draw_after_sharing(folder):
     rank, _ = rank_and_world()
     if rank == 1:

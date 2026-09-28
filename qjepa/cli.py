@@ -89,8 +89,10 @@ def _ddp_world(config: dict[str, Any], args: argparse.Namespace, device: torch.d
     """Phase-2 processes: one per GPU with runtime.parallel ddp, otherwise 1.
 
     On CPU, ``gpu_count: 2`` gives two gloo processes -- what the tests run.
+    Only the launcher counts GPUs: a rank sees just its own one (qjepa.distributed
+    sets CUDA_VISIBLE_DEVICES), launches nothing, and must not ask for two.
     """
-    if config["runtime"].get("parallel", "data_parallel") != "ddp":
+    if config["runtime"].get("parallel", "data_parallel") != "ddp" or rank_and_world()[1] > 1:
         return 1
     count = str(getattr(args, "gpus", None) or config["runtime"].get("gpu_count", "auto"))
     if count == "auto":
