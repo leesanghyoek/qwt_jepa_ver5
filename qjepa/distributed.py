@@ -14,6 +14,7 @@ Rank 0 validates, logs and saves; the others wait for it at the next collective.
 
 from __future__ import annotations
 
+import datetime
 import os
 import socket
 import sys
@@ -95,8 +96,11 @@ def _entry(rank: int, world: int, port: int, cuda: bool, target: Callable[[Any],
         os.environ["CUDA_VISIBLE_DEVICES"] = ids[rank].strip()
     if rank:
         sys.stdout = open(os.devnull, "w")          # one log: rank 0's; errors still reach stderr
+    # Rank 0 validates and saves while the others wait at the next collective; NCCL's
+    # default 10-minute timeout would kill a run whose validation runs long. A rank
+    # that fails still ends the run at once: spawn stops the others.
     dist.init_process_group("nccl" if cuda else "gloo", init_method=f"tcp://127.0.0.1:{port}",
-                            rank=rank, world_size=world)
+                            rank=rank, world_size=world, timeout=datetime.timedelta(minutes=60))
     try:
         target(args)
     finally:

@@ -347,10 +347,14 @@ phase2:
   # p14: tang 256x256 — tang DUY NHAT ve duoc chi tiet chu ky 2 px (vat nho, vat xa) — rong
   # hon va sau hon: 48 kenh x (3 + 3) khoi (p13: 32 x (2 + 2)). 3,2 M tham so, 10,7 GMAC/anh.
   # p13 giu chi tiet 2 px o 0,47 ảnh sach, con thap hon ca anh vao (0,66).
-  split_edge_naf_widths: [48, 64, 96, 128, 160]      # p13: [32, 64, 96, 128, 160]
-  split_edge_naf_enc_blocks: [3, 2, 4, 4]            # p13: [2, 2, 4, 4]
+  # p18: tang 256x256 VE LAI co p13 (32 kenh x (2 + 2) khoi) de train nhanh. Do tren RTX 4060
+  # (batch 2, fwd+bwd, fp32): tang nay chiem ~160/212 ms cua NAFNet; p13 = 126 ms, cong LayerNorm
+  # gop = 96 ms (fp16: 74 ms). Danh doi: co the mat lai mot phan vat nho/xa p14 gianh duoc; CNN
+  # lam net loa -> pheu (p17) sau NAFNet van lam viec o 512x512.
+  split_edge_naf_widths: [32, 64, 96, 128, 160]      # p14-p17: [48, 64, 96, 128, 160]
+  split_edge_naf_enc_blocks: [2, 2, 4, 4]            # p14-p17: [3, 2, 4, 4]
   split_edge_naf_middle_blocks: 8
-  split_edge_naf_dec_blocks: [3, 2, 2, 2]            # p13: [2, 2, 2, 2]
+  split_edge_naf_dec_blocks: [2, 2, 2, 2]            # p14-p17: [3, 2, 2, 2]
   # Giam sat nhieu ti le (MIMO-UNet): tang decoder o 128x128 va 64x64 cung phai ra chi tiet
   # dung (so voi chi tiet sach thu nho), nen tang sau tu sua vet mo lon.
   split_edge_aux_factors: [2, 4]
@@ -415,4 +419,7 @@ phase2:
   # CHAM HON 5 lan — 160 update mat 20 phut (7,5 s/update; p14 fp32: 1,46 s/update). Nghi pham:
   # conv depthwise cua NAFNet o fp16 va cuDNN chua bat benchmark. Quay ve fp32 cho toi khi
   # tools/decoder_speed_probe.py do ra cau hinh fp16 nhanh hon that. amp_fp16 van chon duoc.
-  precision: fp32
+  # p18: amp_fp16 lai, nhung notebook DO truoc tren chinh T4 cua phien (speed probe, ~2 phut,
+  # batch 2 = phan cua moi GPU khi DDP) va tu ve fp32 neu fp16 khong nhanh hon. p16 fp16 chay
+  # DataParallel; p18 chay DDP (moi GPU mot tien trinh). RTX 4060: fp16 nhanh hon fp32 1,3x.
+  precision: amp_fp16

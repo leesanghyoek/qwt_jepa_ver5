@@ -98,6 +98,23 @@ def test_layernorm_keeps_fp32_statistics_for_fp16_input():
     assert torch.allclose(half.float(), reference, atol=1e-2)
 
 
+def test_the_fused_layernorm_is_the_per_pixel_formula_with_the_same_parameters():
+    # p18 replaced mean / variance / divide with one F.layer_norm kernel; checkpoints
+    # of p13-p17 hold weight and bias of shape (1, C, 1, 1) and must still load.
+    torch.manual_seed(0)
+    norm = LayerNorm2d(48)
+    with torch.no_grad():
+        norm.weight.normal_(1.0, 0.2)
+        norm.bias.normal_(0.0, 0.2)
+    x = torch.randn(2, 48, 12, 10) * 3 + 1
+    mean = x.mean(dim=1, keepdim=True)
+    variance = (x - mean).square().mean(dim=1, keepdim=True)
+    expected = norm.weight * (x - mean) / torch.sqrt(variance + norm.eps) + norm.bias
+    assert torch.allclose(norm(x), expected, atol=1e-5)
+    assert {name: tuple(p.shape) for name, p in norm.state_dict().items()} == {
+        "weight": (1, 48, 1, 1), "bias": (1, 48, 1, 1)}
+
+
 def test_the_crop_is_what_vgg_sees(monkeypatch):
     torch.manual_seed(0)
     features = load_vgg16_features(False)

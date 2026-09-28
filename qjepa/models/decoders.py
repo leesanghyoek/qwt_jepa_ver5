@@ -367,12 +367,14 @@ class LayerNorm2d(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Statistics in fp32 even under fp16 autocast: a half-precision variance of
-        # 48-160 channels loses the small differences the normalisation divides by.
-        x32 = x.float()
-        mean = x32.mean(dim=1, keepdim=True)
-        variance = (x32 - mean).square().mean(dim=1, keepdim=True)
-        normalised = (x32 - mean) / torch.sqrt(variance + self.eps)
+        # One fused kernel over the channels of every pixel (p18). Same maths as the
+        # mean / variance / divide it replaces (1e-6 apart in fp32), 20% faster NAFNet
+        # on an RTX 4060. Statistics in fp32 even under fp16 autocast -- layer_norm
+        # autocasts to fp32 -- since a half-precision variance loses the small
+        # differences the normalisation divides by. The result stays a channels-last
+        # view: the convs after it then run channels-last, and a .contiguous() here
+        # would give most of the gain back.
+        normalised = F.layer_norm(x.permute(0, 2, 3, 1).float(), (x.shape[1],), eps=self.eps).permute(0, 3, 1, 2)
         return (self.weight * normalised + self.bias).to(x.dtype)
 
 

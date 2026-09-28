@@ -118,7 +118,7 @@ def loudspeaker_funnel(x, yc, kind):
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 28 khối', below=True)
 # p17: small CNN on the edge map only (colour already split off): enlarge x2, sharpen, shrink back
 refine = loudspeaker_funnel(1158, 320, 'edge')
 join = node(1392, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)

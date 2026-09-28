@@ -12,7 +12,21 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p17** (OUT `outputs/p17_overcomplete`) là run hiện tại, chỉ đổi phase 2 so với p16 và dùng lại
+**p18** (OUT `outputs/p18_fast_2gpu`) là run hiện tại: p17 train nhanh hơn trên Kaggle T4 × 2, chỉ
+đổi phase 2 và dùng lại phase 1 của p12–p17. Đo trên RTX 4060, NAFNet chiếm ~75% mỗi bước train
+(VGG trên mảnh cắt 128²: ~2%), và riêng tầng 256² của nó chiếm ~3/4 thời gian NAFNet. Bốn thay đổi:
+(1) **LayerNorm gộp** — một kernel `F.layer_norm` thay cho mean/variance/chia, cùng công thức (lệch
+1e-6), cùng tên tham số nên checkpoint cũ vẫn nạp; NAFNet nhanh hơn ~20%. (2) **2 GPU bằng DDP**
+(`runtime.parallel: ddp`, `gpu_count: 2`) — mỗi GPU một tiến trình, không có race `misaligned
+address` của DataParallel; loss vẫn tính trên cả batch nên khớp 1 GPU. NCCL chờ tối đa 60 phút (rank 0
+validate trong lúc rank kia chờ); ngưỡng RAM khởi động lại 10 GiB *mỗi* tiến trình. (3) **Tầng 256²
+của NAFNet về cỡ p13** (32 kênh × (2 + 2) khối, 28 NAFBlock) — đánh đổi: có thể mất lại một phần
+vật nhỏ/xa p14 giành được. (4) **fp16** (`precision: amp_fp16`) — p16 fp16 từng chậm gấp 5 lần trên
+T4 (chạy DataParallel), nên notebook **đo trước trên chính T4 của phiên** (speed probe, ~2 phút) và
+tự về fp32 nếu fp16 không nhanh hơn. Trên RTX 4060, bước train đầy đủ (mọi loss) cho 4 ảnh: p17 fp32
+653 ms → p18 fp32 398 ms → p18 fp16 286 ms; 2 GPU chia đôi mỗi update.
+
+**p17** (OUT `outputs/p17_overcomplete`), chỉ đổi phase 2 so với p16 và dùng lại
 phase 1 của p12–p16. CNN làm nét sau NAFNet chạy theo cơ chế **loa → phễu** — thứ tự ngược với
 U-Net (mạng *overcomplete*, như nhánh Kite-Net của KiU-Net): **loa** phóng bản đồ chi tiết Y lên ×2
 (conv 3×3 + pixel shuffle, 256² → 512²); **làm nét** bằng 4 khối residual × 16 kênh ở 512², nơi
@@ -480,10 +494,10 @@ flowchart TB
         CL["<b>độ sáng nền</b> = Y của ảnh nền<br/>trung bình 8×8 → phóng lại<br/>(chu kỳ ≥ 16 px, không có cạnh)"]
         CD --> CG --> CN --> CB --> CL
     end
-    subgraph EDG["<b>② Nhánh ĐƯỜNG NÉT</b> · 256 × 256 · kênh sáng Y · NAFNet · 3,18 M tham số"]
+    subgraph EDG["<b>② Nhánh ĐƯỜNG NÉT</b> · 256 × 256 · kênh sáng Y · NAFNet · 3,10 M tham số"]
         direction TB
         EY["<b>Y ảnh mờ</b> · 1 × 256 × 256<br/>+ độ sáng nền (không truyền gradient ngược)"]
-        EN["<b>NAFNet U-Net 5 tầng</b> · 30 NAFBlock<br/>256² ×3 (48) → 128² ×2 (64) → 64² ×4 (96) → 32² ×4 (128)<br/>đáy 16² + ZI · 8 khối (160) · decoder 2·2·2·3 · skip cộng<br/>đầu phụ 128², 64² · conv cuối <b>zero-init</b>"]
+        EN["<b>NAFNet U-Net 5 tầng</b> · 28 NAFBlock<br/>256² ×2 (32) → 128² ×2 (64) → 64² ×4 (96) → 32² ×4 (128)<br/>đáy 16² + ZI · 8 khối (160) · decoder 2·2·2·2 · skip cộng<br/>đầu phụ 128², 64² · conv cuối <b>zero-init</b>"]
         ED["<b>chi tiết đường nét</b> · 1 × 256 × 256<br/>= mọi cạnh của kênh sáng"]
         EY --> EN --> ED
     end
@@ -722,16 +736,16 @@ Backbone (transform + 2 encoder + fusion) **đóng băng ở chế độ eval**.
 decoder được cập nhật.
 
 **Decoder ảnh — tách màu + đường nét** (`image_decoder: split_color_edge`,
-`split_branch_arch: nafnet_edge`, 3.346.099 tham số):
+`split_branch_arch: nafnet_edge`, 3.285.012 tham số kể cả CNN làm nét):
 
-| Bước | Nhánh màu (161.552) | Nhánh đường nét — NAFNet (3.184.547) |
+| Bước | Nhánh màu (161.552) | Nhánh đường nét — NAFNet (3.102.531; p14–p17: 3.184.547) |
 |---|---|---|
 | vào | ảnh mờ trung bình 2×2 `[3, 128, 128]` + `ZI` | Y ảnh mờ + độ sáng nền `[2, 256, 256]` + `ZI` |
 | toàn ảnh | **tone + màu** (26.221): 3 conv stride 2 → pool, + ZI pool, + mean/std từng kênh → MLP → `M·x^p + b` cho cả ảnh (zero-init = identity) | — |
-| đầu | conv 3×3 + ReLU `[32, 128, 128]` | `intro` conv 3×3 `[48, 256, 256]` |
-| thu nhỏ | — | NAFBlock ×3 `[48, 256²]` → ×2 `[64, 128²]` → ×4 `[96, 64²]` → ×4 `[128, 32²]`, mỗi lần conv 2×2 stride 2 |
+| đầu | conv 3×3 + ReLU `[32, 128, 128]` | `intro` conv 3×3 `[32, 256, 256]` |
+| thu nhỏ | — | NAFBlock ×2 `[32, 256²]` → ×2 `[64, 128²]` → ×4 `[96, 64²]` → ×4 `[128, 32²]`, mỗi lần conv 2×2 stride 2 |
 | latent | conv 1×1 + upsample `[32, 128, 128]` | đáy `[160, 16, 16]` **+ conv 1×1(ZI)**, rồi 8 NAFBlock |
-| thân / phóng lại | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | conv 1×1 + pixel shuffle, **cộng** skip, NAFBlock ×2 `[128, 32²]` → ×2 `[96, 64²]` → ×2 `[64, 128²]` → ×3 `[48, 256²]` |
+| thân / phóng lại | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | conv 1×1 + pixel shuffle, **cộng** skip, NAFBlock ×2 `[128, 32²]` → ×2 `[96, 64²]` → ×2 `[64, 128²]` → ×2 `[32, 256²]` (p14–p17: 48 kênh, ×3 cả hai phía) |
 | ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | conv 3×3 **zero-init** → chi tiết Y `[1, 256, 256]`; đầu phụ zero-init ở 128² và 64² |
 | làm nét loa → phễu (p17) | — | `OvercompleteRefiner` (20.929): nối chi tiết + Y + độ sáng nền `[3, 256²]` → **loa** conv 3×3 `[64, 256²]` + pixel shuffle ×2 `[16, 512²]` → **làm nét** 4 khối residual `[16, 512²]` → **phễu** pixel unshuffle `[64, 256²]` → conv 3×3 **zero-init** → cộng vào chi tiết |
 | *(p15/p16, `split_edge_refiner_scale: 1`)* | — | *`EdgeRefiner` (75.169): `[3, 256²]` → conv 3×3 `[32, 256²]` → 4 khối residual → conv 3×3 zero-init* |
@@ -801,12 +815,12 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | predictor ảnh — lân cận 5×5, kể cả đầu mịn 32² | 171.072 | 1, rồi vứt |
 | predictor IMU — lân cận ±2 | 68.352 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 — tách màu + đường nét | 3.367.028 | 2 |
+| decoder ảnh phase 2 — tách màu + đường nét | 3.285.012 | 2 |
 | ↳ nhánh màu (kể cả đầu tone/màu toàn ảnh 26.221) | 161.552 | 2 |
-| ↳ nhánh đường nét — NAFNet 30 khối | 3.184.547 | 2 |
+| ↳ nhánh đường nét — NAFNet 28 khối (p18; p14–p17: 30 khối, 3.184.547) | 3.102.531 | 2 |
 | ↳ CNN làm nét loa → phễu (p17; p15/p16 phẳng: 75.169) | 20.929 | 2 |
 | decoder IMU phase 2 | 358.012 | 2 |
-| **decoder phase 2 (tổng)** | **3.725.040** | 2 |
+| **decoder phase 2 (tổng)** | **3.643.024** | 2 |
 | *(VGG16 relu1_2–3_3 cho loss perceptual — đóng băng, không vào checkpoint)* | *1.735.488* | *—* |
 | *(decoder ảnh ResNet một khối `resnet_pixel`, nếu chọn)* | *799.811* | 2 |
 | *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |

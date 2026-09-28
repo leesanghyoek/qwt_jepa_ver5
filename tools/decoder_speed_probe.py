@@ -16,6 +16,7 @@ training step, and the speed-up of every setting over fp32 without benchmark.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -149,6 +150,7 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--benchmark", action="store_true",
                         help="also time with cuDNN benchmark (it crashed p16's phase 2 on Kaggle T4)")
+    parser.add_argument("--json", type=Path, help="also write the rows here (the notebook picks the precision from it)")
     args = parser.parse_args()
     device = torch.device(args.device)
     if device.type == "cuda":
@@ -164,6 +166,9 @@ def main() -> int:
     print(f"\n{'whole step vs fp32':<22}" + "".join(f"{base / row['whole step']:>19.2f}x" for row in rows))
     best = min(rows, key=lambda row: row["whole step"])
     print(f"\nFastest: {best['setting']} ({best['whole step']:.0f} ms per step of {args.batch} images).")
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({"batch": args.batch, "steps": args.steps, "rows": rows}, indent=1))
     return 0
 
 

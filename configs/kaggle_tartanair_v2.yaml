@@ -42,19 +42,22 @@ runtime:
   # update dau voi 'CUDA error: misaligned address' — race giua hai luong replica (khong loi
   # khi 1 GPU, khi tat cuDNN, hay khi CUDA_LAUNCH_BLOCKING=1). 1 GPU giu cuDNN; loss giong
   # het 2 GPU (batch_size van la batch toan cuc). Phuong an kia: gpu_count 2 + cudnn_enabled false.
-  gpu_count: 1
-  # 2 GPU khong dung luong chung: parallel: ddp + gpu_count: 2 (moi GPU mot tien trinh, chi phase 2;
-  # loss tinh tren ca batch nen ket qua khop 1 GPU). Mac dinh van data_parallel cho toi khi thu tren Kaggle.
-  parallel: data_parallel
+  # p18: 2 GPU bang DDP — moi GPU mot tien trinh, khong dung luong chung nen khong co race tren;
+  # loss tinh tren ca batch nen ket qua khop 1 GPU (tests/test_ddp.py). Chi phase 2; phase 1 van
+  # 1 GPU (VICReg can ca batch mot cho). Notebook dat lai hai khoa nay tu GPU_COUNT / PARALLEL.
+  gpu_count: 2
+  parallel: ddp
   cudnn_enabled: true
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p17_overcomplete
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p18_fast_2gpu
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   # p11 phase 2: RSS tien trinh train tang ~6,7 MiB/update (1,67 GB moi 250 update) toi
   # khi bi kill o update 4097; code chay CPU khong ro, nen ro nam o duong GPU. Qua nguong
   # nay, sau khi luu checkpoint, CLI thoat voi ma 75 va notebook tu resume — ket qua
   # giong het mot lan chay lien. Nam ngoai configuration hash.
-  restart_above_rss_gib: 16
+  # p18: nguong tinh cho MOI tien trinh; DDP co 2 tien trinh ma Kaggle chi co ~30 GB RAM, nen 10
+  # (1 GPU: 16). Tien trinh nao vuot thi ca hai cung luu-thoat-resume.
+  restart_above_rss_gib: 10
   # Tat benchmark KHONG chua duoc loi misaligned address (nguyen nhan la race DataParallel o tren);
   # de tat cho giong p14 cho toi khi do duoc no nhanh hon tren 1 GPU.
   cudnn_benchmark: false

@@ -2,7 +2,7 @@
 
 ![Sơ đồ kiến trúc QWT–JEPA](docs/kien_truc.svg)
 
-Kiến trúc hiện tại là recipe **p17** (`configs/pipeline_v3.yaml`). **Đọc theo ba vùng màu:**
+Kiến trúc hiện tại là recipe **p18** (`configs/pipeline_v3.yaml`). **Đọc theo ba vùng màu:**
 
 1. **① Backbone (xanh dương).** Ảnh mờ + tối (nhiễu B) đi qua **QWT Hilbert**, IMU nhiễu đi qua
    **Haar**. Mỗi bên có một encoder CNN 4 stage. Fusion có cổng trộn hai bên thành latent **ZI**
@@ -17,9 +17,9 @@ Kiến trúc hiện tại là recipe **p17** (`configs/pipeline_v3.yaml`). **Đ�
    (mũi tên skip), gồm hai nhánh rồi **ghép**:
    - Nhánh **màu** ở 128×128: một đường cong tone + ma trận màu **cho cả ảnh** (gỡ gamma, cân bằng
      trắng), rồi ResNet 6 khối sửa màu từng vùng.
-   - Nhánh **đường nét** (kênh sáng Y, 256×256) là **NAFNet** — U-Net 5 tầng, 30 NAFBlock
+   - Nhánh **đường nét** (kênh sáng Y, 256×256) là **NAFNet** — U-Net 5 tầng, 28 NAFBlock
      (LayerNorm, conv depthwise, SimpleGate, channel attention). **Encoder** thu nhỏ ÷2 mỗi tầng,
-     từ **đặc trưng nhỏ** (cạnh, vật nhỏ — tầng 256² có 48 kênh × 3 + 3 khối) tới **đặc trưng
+     từ **đặc trưng nhỏ** (cạnh, vật nhỏ — tầng 256² có 32 kênh × 2 + 2 khối, từ p18) tới **đặc trưng
      tổng thể** (bố cục, vật là gì); **Bottleneck** 16×16 nhận **ZI** (8 khối); **Decoder** phóng
      ×2 trở lại; **skip connection** cộng đặc trưng nhỏ từ Encoder sang Decoder; hai đầu phụ ở
      128² và 64² được chấm riêng.
@@ -34,10 +34,10 @@ Kiến trúc hiện tại là recipe **p17** (`configs/pipeline_v3.yaml`). **Đ�
 
 | | Phase 1 | Phase 2 |
 |---|---|---|
-| Train | backbone 1,33 M (+ 2 predictor 0,24 M và decoder neo 1,86 M, bỏ sau phase 1) | decoder ảnh 3,37 M (màu 0,16 M + NAFNet 3,18 M + CNN làm nét loa → phễu 0,02 M) + decoder IMU 0,36 M |
+| Train | backbone 1,33 M (+ 2 predictor 0,24 M và decoder neo 1,86 M, bỏ sau phase 1) | decoder ảnh 3,29 M (màu 0,16 M + NAFNet 3,10 M + CNN làm nét loa → phễu 0,02 M) + decoder IMU 0,36 M |
 | Loss | JEPA 1,0 (+ mịn 0,5, thô 0,25) · VICReg (covariance gộp) · decoder neo 0,45 · Jacobian 0,05 | ảnh: L1 · chi tiết QWT 2,0 · năng lượng 1,0 · VGG16 perceptual 0,5 (mảnh cắt 128²) · màu: L1 + thống kê màu 1,0 · nét: L1 · độ dốc 1,0 · FFT phức 1,0 · nhiều tỉ lệ 0,5 · gồ ghề thừa 2,0 · L1 đầu ra NAFNet 0,5 · IMU: SmoothL1 · chi tiết Haar · độ rung 2,0 |
 | Dữ liệu | nhiễu B: ít mờ, ít hạt; 10% frame chỉ nhiễu, 10% chỉ tối | như phase 1 |
-| Số học | fp32 | fp32 (fp16 đã thử ở p16: chậm gấp 5 lần trên T4 × 2) |
+| Số học | fp32, 1 GPU | fp16 nếu nhanh hơn trên T4 của phiên (notebook đo trước; p16 fp16 + DataParallel từng chậm gấp 5 lần), không thì fp32 · 2 GPU bằng DDP (mỗi GPU một tiến trình) |
 
 Chi tiết từng lớp: [README](README.md#kiến-trúc-chi-tiết). Vẽ lại hình:
 `python3 tools/draw_architecture.py docs/kien_truc.svg`.

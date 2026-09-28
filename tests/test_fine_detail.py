@@ -68,10 +68,12 @@ def test_the_feature_loss_is_frozen_and_sees_smoothing(monkeypatch):
     assert smooth.grad is not None and float(smooth.grad.abs().sum()) > 0
 
 
-def test_the_recipe_widens_the_top_level_and_turns_the_feature_loss_on():
+def test_the_recipe_keeps_the_feature_loss_on_with_the_p13_top_level():
     phase2 = load_config("configs/kaggle_tartanair_v2.yaml")["phase2"]
-    assert phase2["split_edge_naf_widths"][0] == 48
-    assert phase2["split_edge_naf_enc_blocks"][0] == phase2["split_edge_naf_dec_blocks"][0] == 3
+    # p14-p17 widened the 256x256 level to 48 channels x (3 + 3) blocks; p18 goes back to
+    # p13's 32 x (2 + 2): that level was ~3/4 of NAFNet's time.
+    assert phase2["split_edge_naf_widths"][0] == 32
+    assert phase2["split_edge_naf_enc_blocks"][0] == phase2["split_edge_naf_dec_blocks"][0] == 2
     assert phase2["perceptual_weight"] > 0
     assert load_config("configs/smoke.yaml")["phase2"]["perceptual_weight"] == 0.0
 

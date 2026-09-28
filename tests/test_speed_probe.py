@@ -44,13 +44,30 @@ def test_runtime_switches_are_validated_and_outside_the_hash(switch, value):
         validate_config(config)
 
 
-def test_the_recipe_trains_fp32_on_one_gpu_with_cudnn():
+def test_the_recipe_trains_on_two_gpus_as_two_processes_with_cudnn():
     # torch 2.10 + cuDNN 9.10, Kaggle T4 x2: fp32 + DataParallel + cuDNN died with
-    # "misaligned address"; one GPU, or cuDNN off, ran. Benchmarking was not the cause.
+    # "misaligned address" (a race between replica threads). p18 runs DDP instead, one
+    # process per GPU, and fp16 -- the notebook measures it first and may fall back.
     runtime = load_config("configs/kaggle_tartanair_v2.yaml")["runtime"]
-    assert load_config("configs/kaggle_tartanair_v2.yaml")["phase2"]["precision"] == "fp32"
-    assert runtime["gpu_count"] == 1 and runtime["cudnn_enabled"] is True
+    assert load_config("configs/kaggle_tartanair_v2.yaml")["phase2"]["precision"] == "amp_fp16"
+    assert runtime["gpu_count"] == 2 and runtime["parallel"] == "ddp" and runtime["cudnn_enabled"] is True
     assert runtime["cudnn_benchmark"] is False
+    # The RSS limit is per process: two of them must fit in Kaggle's ~30 GB.
+    assert 2 * runtime["restart_above_rss_gib"] <= 24
+
+
+def test_the_probe_writes_its_rows_for_the_notebook(tmp_path, monkeypatch):
+    import json
+
+    import decoder_speed_probe
+
+    out = tmp_path / "probe.json"
+    monkeypatch.setattr(sys, "argv", ["probe", "--config", "configs/smoke.yaml", "--device", "cpu", "--batch", "1",
+                                      "--steps", "1", "--warmup", "0", "--json", str(out)])
+    assert decoder_speed_probe.main() == 0
+    written = json.loads(out.read_text())
+    assert written["batch"] == 1 and [row["setting"] for row in written["rows"]] == ["fp32"]
+    assert written["rows"][0]["whole step"] > 0
 
 
 def test_the_log_reports_seconds_per_update():
