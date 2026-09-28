@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -68,12 +69,17 @@ def _configure_execution(config: dict[str, Any], args: argparse.Namespace, devic
     config["runtime"]["gpu_count"] = count
     info = execution_metadata(device, select_device_ids(device, count))
     # Opt-in: letting cuDNN time its conv algorithms once can be faster for
-    # fixed-shape batches, but on Kaggle T4 x2 it crashed p16's first phase-2
-    # update with "CUDA error: misaligned address"; the heuristic choice has
-    # run every earlier recipe.
+    # fixed-shape batches; the heuristic choice has run every earlier recipe.
     if device.type == "cuda" and config["runtime"].get("cudnn_benchmark", False):
         torch.backends.cudnn.benchmark = True
         info["cudnn_benchmark"] = True
+    # torch 2.10 + cuDNN 9.10 on Kaggle T4 x2: fp32 phase 2 under DataParallel died
+    # with "misaligned address" -- not on one GPU, not with cuDNN off, not with
+    # CUDA_LAUNCH_BLOCKING=1, so a race between the two replica threads. Off means
+    # PyTorch's own conv kernels; one GPU (gpu_count 1) keeps cuDNN.
+    if device.type == "cuda" and not config["runtime"].get("cudnn_enabled", True):
+        torch.backends.cudnn.enabled = False
+        info["cudnn_enabled"] = False
     print("Execution: " + json.dumps(info))
     return info
 
@@ -245,6 +251,11 @@ def _progress(update: int, maximum: int) -> str:
     """Tien do dang 1340/10000 13%, canh phai de log thang cot khi cuon."""
     width = len(str(maximum))
     return f"{update:>{width}}/{maximum} {100.0 * update / max(1, maximum):>3.0f}%"
+
+
+def _pace(started: float, first_update: int, update: int) -> str:
+    """Giay moi update tu luc tien trinh nay bat dau, tinh ca validation."""
+    return f"{(time.perf_counter() - started) / max(1, update - first_update):.2f} s/update"
 
 
 def _memory_mib() -> dict[str, float]:
@@ -693,6 +704,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         warning_checks = int(saved_metrics.get("consecutive_warning_checks", 0))
     maximum = config["phase1"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
+    started, first_update = time.perf_counter(), trainer.successful_updates
     while trainer.successful_updates < maximum:
         metrics = trainer.step(next(batches))
         log.write(metrics)
@@ -703,7 +715,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             anchor = f" recon={metrics['reconstruction']:.6f}" if "reconstruction" in metrics else ""
             print(
                 f"phase1 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" jepa={metrics['jepa']:.6f}{anchor}"
+                f" jepa={metrics['jepa']:.6f}{anchor} {_pace(started, first_update, update)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             validation = _validate_latent(
@@ -929,6 +941,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Resume needs best_guarded_validation.pt beside last.pt")
         import shutil
         shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
+    started, first_update = time.perf_counter(), trainer.successful_updates
     while trainer.successful_updates < maximum:
         group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
         metrics = trainer.step(group)
@@ -939,7 +952,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
                 f"phase2 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" image_l1={metrics['image_l1']:.6f}"
+                f" image_l1={metrics['image_l1']:.6f} {_pace(started, first_update, update)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             trainer.assert_backbone_frozen()

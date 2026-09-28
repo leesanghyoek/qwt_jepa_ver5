@@ -12,11 +12,14 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p16 bản fp32** (OUT `outputs/p16_fp32`) là run hiện tại: bản fp16 bên dưới chạy **chậm gấp 5
+**p16 bản fp32** (OUT `outputs/p16_1gpu`) là run hiện tại: bản fp16 bên dưới chạy **chậm gấp 5
 lần** trên Kaggle T4 × 2 (160 update mất 20 phút, 7,5 s/update; p14 fp32: 1,46 s/update), nên phase 2
-quay về fp32. Lần đầu có bật thêm `runtime.cudnn_benchmark`, nhưng update **đầu tiên** của phase 2
-chết với `CUDA error: misaligned address` trên T4; p14 cùng code fp32, không benchmark, chạy đủ
-5.000 update, nên benchmark giờ **tắt** (mặc định tắt, chỉ bật khi config ghi `true`). Loss VGG
+quay về fp32. Trên môi trường Kaggle hiện tại (torch 2.10, cuDNN 9.10), fp32 + **2 GPU
+(DataParallel) + cuDNN** chết ngay update đầu với `CUDA error: misaligned address`. Chẩn đoán trên
+Kaggle: 1 GPU chạy được, 2 GPU tắt cuDNN chạy được, 2 GPU với `CUDA_LAUNCH_BLOCKING=1` không lỗi —
+tức một race giữa hai luồng replica, không phải lỗi của model (tắt cuDNN benchmark không chữa được).
+Recipe giờ chạy **1 GPU** (`runtime.gpu_count: 1`, cuDNN giữ nguyên; loss update 1 giống hệt 2 GPU);
+phương án kia là `gpu_count: 2` + `runtime.cudnn_enabled: false`. Log in thêm s/update. Loss VGG
 0,5 trên mảnh cắt 128² và CNN làm nét giữ nguyên. `tools/decoder_speed_probe.py` đo từng khối
 (NAFNet, CNN làm nét, VGG, cả bước train) ở fp32/fp16 trên 1 GPU với dữ liệu giả, khoảng 2 phút
 — dùng nó trước khi bật lại `amp_fp16`; `--benchmark` đo thêm có benchmark (có thể sập trên T4).

@@ -38,8 +38,13 @@ experiment_name: qwt_jepa_sharp_smooth_kaggle
 
 runtime:
   device: cuda
-  gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_fp32
+  # torch 2.10 + cuDNN 9.10 tren Kaggle T4 x2: fp32 + DataParallel (2 GPU) + cuDNN chet ngay
+  # update dau voi 'CUDA error: misaligned address' — race giua hai luong replica (khong loi
+  # khi 1 GPU, khi tat cuDNN, hay khi CUDA_LAUNCH_BLOCKING=1). 1 GPU giu cuDNN; loss giong
+  # het 2 GPU (batch_size van la batch toan cuc). Phuong an kia: gpu_count 2 + cudnn_enabled false.
+  gpu_count: 1
+  cudnn_enabled: true
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_1gpu
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   # p11 phase 2: RSS tien trinh train tang ~6,7 MiB/update (1,67 GB moi 250 update) toi
@@ -47,9 +52,8 @@ runtime:
   # nay, sau khi luu checkpoint, CLI thoat voi ma 75 va notebook tu resume — ket qua
   # giong het mot lan chay lien. Nam ngoai configuration hash.
   restart_above_rss_gib: 16
-  # p16 fp32 bat benchmark: update DAU TIEN cua phase 2 chet voi 'CUDA error: misaligned address'
-  # (bao tre o einsum cua GlobalToneColor, sau cac conv). p14 cung code fp32, KHONG benchmark,
-  # chay du 5000 update, nen nghi pham la mot thuat toan conv cuDNN thu khi do tren T4. Tat.
+  # Tat benchmark KHONG chua duoc loi misaligned address (nguyen nhan la race DataParallel o tren);
+  # de tat cho giong p14 cho toi khi do duoc no nhanh hon tren 1 GPU.
   cudnn_benchmark: false
   validation_batches: 32
 

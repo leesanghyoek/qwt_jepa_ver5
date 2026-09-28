@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import copy
 import sys
+import time
 from pathlib import Path
 
 import pytest
 import torch
 
+from qjepa.cli import _pace
 from qjepa.config import load_config, validate_config
 from qjepa.training.checkpoints import configuration_hash
 
@@ -30,19 +32,28 @@ def test_the_probe_times_every_block_on_cpu():
         assert all(value > 0 for key, value in row.items() if key not in ("setting", "edge refiner"))
 
 
-def test_cudnn_benchmark_is_validated_and_outside_the_hash():
+@pytest.mark.parametrize("switch, value", [("cudnn_benchmark", True), ("cudnn_enabled", False), ("gpu_count", 1)])
+def test_runtime_switches_are_validated_and_outside_the_hash(switch, value):
     config = copy.deepcopy(load_config("configs/smoke.yaml"))
     before = [configuration_hash(config, phase) for phase in ("phase1", "phase2")]
-    config["runtime"]["cudnn_benchmark"] = False
+    config["runtime"][switch] = value
     validate_config(config)
     assert before == [configuration_hash(config, phase) for phase in ("phase1", "phase2")]
-    config["runtime"]["cudnn_benchmark"] = "yes"
-    with pytest.raises(ValueError, match="cudnn_benchmark"):
+    config["runtime"][switch] = "yes"
+    with pytest.raises(ValueError, match=switch):
         validate_config(config)
 
 
-def test_the_recipe_is_back_in_fp32_with_benchmarking_off():
-    # Benchmarking crashed p16's first phase-2 update on T4 (misaligned address).
-    config = load_config("configs/kaggle_tartanair_v2.yaml")
-    assert config["phase2"]["precision"] == "fp32"
-    assert config["runtime"]["cudnn_benchmark"] is False
+def test_the_recipe_trains_fp32_on_one_gpu_with_cudnn():
+    # torch 2.10 + cuDNN 9.10, Kaggle T4 x2: fp32 + DataParallel + cuDNN died with
+    # "misaligned address"; one GPU, or cuDNN off, ran. Benchmarking was not the cause.
+    runtime = load_config("configs/kaggle_tartanair_v2.yaml")["runtime"]
+    assert load_config("configs/kaggle_tartanair_v2.yaml")["phase2"]["precision"] == "fp32"
+    assert runtime["gpu_count"] == 1 and runtime["cudnn_enabled"] is True
+    assert runtime["cudnn_benchmark"] is False
+
+
+def test_the_log_reports_seconds_per_update():
+    started = time.perf_counter() - 3.0
+    assert 1.4 < float(_pace(started, 10, 12).split()[0]) < 1.7
+    assert _pace(time.perf_counter(), 5, 5).endswith(" s/update")        # no division by zero
