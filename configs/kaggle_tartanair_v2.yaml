@@ -43,6 +43,9 @@ runtime:
   # khi 1 GPU, khi tat cuDNN, hay khi CUDA_LAUNCH_BLOCKING=1). 1 GPU giu cuDNN; loss giong
   # het 2 GPU (batch_size van la batch toan cuc). Phuong an kia: gpu_count 2 + cudnn_enabled false.
   gpu_count: 1
+  # 2 GPU khong dung luong chung: parallel: ddp + gpu_count: 2 (moi GPU mot tien trinh, chi phase 2;
+  # loss tinh tren ca batch nen ket qua khop 1 GPU). Mac dinh van data_parallel cho toi khi thu tren Kaggle.
+  parallel: data_parallel
   cudnn_enabled: true
   output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_1gpu
   log_every_updates: 10

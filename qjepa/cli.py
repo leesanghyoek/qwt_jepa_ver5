@@ -45,6 +45,7 @@ from .evaluation.reporting import (
     evaluation_summary, image_panel, plot_training, save_imu_result, write_csv, write_json,
 )
 from .models import LatentPretrainingModel, RestorationSystem
+from .distributed import any_rank, rank_and_world, share_rank0_rng, spawn as spawn_ranks
 from .execution import Phase1Forward, RestorationForward, execution_metadata, parallel_forward, select_device_ids
 from .training.checkpoints import (
     atomic_torch_save,
@@ -67,7 +68,7 @@ def _configure_execution(config: dict[str, Any], args: argparse.Namespace, devic
                          *, use_saved_setting: bool = True) -> dict[str, Any]:
     count = getattr(args, "gpus", None) or (config["runtime"].get("gpu_count", "auto") if use_saved_setting else "auto")
     config["runtime"]["gpu_count"] = count
-    info = execution_metadata(device, select_device_ids(device, count))
+    info = execution_metadata(device, select_device_ids(device, count), rank_and_world()[1])
     # Opt-in: letting cuDNN time its conv algorithms once can be faster for
     # fixed-shape batches; the heuristic choice has run every earlier recipe.
     if device.type == "cuda" and config["runtime"].get("cudnn_benchmark", False):
@@ -82,6 +83,21 @@ def _configure_execution(config: dict[str, Any], args: argparse.Namespace, devic
         info["cudnn_enabled"] = False
     print("Execution: " + json.dumps(info))
     return info
+
+
+def _ddp_world(config: dict[str, Any], args: argparse.Namespace, device: torch.device) -> int:
+    """Phase-2 processes: one per GPU with runtime.parallel ddp, otherwise 1.
+
+    On CPU, ``gpu_count: 2`` gives two gloo processes -- what the tests run.
+    """
+    if config["runtime"].get("parallel", "data_parallel") != "ddp":
+        return 1
+    count = str(getattr(args, "gpus", None) or config["runtime"].get("gpu_count", "auto"))
+    if count == "auto":
+        return min(2, torch.cuda.device_count()) if device.type == "cuda" else 1
+    if device.type == "cuda" and int(count) > torch.cuda.device_count():
+        raise ValueError(f"DDP asked for {count} GPUs; only {torch.cuda.device_count()} visible")
+    return int(count)
 
 
 def _manifest(config: dict[str, Any], override: str | None):
@@ -155,6 +171,8 @@ def _training_batch_stream(
     *,
     start_microbatch: int,
     namespace: str,
+    rank: int = 0,
+    world: int = 1,
 ) -> Iterator[dict[str, Any]]:
     batches_per_epoch = len(dataset) // batch_size
     if batches_per_epoch < 1:
@@ -172,13 +190,14 @@ def _training_batch_stream(
             config["data"]["minimum_trajectories_per_batch"],
             epoch_seed,
         )
+        sampler = _SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler
         loader = _loader(
             config,
             dataset,
             batch_size,
             train=True,
             generator=torch.Generator().manual_seed(epoch_seed),
-            batch_sampler=_SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler,
+            batch_sampler=_RankShare(sampler, rank, world) if world > 1 else sampler,
         )
         produced = False
         for batch in loader:
@@ -215,12 +234,38 @@ class _SkipBatches:
         return max(0, len(self.inner) - self.skip)
 
 
+class _RankShare:
+    """Phan cua rank r trong moi batch: doan lien tiep [r*n/w, (r+1)*n/w).
+
+    Gom cac phan theo thu tu rank thi ra dung batch theo thu tu sampler, nen
+    loss (tinh tren ca batch) giong het mot tien trinh tu nap ca batch. Moi rank
+    chi giai nen va lam nhieu phan cua minh.
+    """
+
+    def __init__(self, inner, rank: int, world: int) -> None:
+        self.inner, self.rank, self.world = inner, rank, world
+
+    def __iter__(self):
+        for batch in self.inner:
+            if len(batch) % self.world:
+                raise ValueError(f"Batch of {len(batch)} does not split over {self.world} ranks")
+            share = len(batch) // self.world
+            yield batch[self.rank * share:(self.rank + 1) * share]
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+
 class _Jsonl:
-    def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path | None):
+        # None: a DDP rank other than 0, which writes nothing.
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
 
     def write(self, payload: dict[str, Any]) -> None:
+        if self.path is None:
+            return
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -240,7 +285,9 @@ def _restart_if_memory_high(config: dict[str, Any], memory: dict[str, float], up
     runtime.restart_above_rss_gib is set; runtime keys are outside the hash.
     """
     limit = config["runtime"].get("restart_above_rss_gib")
-    if limit is None or update >= maximum or memory["rss_mib"] <= float(limit) * 1024:
+    over = limit is not None and update < maximum and memory["rss_mib"] > float(limit) * 1024
+    # Under DDP every rank calls this after rank 0 has saved; all go when one must.
+    if not any_rank(over):
         return
     print(f"  RSS {memory['rss_mib'] / 1024:.1f} GiB > {limit} GiB: checkpoint da luu o update {update};"
           f" thoat de khoi dong lai va resume (exit {RESTART_EXIT_CODE}).", flush=True)
@@ -650,6 +697,10 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     config = load_config(_config_path(args.config))
     manifest, _ = _manifest(config, args.manifest)
     device = resolve_device(args.device or config["runtime"]["device"])
+    if config["runtime"].get("parallel") == "ddp" and not getattr(args, "gpus", None):
+        # DDP is phase 2 only (VICReg needs the whole batch in one place), and
+        # DataParallel races on Kaggle's torch 2.10: phase 1 takes one GPU.
+        config["runtime"]["gpu_count"] = 1
     execution = _configure_execution(config, args, device)
     seed_everything(config["phase1"]["initialization_seed"])
     normalizer = build_normalizer(manifest["meta"])
@@ -802,6 +853,17 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     if not checkpoint:
         raise ValueError("Pass --backbone-checkpoint from a completed v3 phase 1")
     device = resolve_device(args.device or config["runtime"]["device"])
+    rank, world = rank_and_world()
+    ranks = _ddp_world(config, args, device)
+    if ranks > 1 and world == 1:
+        # runtime.parallel ddp: this process only launches one process per GPU.
+        spawn_ranks(command_train_phase2, args, ranks, cuda=device.type == "cuda")
+        return
+    lead = rank == 0                              # validates, logs and saves
+    if world > 1:
+        args.gpus = "1"                           # each rank sees only its own GPU
+        # The 4 vCPUs are shared, and each rank loads only its share of a batch.
+        config["data"]["num_workers"] = -(-int(config["data"]["num_workers"]) // world)
     execution = _configure_execution(config, args, device)
     phase1_model, parent_payload = _load_phase1_for_phase2(config, manifest, checkpoint, device)
     seed_everything(config["phase2"]["decoder_initialization_seed"])
@@ -888,10 +950,13 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         config["phase2"]["batch_size"],
         start_microbatch=trainer.successful_updates * config["phase2"]["gradient_accumulation"],
         namespace="phase2",
+        rank=rank,
+        world=world,
     )
     output = Path(args.output or config["runtime"]["output_dir"]) / "phase2"
-    _prepare_run(output, args.resume, trainer.successful_updates)
-    if "full_guard" in config["phase2"] and guard_reference is None:
+    if lead:
+        _prepare_run(output, args.resume, trainer.successful_updates)
+    if lead and "full_guard" in config["phase2"] and guard_reference is None:
         if blur_loader is None:
             raise ValueError("Guarded phase 2 needs blur validation")
         guard_reference = {
@@ -899,10 +964,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 system, validation_loader, validation_dataset, device,
                 config["runtime"]["validation_batches"],
                 config["phase2"]["smooth_l1_beta"],
-                forward_model=trainer.forward_model,
+                forward_model=trainer.evaluation_model,
             ),
             "blur": _validate_active_blur(system, blur_loader, device,
-                                            forward_model=trainer.forward_model),
+                                            forward_model=trainer.evaluation_model),
         }
         print(
             "  guarded init reference"
@@ -913,34 +978,36 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             f" | blur MAE {guard_reference['blur']['image_mae_restored']:.5f}"
             f" | edge {guard_reference['blur']['strong_edge_gradient_mae_restored']:.5f}"
         )
-    _write_resolved(config, output)
-    write_json(output / "execution.json", execution)
-    write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
-    if blur_dataset is not None:
-        write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
-    if guard_reference is not None:
-        write_json(output / "guard_reference.json", guard_reference)
-    log = _Jsonl(output / "train.jsonl")
+    if lead:
+        _write_resolved(config, output)
+        write_json(output / "execution.json", execution)
+        write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+        if blur_dataset is not None:
+            write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
+        if guard_reference is not None:
+            write_json(output / "guard_reference.json", guard_reference)
+    log = _Jsonl(output / "train.jsonl" if lead else None)
     maximum = config["phase2"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
-    if args.resume and math.isfinite(best_validation) and not (output / "best_joint_validation.pt").exists():
+    if lead and args.resume and math.isfinite(best_validation) and not (output / "best_joint_validation.pt").exists():
         prior_best = Path(args.resume).parent / "best_joint_validation.pt"
         if not prior_best.exists():
             raise ValueError("Resume needs best_joint_validation.pt beside last.pt; copy the complete phase2 folder")
         import shutil
         shutil.copy2(prior_best, output / "best_joint_validation.pt")
-    if args.resume and math.isfinite(best_blur_score) and not (output / "best_blur_validation.pt").exists():
+    if lead and args.resume and math.isfinite(best_blur_score) and not (output / "best_blur_validation.pt").exists():
         prior_best_blur = Path(args.resume).parent / "best_blur_validation.pt"
         if not prior_best_blur.exists():
             raise ValueError("Resume needs best_blur_validation.pt beside last.pt")
         import shutil
         shutil.copy2(prior_best_blur, output / "best_blur_validation.pt")
-    if args.resume and math.isfinite(best_guarded_score) and not (output / "best_guarded_validation.pt").exists():
+    if lead and args.resume and math.isfinite(best_guarded_score) and not (output / "best_guarded_validation.pt").exists():
         prior_best_guarded = Path(args.resume).parent / "best_guarded_validation.pt"
         if not prior_best_guarded.exists():
             raise ValueError("Resume needs best_guarded_validation.pt beside last.pt")
         import shutil
         shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
+    share_rank0_rng()                             # the guard reference drew on rank 0 only
     started, first_update = time.perf_counter(), trainer.successful_updates
     while trainer.successful_updates < maximum:
         group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
@@ -955,6 +1022,11 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 f" image_l1={metrics['image_l1']:.6f} {_pace(started, first_update, update)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
+            if not lead:
+                # Rank 0 validates and saves; take its RNG and its restart decision.
+                share_rank0_rng()
+                _restart_if_memory_high(config, _memory_mib(), update, maximum)
+                continue
             trainer.assert_backbone_frozen()
             evaluation = _evaluate_with_overlap(
                 system,
@@ -963,14 +1035,14 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 device,
                 config["runtime"]["validation_batches"],
                 config["phase2"]["smooth_l1_beta"],
-                forward_model=trainer.forward_model,
+                forward_model=trainer.evaluation_model,
             )
             validation = {f"validation_{key}": value for key, value in evaluation.items()}
             blur_validation = {}
             blur_score = math.inf
             if blur_loader is not None:
                 blur = _validate_active_blur(system, blur_loader, device,
-                                              forward_model=trainer.forward_model)
+                                              forward_model=trainer.evaluation_model)
                 blur_validation = {f"blur_validation_{key}": value for key, value in blur.items()}
                 blur_score = max(
                     float(blur["image_mae_restored"]) / max(float(blur["image_mae_input"]), 1e-12),
@@ -1051,9 +1123,11 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             if improved_guarded:
                 atomic_torch_save(payload, output / "best_guarded_validation.pt")
             atomic_torch_save(payload, output / "last.pt")
+            share_rank0_rng()
             _restart_if_memory_high(config, memory, update, maximum)
-    plot_training(output)
-    print(f"Saved phase-2 checkpoints and training_curves.png: {output}")
+    if lead:
+        plot_training(output)
+        print(f"Saved phase-2 checkpoints and training_curves.png: {output}")
 
 
 def _system_from_phase2(checkpoint: str, device: torch.device) -> tuple[RestorationSystem, dict[str, Any]]:

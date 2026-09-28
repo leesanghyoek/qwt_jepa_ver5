@@ -41,7 +41,11 @@ def parallel_forward(module: nn.Module, device: torch.device, gpu_count: str | i
     return module, ids
 
 
-def execution_metadata(device: torch.device, ids: list[int]) -> dict:
+def execution_metadata(device: torch.device, ids: list[int], world: int = 1) -> dict:
+    if world > 1:
+        # One process per device (qjepa.distributed); ids are this rank's.
+        return {"backend": "ddp", "device": str(device), "device_ids": ids, "gpu_count": world,
+                "loss_batch": "global_gathered_batch"}
     return {"backend": "data_parallel" if len(ids) > 1 else "single_device",
             "device": str(device), "device_ids": ids, "gpu_count": len(ids),
             "loss_batch": "global_gathered_batch"}

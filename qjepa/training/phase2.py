@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 import torch
+from torch import nn
 
+from ..distributed import gather_shares, rank_and_world
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
@@ -40,6 +43,13 @@ class Phase2Trainer:
         self.forward_model, self.device_ids = parallel_forward(
             RestorationForward(self.system), device, config["runtime"].get("gpu_count", "auto")
         )
+        self.rank, self.world = rank_and_world()
+        if self.world > 1:
+            # One process per GPU (qjepa.distributed). The backbone is frozen and the
+            # decoders hold no running statistics: no buffers to broadcast.
+            self.forward_model = nn.parallel.DistributedDataParallel(
+                self.forward_model, device_ids=[torch.cuda.current_device()] if self.device.type == "cuda" else None,
+                broadcast_buffers=False)
         self.parent_checkpoint = parent_checkpoint
         self.manifest_hash = manifest_hash
         self.successful_updates = 0
@@ -75,6 +85,11 @@ class Phase2Trainer:
             group["lr"] = lr
         return lr
 
+    @property
+    def evaluation_model(self):
+        """The forward for validation: under DDP only rank 0 validates, on its own GPU."""
+        return self.forward_model.module if self.world > 1 else self.forward_model
+
     def assert_backbone_frozen(self) -> None:
         if state_dict_hash(self.system.backbone) != self.frozen_backbone_hash:
             raise RuntimeError("Frozen backbone changed during phase 2")
@@ -91,82 +106,91 @@ class Phase2Trainer:
         lr = self._set_lr()
         totals: dict[str, float] = {"loss": 0.0, "image_l1": 0.0, "imu_accel_smooth_l1": 0.0,
                                     "imu_gyro_smooth_l1": 0.0}
-        for raw_batch in microbatches:
+        for index, raw_batch in enumerate(microbatches):
             batch = _to_device(raw_batch, self.device)
-            restored = self.forward_model(
-                batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"]
-            )
-            clean_imu = self.system.normalizer.normalize(batch["imu_clean_phys"])
-            detail_weight = float(self.phase.get("reconstruction_detail_weight", 0.0))
-            image_transform = self.system.backbone.image_transform
-            image_target = imu_target = None
-            if detail_weight > 0:
-                with torch.no_grad():
-                    image_target, _ = image_transform.analysis(batch["image_clean"])
-                    imu_target, _ = self.system.backbone.imu_transform.analysis(clean_imu)
-            # The decoder's 48 channels are 4x redundant; synthesis averages the
-            # trees, so a detail term scored on them can be lowered in the null
-            # space with the image unchanged. Re-analysing the restored image
-            # scores only what reaches the pixels. Absent from configs written
-            # before the key existed, which keep scoring the decoder output.
-            scores_image = self.phase.get("image_detail_source", "decoder_coefficients") == "restored_image"
-            if self.system.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
-                # Already analysis(image), computed with the graph in decode.
-                visible_coefficients = restored["image_coefficients"]
-            else:
-                with torch.set_grad_enabled(scores_image):
-                    visible_coefficients, _ = image_transform.analysis(restored["image"])
-            image_coefficients = visible_coefficients if scores_image else restored["image_coefficients"]
-            loss, parts = phase2_reconstruction_loss(
-                restored["image"],
-                batch["image_clean"],
-                restored["imu_normalized"],
-                clean_imu,
-                beta=self.phase["smooth_l1_beta"],
-                image_coefficients=image_coefficients,
-                image_coefficient_target=image_target,
-                imu_coefficients=restored["imu_coefficients"],
-                imu_coefficient_target=imu_target,
-                detail_weight=detail_weight,
-                variation_weight=float(self.phase.get("imu_variation_weight", 0.0)),
-                detail_energy_weight=float(self.phase.get("detail_energy_weight", 0.0)),
-                # Absent from configs written before the term existed, which must
-                # keep meaning what they meant when they were trained.
-                image_detail_loss=str(self.phase.get("image_detail_loss", "coefficient")),
-            )
-            if "image_detail" in restored:
-                split_loss, split_parts = color_edge_split_loss(
-                    restored["image_color_base"], restored["image_illumination"],
-                    restored["image_detail"], restored["image"], batch["image_clean"],
-                    color_scale=int(self.phase["split_color_scale"]),
-                    illumination_scale=int(self.phase["split_illumination_scale"]),
-                    color_weight=float(self.phase["split_color_weight"]),
-                    edge_weight=float(self.phase["split_edge_weight"]),
-                    gradient_weight=float(self.phase["split_gradient_weight"]),
-                    stats_weight=float(self.phase.get("split_color_stats_weight", 0.0)),
-                    fft_weight=float(self.phase.get("split_edge_fft_weight", 0.0)),
-                    aux_details={int(key[len("image_detail_aux"):]): value for key, value in restored.items()
-                                 if key.startswith("image_detail_aux")},
-                    aux_weight=float(self.phase.get("split_edge_aux_weight", 0.0)),
-                    detail_stage1=restored.get("image_detail_stage1"),
-                    stage1_weight=float(self.phase.get("split_edge_stage1_weight", 0.0)),
-                    smooth_weight=float(self.phase.get("split_edge_smooth_weight", 0.0)),
+            # DDP averages gradients only on the last microbatch of the update.
+            accumulating = self.world > 1 and index < expected - 1
+            with self.forward_model.no_sync() if accumulating else nullcontext():
+                restored = self.forward_model(
+                    batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"]
                 )
-                loss = loss + split_loss
-                parts.update(split_parts)
-            if self.perceptual is not None:
-                with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
-                    perceptual = self.perceptual(restored["image"], batch["image_clean"])
-                loss = loss + self.perceptual_weight * perceptual
-                parts["image_perceptual"] = perceptual
-            with torch.no_grad():
-                parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
-                    restored["image_coefficients"], visible_coefficients)
-            loss = self.phase["reconstruction_loss_weight"] * loss
-            self.scaler.scale(loss / expected).backward()
-            totals["loss"] += float(loss.detach()) / expected
-            for key, value in parts.items():
-                totals[key] = totals.get(key, 0.0) + float(value.detach()) / expected
+                if self.world > 1:
+                    # This rank ran the model on its share; the loss sees the whole microbatch.
+                    restored = {key: gather_shares(value, keep_graph=True) for key, value in restored.items()}
+                    batch = {key: gather_shares(value, keep_graph=False) if isinstance(value, torch.Tensor)
+                             else value for key, value in batch.items()}
+                clean_imu = self.system.normalizer.normalize(batch["imu_clean_phys"])
+                detail_weight = float(self.phase.get("reconstruction_detail_weight", 0.0))
+                image_transform = self.system.backbone.image_transform
+                image_target = imu_target = None
+                if detail_weight > 0:
+                    with torch.no_grad():
+                        image_target, _ = image_transform.analysis(batch["image_clean"])
+                        imu_target, _ = self.system.backbone.imu_transform.analysis(clean_imu)
+                # The decoder's 48 channels are 4x redundant; synthesis averages the
+                # trees, so a detail term scored on them can be lowered in the null
+                # space with the image unchanged. Re-analysing the restored image
+                # scores only what reaches the pixels. Absent from configs written
+                # before the key existed, which keep scoring the decoder output.
+                scores_image = self.phase.get("image_detail_source", "decoder_coefficients") == "restored_image"
+                if self.system.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
+                    # Already analysis(image), computed with the graph in decode.
+                    visible_coefficients = restored["image_coefficients"]
+                else:
+                    with torch.set_grad_enabled(scores_image):
+                        visible_coefficients, _ = image_transform.analysis(restored["image"])
+                image_coefficients = visible_coefficients if scores_image else restored["image_coefficients"]
+                loss, parts = phase2_reconstruction_loss(
+                    restored["image"],
+                    batch["image_clean"],
+                    restored["imu_normalized"],
+                    clean_imu,
+                    beta=self.phase["smooth_l1_beta"],
+                    image_coefficients=image_coefficients,
+                    image_coefficient_target=image_target,
+                    imu_coefficients=restored["imu_coefficients"],
+                    imu_coefficient_target=imu_target,
+                    detail_weight=detail_weight,
+                    variation_weight=float(self.phase.get("imu_variation_weight", 0.0)),
+                    detail_energy_weight=float(self.phase.get("detail_energy_weight", 0.0)),
+                    # Absent from configs written before the term existed, which must
+                    # keep meaning what they meant when they were trained.
+                    image_detail_loss=str(self.phase.get("image_detail_loss", "coefficient")),
+                )
+                if "image_detail" in restored:
+                    split_loss, split_parts = color_edge_split_loss(
+                        restored["image_color_base"], restored["image_illumination"],
+                        restored["image_detail"], restored["image"], batch["image_clean"],
+                        color_scale=int(self.phase["split_color_scale"]),
+                        illumination_scale=int(self.phase["split_illumination_scale"]),
+                        color_weight=float(self.phase["split_color_weight"]),
+                        edge_weight=float(self.phase["split_edge_weight"]),
+                        gradient_weight=float(self.phase["split_gradient_weight"]),
+                        stats_weight=float(self.phase.get("split_color_stats_weight", 0.0)),
+                        fft_weight=float(self.phase.get("split_edge_fft_weight", 0.0)),
+                        aux_details={int(key[len("image_detail_aux"):]): value for key, value in restored.items()
+                                     if key.startswith("image_detail_aux")},
+                        aux_weight=float(self.phase.get("split_edge_aux_weight", 0.0)),
+                        detail_stage1=restored.get("image_detail_stage1"),
+                        stage1_weight=float(self.phase.get("split_edge_stage1_weight", 0.0)),
+                        smooth_weight=float(self.phase.get("split_edge_smooth_weight", 0.0)),
+                    )
+                    loss = loss + split_loss
+                    parts.update(split_parts)
+                if self.perceptual is not None:
+                    with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
+                        perceptual = self.perceptual(restored["image"], batch["image_clean"])
+                    loss = loss + self.perceptual_weight * perceptual
+                    parts["image_perceptual"] = perceptual
+                with torch.no_grad():
+                    parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
+                        restored["image_coefficients"], visible_coefficients)
+                loss = self.phase["reconstruction_loss_weight"] * loss
+                # x world: only this rank's share carries a graph, and DDP averages over ranks.
+                self.scaler.scale(loss * self.world / expected).backward()
+                totals["loss"] += float(loss.detach()) / expected
+                for key, value in parts.items():
+                    totals[key] = totals.get(key, 0.0) + float(value.detach()) / expected
         self.scaler.unscale_(self.optimizer)
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
         amp_report: dict[str, float | bool] = {}
@@ -211,7 +235,7 @@ class Phase2Trainer:
                 "decoder_current_hash": state_dict_hash(self.system.decoders),
                 "configuration_hash": configuration_hash(config, "phase2"),
                 "manifest_hash": self.manifest_hash,
-                "execution": execution_metadata(self.device, self.device_ids),
+                "execution": execution_metadata(self.device, self.device_ids, self.world),
             },
             "system": self.system.state_dict(),
             "optimizer": self.optimizer.state_dict(),

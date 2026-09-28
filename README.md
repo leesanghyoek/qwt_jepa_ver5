@@ -19,7 +19,10 @@ quay về fp32. Trên môi trường Kaggle hiện tại (torch 2.10, cuDNN 9.10
 Kaggle: 1 GPU chạy được, 2 GPU tắt cuDNN chạy được, 2 GPU với `CUDA_LAUNCH_BLOCKING=1` không lỗi —
 tức một race giữa hai luồng replica, không phải lỗi của model (tắt cuDNN benchmark không chữa được).
 Recipe giờ chạy **1 GPU** (`runtime.gpu_count: 1`, cuDNN giữ nguyên; loss update 1 giống hệt 2 GPU);
-phương án kia là `gpu_count: 2` + `runtime.cudnn_enabled: false`. Log in thêm s/update. Loss VGG
+phương án kia là `gpu_count: 2` + `runtime.cudnn_enabled: false`. Log in thêm s/update.
+`runtime.parallel: ddp` (+ `gpu_count: 2`) chạy phase 2 bằng **một tiến trình mỗi GPU**
+(`qjepa/distributed.py`): mỗi GPU chạy model trên nửa batch, đầu ra được gom lại và loss tính trên
+cả batch, nên trọng số khớp một tiến trình (`tests/test_ddp.py`, kể cả khi resume). Phase 1 vẫn 1 GPU. Loss VGG
 0,5 trên mảnh cắt 128² và CNN làm nét giữ nguyên. `tools/decoder_speed_probe.py` đo từng khối
 (NAFNet, CNN làm nét, VGG, cả bước train) ở fp32/fp16 trên 1 GPU với dữ liệu giả, khoảng 2 phút
 — dùng nó trước khi bật lại `amp_fp16`; `--benchmark` đo thêm có benchmark (có thể sập trên T4).
