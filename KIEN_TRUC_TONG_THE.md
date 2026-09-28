@@ -2,7 +2,7 @@
 
 ![Sơ đồ kiến trúc QWT–JEPA](docs/kien_truc.svg)
 
-Kiến trúc hiện tại là recipe **p16** (`configs/pipeline_v3.yaml`). **Đọc theo ba vùng màu:**
+Kiến trúc hiện tại là recipe **p17** (`configs/pipeline_v3.yaml`). **Đọc theo ba vùng màu:**
 
 1. **① Backbone (xanh dương).** Ảnh mờ + tối (nhiễu B) đi qua **QWT Hilbert**, IMU nhiễu đi qua
    **Haar**. Mỗi bên có một encoder CNN 4 stage. Fusion có cổng trộn hai bên thành latent **ZI**
@@ -23,16 +23,18 @@ Kiến trúc hiện tại là recipe **p16** (`configs/pipeline_v3.yaml`). **Đ�
      tổng thể** (bố cục, vật là gì); **Bottleneck** 16×16 nhận **ZI** (8 khối); **Decoder** phóng
      ×2 trở lại; **skip connection** cộng đặc trưng nhỏ từ Encoder sang Decoder; hai đầu phụ ở
      128² và 64² được chấm riêng.
-   - **CNN làm nét + mượt** (p15) chạy sau NAFNet, chỉ trên bản đồ chi tiết Y — màu đã tách riêng
-     nên nó không chạm được màu: 4 khối residual × 32 kênh ở 256², không thu nhỏ. Số hạng **gồ ghề
-     thừa** ép nó mượt: phạt độ dốc vượt ảnh sạch ở vùng phẳng (hạt, vòng sáng, vệt mờ loang).
+   - **CNN làm nét loa → phễu** (p17) chạy sau NAFNet, chỉ trên bản đồ chi tiết Y — màu đã tách
+     riêng nên nó không chạm được màu. **Loa** phóng ×2 (256² → 512²), **làm nét** bằng 4 khối
+     residual × 16 kênh ở 512² (cạnh đặt được giữa hai pixel), **phễu** thu về 256² bằng bộ lọc tự
+     học. Cùng phép tính với bản p15/p16 (4 khối × 32 kênh ở 256²). Số hạng **gồ ghề thừa** ép nó
+     mượt: phạt độ dốc vượt ảnh sạch ở vùng phẳng (hạt, vòng sáng, vệt mờ loang).
 
    Decoder IMU (hệ số Haar, skip có cổng từ encoder IMU) nhận ZU. **Loss phase 2** chỉ train hai
    decoder này.
 
 | | Phase 1 | Phase 2 |
 |---|---|---|
-| Train | backbone 1,33 M (+ 2 predictor 0,24 M và decoder neo 1,86 M, bỏ sau phase 1) | decoder ảnh 3,42 M (màu 0,16 M + NAFNet 3,18 M + CNN làm nét 0,08 M) + decoder IMU 0,36 M |
+| Train | backbone 1,33 M (+ 2 predictor 0,24 M và decoder neo 1,86 M, bỏ sau phase 1) | decoder ảnh 3,37 M (màu 0,16 M + NAFNet 3,18 M + CNN làm nét loa → phễu 0,02 M) + decoder IMU 0,36 M |
 | Loss | JEPA 1,0 (+ mịn 0,5, thô 0,25) · VICReg (covariance gộp) · decoder neo 0,45 · Jacobian 0,05 | ảnh: L1 · chi tiết QWT 2,0 · năng lượng 1,0 · VGG16 perceptual 0,5 (mảnh cắt 128²) · màu: L1 + thống kê màu 1,0 · nét: L1 · độ dốc 1,0 · FFT phức 1,0 · nhiều tỉ lệ 0,5 · gồ ghề thừa 2,0 · L1 đầu ra NAFNet 0,5 · IMU: SmoothL1 · chi tiết Haar · độ rung 2,0 |
 | Dữ liệu | nhiễu B: ít mờ, ít hạt; 10% frame chỉ nhiễu, 10% chỉ tối | như phase 1 |
 | Số học | fp32 | fp32 (fp16 đã thử ở p16: chậm gấp 5 lần trên T4 × 2) |

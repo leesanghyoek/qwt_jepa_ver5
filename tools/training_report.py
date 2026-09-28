@@ -468,6 +468,8 @@ def config_section(run: Path) -> None:
         ("phase2.perceptual_crop", ("phase2", "perceptual_crop")),
         ("phase2.precision", ("phase2", "precision")),
         ("phase2.split_edge_refiner_blocks", ("phase2", "split_edge_refiner_blocks")),
+        ("phase2.split_edge_refiner_width", ("phase2", "split_edge_refiner_width")),
+        ("phase2.split_edge_refiner_scale", ("phase2", "split_edge_refiner_scale")),
         ("phase2.split_edge_smooth_weight", ("phase2", "split_edge_smooth_weight")),
         ("corruption.image.photon_count", ("corruption", "image", "photon_count")),
         ("corruption.image.noise_only_probability", ("corruption", "image", "noise_only_probability")),

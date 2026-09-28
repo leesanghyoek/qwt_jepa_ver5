@@ -376,8 +376,17 @@ phase2:
   # rieng nen no khong cham duoc mau), o do phan giai day du, khong thu nho: 4 khoi residual
   # x 32 kenh, o nhin 21 px, conv cuoi zero-init (bat dau = identity). Loss cu cham tren dau
   # ra cua no; dau ra NAFNet giu L1 rieng (0.5) de khong troi.
+  # p17: CNN lam net theo co che LOA -> PHEU (nguoc thu tu U-Net, "overcomplete" nhu KiU-Net):
+  # LOA phong to x2 (conv 3x3 + pixel shuffle: 256 -> 512), LAM NET o 512x512 — kernel 3x3 chi
+  # phu 1,5 px anh that nen dat va lam dung canh duoc GIUA hai pixel — roi PHEU thu nho ve 256
+  # (pixel unshuffle, khong mat gi, + conv 3x3 zero-init = bo loc thu nho tu hoc, nhu
+  # supersampling). Cung cho, cung dau vao/ra, cung loss nhu p15. 16 kenh x 4 khoi o 512x512:
+  # 4,98 GMAC/anh (p15/p16: 4,91), 21 K tham so (p15: 75 K), o nhin 13 px (p15: 21 px). Do tren
+  # RTX 4060, batch 4, fwd+bwd: 80 ms (p15: 36 ms), +0,7 GiB (p15: +0,35). Loss chi cham anh da
+  # thu nho: luoi 512 la cho lam viec, khong phai anh sieu phan giai. Scale 1 = p15/p16.
+  split_edge_refiner_scale: 2
   split_edge_refiner_blocks: 4
-  split_edge_refiner_width: 32
+  split_edge_refiner_width: 16                       # p15/p16: 32 (o 256x256)
   split_edge_stage1_weight: 0.5
   # "Go ghe thua": chi phat do doc VUOT anh sach, nang o vung phang (exp(-|grad sach|/0.01)).
   # = 0 voi anh sach; tang voi hat nhieu (3/255: 0.0070), vong sang quanh canh (0.0025), vet

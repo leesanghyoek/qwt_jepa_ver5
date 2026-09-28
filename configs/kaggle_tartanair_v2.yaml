@@ -47,7 +47,7 @@ runtime:
   # loss tinh tren ca batch nen ket qua khop 1 GPU). Mac dinh van data_parallel cho toi khi thu tren Kaggle.
   parallel: data_parallel
   cudnn_enabled: true
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_1gpu
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p17_overcomplete
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   # p11 phase 2: RSS tien trinh train tang ~6,7 MiB/update (1,67 GB moi 250 update) toi

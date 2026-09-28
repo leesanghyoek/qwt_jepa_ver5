@@ -12,7 +12,19 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p16 bản fp32** (OUT `outputs/p16_1gpu`) là run hiện tại: bản fp16 bên dưới chạy **chậm gấp 5
+**p17** (OUT `outputs/p17_overcomplete`) là run hiện tại, chỉ đổi phase 2 so với p16 và dùng lại
+phase 1 của p12–p16. CNN làm nét sau NAFNet chạy theo cơ chế **loa → phễu** — thứ tự ngược với
+U-Net (mạng *overcomplete*, như nhánh Kite-Net của KiU-Net): **loa** phóng bản đồ chi tiết Y lên ×2
+(conv 3×3 + pixel shuffle, 256² → 512²); **làm nét** bằng 4 khối residual × 16 kênh ở 512², nơi
+kernel 3×3 chỉ phủ 1,5 px ảnh thật nên cạnh được đặt và làm dốc *giữa* hai pixel; **phễu** thu về
+256² (pixel unshuffle — không mất gì — rồi conv 3×3 zero-init, tức bộ lọc thu nhỏ tự học như
+supersampling). Cùng chỗ, cùng đầu vào/ra, cùng loss với CNN làm nét của p15/p16 và cùng
+4,98 GMAC/ảnh (p16: 4,91), nên đây là A/B sạch: chỉ khác *làm nét ở độ phân giải nào*. 21 K tham
+số (p16: 75 K), ô nhìn 13 px (p16: 21 px); trên RTX 4060, batch 4, fwd+bwd 80 ms (p16: 36 ms) và
+thêm 0,7 GiB (p16: 0,35). Loss chỉ chấm ảnh đã thu về 256²: lưới 512² là chỗ làm việc, không
+phải ảnh siêu phân giải. `split_edge_refiner_scale: 1` (mặc định khi thiếu khóa) = p15/p16.
+
+**p16 bản fp32** (OUT `outputs/p16_1gpu`): bản fp16 bên dưới chạy **chậm gấp 5
 lần** trên Kaggle T4 × 2 (160 update mất 20 phút, 7,5 s/update; p14 fp32: 1,46 s/update), nên phase 2
 quay về fp32. Trên môi trường Kaggle hiện tại (torch 2.10, cuDNN 9.10), fp32 + **2 GPU
 (DataParallel) + cuDNN** chết ngay update đầu với `CUDA error: misaligned address`. Chẩn đoán trên
@@ -475,7 +487,7 @@ flowchart TB
         ED["<b>chi tiết đường nét</b> · 1 × 256 × 256<br/>= mọi cạnh của kênh sáng"]
         EY --> EN --> ED
     end
-    RF["<b>CNN làm nét + mượt</b> · 75 K · p15<br/>4 khối residual × 32 kênh ở 256², không thu nhỏ<br/>đọc chi tiết + Y + độ sáng nền · zero-init"]
+    RF["<b>CNN làm nét loa → phễu</b> · 21 K · p17<br/>loa: phóng ×2 lên 512² · làm nét: 4 khối residual × 16 kênh ở 512²<br/>phễu: thu về 256² (pixel unshuffle + conv) · đọc chi tiết + Y + độ sáng nền · zero-init"]
     CMP{{"<b>③ Ghép</b><br/>màu (Cb, Cr) ← ảnh nền<br/>độ sáng Y ← độ sáng nền + chi tiết<br/>cộng CÙNG một số vào R, G, B ⇒ màu không đổi"}}
     OUT["<b>Ảnh phục hồi</b> · 3 × 256 × 256"]
     LC(["<b>Loss màu</b> · L1 Cb, Cr + độ sáng nền<br/>+ thống kê màu từng ảnh · 1,0<br/>(độ đậm màu, độ trải Cb/Cr, tương phản)"])
@@ -721,7 +733,8 @@ decoder được cập nhật.
 | latent | conv 1×1 + upsample `[32, 128, 128]` | đáy `[160, 16, 16]` **+ conv 1×1(ZI)**, rồi 8 NAFBlock |
 | thân / phóng lại | nối + conv 3×3, 6 khối residual `[32, 128, 128]` | conv 1×1 + pixel shuffle, **cộng** skip, NAFBlock ×2 `[128, 32²]` → ×2 `[96, 64²]` → ×2 `[64, 128²]` → ×3 `[48, 256²]` |
 | ra | conv 3×3 **zero-init** → ảnh nền `[3, 128, 128]` → phóng ×2 | conv 3×3 **zero-init** → chi tiết Y `[1, 256, 256]`; đầu phụ zero-init ở 128² và 64² |
-| làm nét + mượt (p15) | — | `EdgeRefiner` (75.169): nối chi tiết + Y + độ sáng nền `[3, 256²]` → conv 3×3 `[32, 256²]` → 4 khối residual → conv 3×3 **zero-init** → cộng vào chi tiết |
+| làm nét loa → phễu (p17) | — | `OvercompleteRefiner` (20.929): nối chi tiết + Y + độ sáng nền `[3, 256²]` → **loa** conv 3×3 `[64, 256²]` + pixel shuffle ×2 `[16, 512²]` → **làm nét** 4 khối residual `[16, 512²]` → **phễu** pixel unshuffle `[64, 256²]` → conv 3×3 **zero-init** → cộng vào chi tiết |
+| *(p15/p16, `split_edge_refiner_scale: 1`)* | — | *`EdgeRefiner` (75.169): `[3, 256²]` → conv 3×3 `[32, 256²]` → 4 khối residual → conv 3×3 zero-init* |
 | ghép | màu (Cb, Cr) = của ảnh nền | Y = độ sáng nền (Y ảnh nền, trung bình 8×8) + chi tiết |
 
 **Decoder ảnh ResNet một khối** (`image_decoder: resnet_pixel`, p7, 799.811 tham số):
@@ -788,12 +801,12 @@ tối đa 3e-7, tức chỉ là làm tròn float32). Nếu lưới không chia h
 | predictor ảnh — lân cận 5×5, kể cả đầu mịn 32² | 171.072 | 1, rồi vứt |
 | predictor IMU — lân cận ±2 | 68.352 | 1, rồi vứt |
 | decoder neo (ảnh + IMU) | 1.856.124 | 1, rồi vứt — **không skip, không residual** |
-| decoder ảnh phase 2 — tách màu + đường nét | 3.421.268 | 2 |
+| decoder ảnh phase 2 — tách màu + đường nét | 3.367.028 | 2 |
 | ↳ nhánh màu (kể cả đầu tone/màu toàn ảnh 26.221) | 161.552 | 2 |
 | ↳ nhánh đường nét — NAFNet 30 khối | 3.184.547 | 2 |
-| ↳ CNN làm nét + mượt (p15) | 75.169 | 2 |
+| ↳ CNN làm nét loa → phễu (p17; p15/p16 phẳng: 75.169) | 20.929 | 2 |
 | decoder IMU phase 2 | 358.012 | 2 |
-| **decoder phase 2 (tổng)** | **3.779.280** | 2 |
+| **decoder phase 2 (tổng)** | **3.725.040** | 2 |
 | *(VGG16 relu1_2–3_3 cho loss perceptual — đóng băng, không vào checkpoint)* | *1.735.488* | *—* |
 | *(decoder ảnh ResNet một khối `resnet_pixel`, nếu chọn)* | *799.811* | 2 |
 | *(decoder ảnh cũ `qwt_coefficients`, nếu chọn)* | *1.577.392* | 2 |

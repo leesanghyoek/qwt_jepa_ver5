@@ -98,8 +98,8 @@ el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF"
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
 edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
-# p15: small full-resolution CNN on the edge map only (colour already split off)
-refine = node(1160, 296, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
+# p17: small CNN on the edge map only (colour already split off): enlarge x2, sharpen, shrink back
+refine = node(1160, 296, 118, 48, 'edge', 'CNN loa → phễu', ['×2 → nét → ÷2'], rx=8, title_size=13)
 join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
 img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)

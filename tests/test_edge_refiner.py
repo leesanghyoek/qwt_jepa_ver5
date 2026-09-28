@@ -24,7 +24,7 @@ from qjepa.training.phase2 import Phase2Trainer
 
 NAF = dict(widths=(4, 6, 8, 12), enc_blocks=(1, 1, 1), middle_blocks=1, dec_blocks=(1, 1, 1), aux_factors=(2,))
 REFINER_KEYS = ("split_edge_refiner_blocks", "split_edge_refiner_width", "split_edge_stage1_weight",
-                "split_edge_smooth_weight")
+                "split_edge_smooth_weight", "split_edge_refiner_scale")
 
 
 def _textured(seed=0, size=64, channels=1):
@@ -92,17 +92,18 @@ def test_inconsistent_refiner_settings_are_rejected(change, message):
 
 def test_the_recipe_turns_the_refiner_and_the_roughness_term_on():
     phase2 = load_config("configs/kaggle_tartanair_v2.yaml")["phase2"]
-    assert phase2["split_edge_refiner_blocks"] == 4 and phase2["split_edge_refiner_width"] == 32
+    assert phase2["split_edge_refiner_blocks"] == 4
     assert phase2["split_edge_stage1_weight"] == 0.5 and phase2["split_edge_smooth_weight"] == 2.0
+    # p17 swaps EdgeRefiner for the overcomplete one: tests/test_overcomplete_refiner.py.
     refiner = build_decoders(load_config("configs/kaggle_tartanair_v2.yaml")).image.refiner
-    assert isinstance(refiner, EdgeRefiner) and sum(p.numel() for p in refiner.parameters()) < 100_000
+    assert refiner is not None and sum(p.numel() for p in refiner.parameters()) < 100_000
 
 
 def test_phase2_trains_the_refiner_and_logs_both_terms():
     config = copy.deepcopy(load_config("configs/smoke.yaml"))
     config["phase2"].update(split_edge_naf_widths=[4, 6, 8, 12, 16], split_edge_naf_enc_blocks=[1, 1, 1, 1],
                             split_edge_naf_middle_blocks=1, split_edge_naf_dec_blocks=[1, 1, 1, 1],
-                            split_edge_refiner_width=8, split_edge_refiner_blocks=2)
+                            split_edge_refiner_width=8, split_edge_refiner_blocks=2, split_edge_refiner_scale=1)
     validate_config(config)
     seed_everything(3)
     phase1 = build_phase1_model(config, ImuNormalizer())

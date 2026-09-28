@@ -210,6 +210,12 @@ def validate_config(config: dict[str, Any]) -> None:
                 raise ValueError(f"phase2.{key} must be a nonnegative number")
         if phase2.get("split_edge_stage1_weight", 0.0) and not phase2.get("split_edge_refiner_blocks", 0):
             raise ValueError("phase2.split_edge_stage1_weight needs an edge refiner (split_edge_refiner_blocks > 0)")
+        # Absent in p15/p16 configs: 1, the refiner at the input resolution.
+        refiner_scale = phase2.get("split_edge_refiner_scale", 1)
+        if isinstance(refiner_scale, bool) or not isinstance(refiner_scale, int) or refiner_scale < 1:
+            raise ValueError("phase2.split_edge_refiner_scale must be a positive integer")
+        if refiner_scale > 1 and not phase2.get("split_edge_refiner_blocks", 0):
+            raise ValueError("phase2.split_edge_refiner_scale needs an edge refiner (split_edge_refiner_blocks > 0)")
         fft_weight = phase2.get("split_edge_fft_weight", 0.0)
         if isinstance(fft_weight, bool) or not isinstance(fft_weight, (int, float)) or fft_weight < 0:
             raise ValueError("phase2.split_edge_fft_weight must be a nonnegative number")
@@ -472,6 +478,7 @@ def build_decoders(
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),
+                "scale": int(config["phase2"].get("split_edge_refiner_scale", 1)),
             } if int(config["phase2"].get("split_edge_refiner_blocks", 0)) > 0 else None,
         },
     )

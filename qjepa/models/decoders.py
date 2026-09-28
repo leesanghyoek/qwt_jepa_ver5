@@ -509,6 +509,39 @@ class EdgeRefiner(nn.Module):
         return detail + self.tail(self.trunk(self.head(torch.cat((detail, context), dim=1))))
 
 
+class OvercompleteRefiner(nn.Module):
+    """Loudspeaker, then funnel: enlarge the edge map, sharpen it there, shrink it back.
+
+    The U-Net's order reversed (an overcomplete CNN, as in KiU-Net). Same place,
+    inputs and output as EdgeRefiner. Loudspeaker: conv 3x3 + PixelShuffle enlarge
+    the input ``scale`` times. ``blocks`` residual blocks of ``width`` channels then
+    work on the enlarged grid, where a 3x3 kernel spans 3 / scale input pixels, so
+    an edge can be placed and steepened between two input pixels rather than on
+    one of them. Funnel: PixelUnshuffle folds each scale x scale block back into
+    channels -- nothing is averaged away -- and a zero-initialised conv 3x3 at the
+    input resolution learns the shrinking filter, like supersampling with a learned
+    kernel instead of a box. It starts as the identity on the detail. The loss
+    only sees the shrunk output: the enlarged grid is an internal working space,
+    not a super-resolved image.
+    """
+
+    def __init__(self, in_channels: int = 3, width: int = 16, blocks: int = 4, scale: int = 2) -> None:
+        super().__init__()
+        if scale < 2:
+            raise ValueError("An overcomplete refiner needs scale >= 2; scale 1 is EdgeRefiner")
+        self.enlarge = nn.Sequential(nn.Conv2d(in_channels, width * scale ** 2, 3, padding=1),
+                                     nn.PixelShuffle(scale), nn.ReLU())
+        self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
+        self.shrink = nn.PixelUnshuffle(scale)
+        self.tail = nn.Conv2d(width * scale ** 2, 1, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, detail: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        h = self.trunk(self.enlarge(torch.cat((detail, context), dim=1)))
+        return detail + self.tail(self.shrink(h))
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -534,8 +567,13 @@ class SplitColorEdgeDecoder(nn.Module):
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
     ) -> None:
         super().__init__()
-        # Only when asked: earlier checkpoints have no refiner layers.
-        self.refiner = EdgeRefiner(3, int(refiner["width"]), int(refiner["blocks"])) if refiner else None
+        # Only when asked: earlier checkpoints have no refiner layers. Scale 1 -- p15/p16,
+        # and every config without the key -- keeps EdgeRefiner and its layer names.
+        self.refiner = None
+        if refiner:
+            width, blocks, scale = int(refiner["width"]), int(refiner["blocks"]), int(refiner.get("scale", 1))
+            self.refiner = (EdgeRefiner(3, width, blocks) if scale == 1
+                            else OvercompleteRefiner(3, width, blocks, scale))
         if color_global and branch_arch == "unet":
             raise ValueError("color_global works on the ResNet colour branch (resnet or unet_edge)")
         self.color_scale = int(color_scale)
