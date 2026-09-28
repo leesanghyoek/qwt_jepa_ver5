@@ -14,10 +14,12 @@ IMU là decoder hệ số Haar.
 
 **p16 bản fp32** (OUT `outputs/p16_fp32`) là run hiện tại: bản fp16 bên dưới chạy **chậm gấp 5
 lần** trên Kaggle T4 × 2 (160 update mất 20 phút, 7,5 s/update; p14 fp32: 1,46 s/update), nên phase 2
-quay về fp32 và bật `runtime.cudnn_benchmark` (cuDNN đo một lần rồi giữ thuật toán conv nhanh
-nhất). Loss VGG 0,5 trên mảnh cắt 128² và CNN làm nét giữ nguyên. `tools/decoder_speed_probe.py`
-đo từng khối (NAFNet, CNN làm nét, VGG, cả bước train) ở fp32/fp16, có/không benchmark, trên 1 GPU
-với dữ liệu giả, khoảng 2 phút — dùng nó trước khi bật lại `amp_fp16`.
+quay về fp32. Lần đầu có bật thêm `runtime.cudnn_benchmark`, nhưng update **đầu tiên** của phase 2
+chết với `CUDA error: misaligned address` trên T4; p14 cùng code fp32, không benchmark, chạy đủ
+5.000 update, nên benchmark giờ **tắt** (mặc định tắt, chỉ bật khi config ghi `true`). Loss VGG
+0,5 trên mảnh cắt 128² và CNN làm nét giữ nguyên. `tools/decoder_speed_probe.py` đo từng khối
+(NAFNet, CNN làm nét, VGG, cả bước train) ở fp32/fp16 trên 1 GPU với dữ liệu giả, khoảng 2 phút
+— dùng nó trước khi bật lại `amp_fp16`; `--benchmark` đo thêm có benchmark (có thể sập trên T4).
 
 Bản fp16 (OUT `outputs/p16_amp_vgg`) = p15 + hai thay đổi, chỉ ở phase 2
 (dùng lại phase 1 của p12–p15). p14 chạy phase 2 mất 122 phút (1,5 s/update) mà ảnh vẫn mềm; loss

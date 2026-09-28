@@ -1,4 +1,4 @@
-"""Time the phase-2 decoders piece by piece, in fp32 and fp16, with cuDNN benchmark off and on.
+"""Time the phase-2 decoders piece by piece, in fp32 and fp16 (and with cuDNN benchmark, on request).
 
 p16 ran phase 2 with fp16 autocast and got 5x SLOWER than p14 in fp32 (7.5 s vs
 1.46 s per update on Kaggle T4 x2). This finds out which block is slow in which
@@ -7,6 +7,7 @@ checkpoint, no download (VGG weights are random; timing does not depend on them)
 
     python3 tools/decoder_speed_probe.py                 # on Kaggle: about 2 minutes
     python3 tools/decoder_speed_probe.py --steps 20
+    python3 tools/decoder_speed_probe.py --benchmark     # also cuDNN benchmark; crashed p16 on T4
 
 Prints milliseconds per forward + backward for each block and for one whole
 training step, and the speed-up of every setting over fp32 without benchmark.
@@ -51,7 +52,8 @@ def _timed(fn, device: torch.device, steps: int, warmup: int) -> float:
     return float(np.median(times)) * 1000.0
 
 
-def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmup: int) -> list[dict]:
+def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmup: int,
+          benchmark: bool = False) -> list[dict]:
     config = load_config(config_path)
     torch.manual_seed(0)
     phase1 = build_phase1_model(config, ImuNormalizer())
@@ -75,9 +77,8 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
     edge_in = torch.rand(batch, 2, height, width, device=device)
     detail = torch.rand(batch, 1, height, width, device=device)
 
-    settings = [("fp32", False), ("fp32", True)]
-    if device.type == "cuda":
-        settings += [("fp16", False), ("fp16", True)]
+    precisions = ["fp32", "fp16"] if device.type == "cuda" else ["fp32"]
+    settings = [(precision, on) for precision in precisions for on in ((False, True) if benchmark else (False,))]
     rows = []
     for precision, benchmark in settings:
         amp = precision == "fp16"
@@ -146,12 +147,14 @@ def main() -> int:
     parser.add_argument("--batch", type=int, default=4, help="per GPU; the recipe's 8 split over 2 GPUs")
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--benchmark", action="store_true",
+                        help="also time with cuDNN benchmark (it crashed p16's phase 2 on Kaggle T4)")
     args = parser.parse_args()
     device = torch.device(args.device)
     if device.type == "cuda":
         print(f"GPU {torch.cuda.get_device_name(device)} · torch {torch.__version__} · "
               f"cuDNN {torch.backends.cudnn.version()}")
-    rows = probe(args.config, device, args.batch, args.steps, args.warmup)
+    rows = probe(args.config, device, args.batch, args.steps, args.warmup, args.benchmark)
     names = [key for key in rows[0] if key != "setting"]
     print(f"\nms per forward + backward, batch {args.batch}, median of {args.steps}")
     print(f"{'block':<22}" + "".join(f"{row['setting']:>20}" for row in rows))

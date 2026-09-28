@@ -69,7 +69,7 @@ def validate_config(config: dict[str, Any]) -> None:
     model = config["model"]
     if str(config["runtime"].get("gpu_count", "auto")) not in {"auto", "1", "2"}:
         raise ValueError("runtime.gpu_count must be auto, 1 or 2")
-    if not isinstance(config["runtime"].get("cudnn_benchmark", True), bool):
+    if not isinstance(config["runtime"].get("cudnn_benchmark", False), bool):
         raise ValueError("runtime.cudnn_benchmark must be true or false")
     restart_limit = config["runtime"].get("restart_above_rss_gib")
     if restart_limit is not None and (isinstance(restart_limit, bool)

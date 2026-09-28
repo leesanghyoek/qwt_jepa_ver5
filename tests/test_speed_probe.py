@@ -23,6 +23,8 @@ from decoder_speed_probe import probe  # noqa: E402
 
 def test_the_probe_times_every_block_on_cpu():
     rows = probe(Path("configs/smoke.yaml"), torch.device("cpu"), batch=1, steps=1, warmup=0)
+    assert [row["setting"] for row in rows] == ["fp32"]
+    rows = probe(Path("configs/smoke.yaml"), torch.device("cpu"), batch=1, steps=1, warmup=0, benchmark=True)
     assert [row["setting"] for row in rows] == ["fp32", "fp32 + benchmark"]
     for row in rows:
         assert all(value > 0 for key, value in row.items() if key not in ("setting", "edge refiner"))
@@ -39,7 +41,8 @@ def test_cudnn_benchmark_is_validated_and_outside_the_hash():
         validate_config(config)
 
 
-def test_the_recipe_is_back_in_fp32_with_benchmarking_on():
+def test_the_recipe_is_back_in_fp32_with_benchmarking_off():
+    # Benchmarking crashed p16's first phase-2 update on T4 (misaligned address).
     config = load_config("configs/kaggle_tartanair_v2.yaml")
     assert config["phase2"]["precision"] == "fp32"
-    assert config["runtime"]["cudnn_benchmark"] is True
+    assert config["runtime"]["cudnn_benchmark"] is False

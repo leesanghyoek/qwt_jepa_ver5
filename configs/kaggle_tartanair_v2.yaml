@@ -47,7 +47,10 @@ runtime:
   # nay, sau khi luu checkpoint, CLI thoat voi ma 75 va notebook tu resume — ket qua
   # giong het mot lan chay lien. Nam ngoai configuration hash.
   restart_above_rss_gib: 16
-  cudnn_benchmark: true   # moi batch cung kich thuoc: cuDNN do 1 lan, giu thuat toan nhanh nhat
+  # p16 fp32 bat benchmark: update DAU TIEN cua phase 2 chet voi 'CUDA error: misaligned address'
+  # (bao tre o einsum cua GlobalToneColor, sau cac conv). p14 cung code fp32, KHONG benchmark,
+  # chay du 5000 update, nen nghi pham la mot thuat toan conv cuDNN thu khi do tren T4. Tat.
+  cudnn_benchmark: false
   validation_batches: 32
 
 data:
