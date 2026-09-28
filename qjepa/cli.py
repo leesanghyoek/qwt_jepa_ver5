@@ -837,6 +837,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         trainer.assert_backbone_frozen()
         trainer.decoder_initialization_hash = payload["metadata"]["decoder_initialization_hash"]
         trainer.optimizer.load_state_dict(payload["optimizer"])
+        if trainer.amp and payload.get("scaler"):
+            trainer.scaler.load_state_dict(payload["scaler"])
         trainer.successful_updates = int(payload["successful_updates"])
         expected_microbatches = trainer.successful_updates * config["phase2"]["gradient_accumulation"]
         if payload["metadata"].get("data_microbatches_consumed") != expected_microbatches:

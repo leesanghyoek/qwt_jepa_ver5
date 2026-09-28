@@ -16,6 +16,13 @@ from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
 
+def _grad_scaler(enabled: bool):
+    """torch.amp.GradScaler where it exists (torch >= 2.3), else the cuda one."""
+    if hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 class Phase2Trainer:
     def __init__(
         self,
@@ -45,7 +52,13 @@ class Phase2Trainer:
         # Frozen VGG16 feature loss; held by the trainer, not the system, so it never
         # reaches a checkpoint. Absent from configs written before the key existed.
         self.perceptual_weight = float(self.phase.get("perceptual_weight", 0.0))
-        self.perceptual = PerceptualLoss().to(device) if self.perceptual_weight > 0 else None
+        self.perceptual = (PerceptualLoss(crop=int(self.phase.get("perceptual_crop", 0))).to(device)
+                           if self.perceptual_weight > 0 else None)
+        # Mixed precision: convs and matmuls in fp16 on the T4's tensor cores, weights,
+        # losses and optimizer in fp32. CUDA only; on CPU the same config runs in fp32.
+        self.amp = self.phase.get("precision", "fp32") == "amp_fp16" and torch.device(device).type == "cuda"
+        getattr(self.forward_model, "module", self.forward_model).amp = self.amp
+        self.scaler = _grad_scaler(self.amp)
         self.frozen_backbone_hash = state_dict_hash(self.system.backbone)
         self.frozen_normalizer_hash = state_dict_hash(self.system.normalizer)
         self.decoder_initialization_hash = state_dict_hash(self.system.decoders)
@@ -142,26 +155,39 @@ class Phase2Trainer:
                 loss = loss + split_loss
                 parts.update(split_parts)
             if self.perceptual is not None:
-                perceptual = self.perceptual(restored["image"], batch["image_clean"])
+                with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
+                    perceptual = self.perceptual(restored["image"], batch["image_clean"])
                 loss = loss + self.perceptual_weight * perceptual
                 parts["image_perceptual"] = perceptual
             with torch.no_grad():
                 parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                     restored["image_coefficients"], visible_coefficients)
             loss = self.phase["reconstruction_loss_weight"] * loss
-            (loss / expected).backward()
+            self.scaler.scale(loss / expected).backward()
             totals["loss"] += float(loss.detach()) / expected
             for key, value in parts.items():
                 totals[key] = totals.get(key, 0.0) + float(value.detach()) / expected
+        self.scaler.unscale_(self.optimizer)
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
-        if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
-            self.optimizer.zero_grad(set_to_none=True)
-            return {"skipped": True, "reason": "non_finite_gradient", **totals}
-        self.optimizer.step()
+        amp_report: dict[str, float | bool] = {}
+        if self.amp:
+            # An fp16 overflow is routine while the scale settles: the scaler skips
+            # that optimizer step and lowers the scale. The data is still consumed,
+            # so the update counts; the log says it was an overflow.
+            overflow = not bool(torch.isfinite(gradient_norm))
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            amp_report = {"amp_overflow": overflow, "amp_scale": float(self.scaler.get_scale())}
+        else:
+            if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
+                self.optimizer.zero_grad(set_to_none=True)
+                return {"skipped": True, "reason": "non_finite_gradient", **totals}
+            self.optimizer.step()
         self.successful_updates += 1
         return {
             "skipped": False,
             **totals,
+            **amp_report,
             "gradient_norm": float(gradient_norm),
             "learning_rate": lr,
             "successful_updates": self.successful_updates,
@@ -189,6 +215,7 @@ class Phase2Trainer:
             },
             "system": self.system.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scaler": self.scaler.state_dict(),
             "successful_updates": self.successful_updates,
             "config": config,
             "rng": rng_state(),

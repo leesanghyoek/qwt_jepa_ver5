@@ -367,9 +367,13 @@ class LayerNorm2d(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mean = x.mean(dim=1, keepdim=True)
-        variance = (x - mean).square().mean(dim=1, keepdim=True)
-        return self.weight * (x - mean) / torch.sqrt(variance + self.eps) + self.bias
+        # Statistics in fp32 even under fp16 autocast: a half-precision variance of
+        # 48-160 channels loses the small differences the normalisation divides by.
+        x32 = x.float()
+        mean = x32.mean(dim=1, keepdim=True)
+        variance = (x32 - mean).square().mean(dim=1, keepdim=True)
+        normalised = (x32 - mean) / torch.sqrt(variance + self.eps)
+        return (self.weight * normalised + self.bias).to(x.dtype)
 
 
 class NAFBlock(nn.Module):

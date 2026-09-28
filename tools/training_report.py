@@ -465,6 +465,8 @@ def config_section(run: Path) -> None:
         ("phase2.split_edge_fft_weight", ("phase2", "split_edge_fft_weight")),
         ("phase2.split_edge_aux_weight", ("phase2", "split_edge_aux_weight")),
         ("phase2.perceptual_weight", ("phase2", "perceptual_weight")),
+        ("phase2.perceptual_crop", ("phase2", "perceptual_crop")),
+        ("phase2.precision", ("phase2", "precision")),
         ("phase2.split_edge_refiner_blocks", ("phase2", "split_edge_refiner_blocks")),
         ("phase2.split_edge_smooth_weight", ("phase2", "split_edge_smooth_weight")),
         ("corruption.image.photon_count", ("corruption", "image", "photon_count")),
@@ -537,6 +539,14 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
     findings += phase_header("PHASE 2 — khôi phục", phase2_steps, phase2_checks)
     if phase2_steps:
         term_table(phase2_steps, PHASE2_TERMS, "Thành phần loss (trung vị 5% đầu và 5% cuối)")
+        overflows = [r["amp_overflow"] for r in phase2_steps if "amp_overflow" in r]
+        if overflows:
+            share = sum(overflows) / len(overflows)
+            print(f"\n  fp16: {sum(overflows)}/{len(overflows)} update tràn số (bị bỏ bước tối ưu), "
+                  f"scale cuối {phase2_steps[-1].get('amp_scale', float('nan')):.0f}")
+            if share > 0.05:
+                findings.append(f"fp16 tràn số ở {100 * share:.1f}% update — nhiều hơn mức bình thường "
+                                "(vài update đầu); cân nhắc precision: fp32.")
         findings += invisible_detail_finding(phase2_steps)
     if phase2_checks:
         findings += validation_section(phase2_checks, args.max_rows)
@@ -546,6 +556,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
         "encoder_source", "encoder_sensitivity_weight", "probe_clipped_fraction",
         "sensitivity_noise_gain", "sensitivity_signal_gain", "sensitivity_ratio",
         "sensitivity_valid_fraction", "jepa_image_normalized", "jepa_imu_normalized",
+        "amp_overflow", "amp_scale",
         "jepa_image_cosine", "jepa_imu_cosine", "jepa_image_visible", "jepa_image_masked",
         "jepa_imu_visible", "jepa_imu_masked", "jepa_image_fine_normalized",
     }

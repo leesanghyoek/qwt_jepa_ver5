@@ -86,7 +86,7 @@ def test_a_negative_feature_weight_is_rejected():
 def test_phase2_trains_with_the_feature_loss_and_keeps_vgg_out_of_the_checkpoint(monkeypatch):
     _random_vgg(monkeypatch)
     config = copy.deepcopy(load_config("configs/smoke.yaml"))
-    config["phase2"].update(perceptual_weight=0.05, split_edge_naf_widths=[4, 6, 8, 12, 16],
+    config["phase2"].update(perceptual_weight=0.05, perceptual_crop=16, split_edge_naf_widths=[4, 6, 8, 12, 16],
                             split_edge_naf_enc_blocks=[1, 1, 1, 1], split_edge_naf_middle_blocks=1,
                             split_edge_naf_dec_blocks=[1, 1, 1, 1])
     validate_config(config)

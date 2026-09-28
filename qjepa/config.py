@@ -270,8 +270,14 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("phase2.full_guard requires blur_validation_samples")
     if phase2.get("jepa_loss_weight") != 0.0 or phase2.get("sensitivity_loss_weight") != 0.0:
         raise ValueError("Phase 2 cannot optimize latent/Jacobian losses")
-    if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") != "fp32":
-        raise ValueError("Supported phase-2 recipe requires reconstruction weight 1 and FP32")
+    if phase2.get("reconstruction_loss_weight") != 1.0 or phase2.get("precision") not in ("fp32", "amp_fp16"):
+        raise ValueError("Supported phase-2 recipe requires reconstruction weight 1 and precision fp32 or amp_fp16")
+    crop = phase2.get("perceptual_crop", 0)
+    if isinstance(crop, bool) or not isinstance(crop, int) or crop < 0 or crop % 4:
+        raise ValueError("phase2.perceptual_crop must be 0 (whole frame) or a positive multiple of 4")
+    # Checked only when the term is on: smoke runs keep the recipe's crop with weight 0.
+    if crop and phase2.get("perceptual_weight", 0.0) > 0 and any(crop > side for side in data["image_size"]):
+        raise ValueError("phase2.perceptual_crop cannot exceed the image size")
     if data.get("split_unit") != "trajectory":
         raise ValueError("Data split unit must be trajectory")
     if data.get("minimum_trajectories_per_batch", 0) < 1:

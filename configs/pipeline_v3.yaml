@@ -365,7 +365,13 @@ phase2:
   # anh vao da mat chi tiet, no thuong texture HOP LY chu khong chac la texture THAT. Moi
   # tang chia cho do lon kich hoat cua anh sach, nen 0.05 ~ 5% sai so tuong doi. Can Internet
   # lan dau de tai trong so ImageNet (528 MB); tat bang 0.0.
-  perceptual_weight: 0.05
+  # p16 (cach B): loss VGG du lon de co tac dung. p14: 0.05 x 0.585 = ~6% tong loss nhung 40%
+  # phep tinh cua phase 2. Nay 0.5 (~ 1/3 tong loss luc dau), tinh tren MOT manh cat ngau nhien
+  # 128x128 moi lan (cung vi tri o anh khoi phuc va anh sach): VGG ton 1/4 so voi ca anh.
+  # Danh doi: o cho anh vao da mat chi tiet, no thuong texture HOP LY, khong chac la THAT;
+  # PSNR co the giam nhe. Can Internet de tai trong so ImageNet (528 MB).
+  perceptual_weight: 0.5
+  perceptual_crop: 128
   # p15: CNN LAM NET + MUOT sau nhanh duong net. Chay tren ban do chi tiet Y (mau da tach
   # rieng nen no khong cham duoc mau), o do phan giai day du, khong thu nho: 4 khoi residual
   # x 32 kenh, o nhin 21 px, conv cuoi zero-init (bat dau = identity). Loss cu cham tren dau
@@ -396,4 +402,8 @@ phase2:
   # Van chon duoc: image_decoder: resnet_pixel dung hai khoa duoi.
   image_resnet_width: 64
   image_resnet_blocks: 8
-  precision: fp32
+  # p16: mixed precision cho phase 2 — conv/nhan ma tran chay fp16 tren tensor core cua T4,
+  # trong so, loss, optimizer, LayerNorm, FFT, bien doi wavelet giu fp32; GradScaler chong
+  # gradient nho bi lam tron ve 0. Chi bat tren CUDA; tren CPU cung config chay fp32.
+  # Phase 1 van fp32 (bat buoc) va dang duoc dung lai.
+  precision: amp_fp16

@@ -12,7 +12,16 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle mới nhất là **p15** (OUT `outputs/p15_edge_refiner`), chỉ đổi phase 2 so với p14 và
+Run Kaggle mới nhất là **p16** (OUT `outputs/p16_amp_vgg`) = p15 + hai thay đổi, chỉ ở phase 2
+(dùng lại phase 1 của p12–p15). p14 chạy phase 2 mất 122 phút (1,5 s/update) mà ảnh vẫn mềm; loss
+VGG ở trọng số 0,05 chỉ góp ~6% tổng loss nhưng chiếm 40% phép tính. (1) **fp16 mixed precision**
+(`precision: amp_fp16`): conv và nhân ma trận chạy fp16 trên tensor core của T4; trọng số, loss,
+optimizer, LayerNorm, FFT, biến đổi wavelet giữ fp32; GradScaler chống gradient bị làm tròn về 0.
+Chỉ bật trên CUDA. (2) **Loss VGG mạnh hơn, rẻ hơn**: trọng số 0,5, tính trên một mảnh cắt ngẫu
+nhiên 128×128 mỗi lần (VGG tốn 1/4). Đổi lại: chi tiết có thể là texture hợp lý chứ không chắc là
+thật; PSNR có thể giảm nhẹ.
+
+**p15** (OUT `outputs/p15_edge_refiner`), chỉ đổi phase 2 so với p14 và
 dùng lại phase 1 của p12–p14. p14 đưa vật nhỏ/xa 2–4 px đúng chỗ từ 0,23 (ảnh vào) lên 0,49 và
 đường nét 4–16 px đúng chỗ lên 0,90, nhưng ảnh vẫn còn mờ. p15 thêm **CNN làm nét + mượt** sau
 nhánh đường nét: 4 khối residual × 32 kênh ở độ phân giải đầy đủ, chỉ chạy trên bản đồ chi tiết

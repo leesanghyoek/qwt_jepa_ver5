@@ -39,7 +39,7 @@ experiment_name: qwt_jepa_sharp_smooth_kaggle
 runtime:
   device: cuda
   gpu_count: auto        # T4 x2 -> dung ca hai; batch_size van la batch toan cuc
-  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p15_edge_refiner
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_amp_vgg
   log_every_updates: 10
   checkpoint_every_updates: 250   # session Kaggle co the bi ngat; resume tu day
   # p11 phase 2: RSS tien trinh train tang ~6,7 MiB/update (1,67 GB moi 250 update) toi

@@ -121,12 +121,18 @@ class RestorationForward(nn.Module):
     def __init__(self, system: RestorationSystem):
         super().__init__()
         self.system = system
+        # Set by Phase2Trainer. Autocast state is per thread and DataParallel runs
+        # each replica in its own thread, so it must be entered here, not around the call.
+        self.amp = False
 
     def forward(self, image_noisy, imu_noisy_phys, image_time, imu_times) -> dict[str, torch.Tensor]:
-        result = self.system(image_noisy, imu_noisy_phys, image_time, imu_times)
-        return {"image": result.image, "imu_normalized": result.imu_normalized,
-                "imu_physical": result.imu_physical,
-                "image_coefficients": result.image_coefficients,
-                "imu_coefficients": result.imu_coefficients,
-                # Only tensors cross DataParallel's gather, so parts are flattened in.
-                **(result.image_parts or {})}
+        with torch.autocast(device_type=image_noisy.device.type, dtype=torch.float16, enabled=self.amp):
+            result = self.system(image_noisy, imu_noisy_phys, image_time, imu_times)
+        outputs = {"image": result.image, "imu_normalized": result.imu_normalized,
+                   "imu_physical": result.imu_physical,
+                   "image_coefficients": result.image_coefficients,
+                   "imu_coefficients": result.imu_coefficients,
+                   # Only tensors cross DataParallel's gather, so parts are flattened in.
+                   **(result.image_parts or {})}
+        # Losses and metrics always read fp32: wavelet detail, FFT and PSNR need it.
+        return {key: value.float() if value.is_floating_point() else value for key, value in outputs.items()}
