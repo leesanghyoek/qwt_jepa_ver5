@@ -53,9 +53,10 @@ def test_precision_accepts_amp_and_rejects_anything_else():
         validate_config(config)
 
 
-def test_the_recipe_trains_phase2_in_amp_with_a_heavier_cropped_vgg_term():
+def test_the_recipe_has_a_heavier_cropped_vgg_term():
     config = load_config("configs/kaggle_tartanair_v2.yaml")
-    assert config["phase2"]["precision"] == "amp_fp16" and config["phase1"]["precision"] == "fp32"
+    # fp16 turned out 5x slower on Kaggle (p16); the recipe went back to fp32, amp stays selectable.
+    assert config["phase2"]["precision"] in ("fp32", "amp_fp16") and config["phase1"]["precision"] == "fp32"
     assert config["phase2"]["perceptual_weight"] == 0.5 and config["phase2"]["perceptual_crop"] == 128
 
 

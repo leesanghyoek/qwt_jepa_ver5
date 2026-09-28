@@ -67,6 +67,12 @@ def _configure_execution(config: dict[str, Any], args: argparse.Namespace, devic
     count = getattr(args, "gpus", None) or (config["runtime"].get("gpu_count", "auto") if use_saved_setting else "auto")
     config["runtime"]["gpu_count"] = count
     info = execution_metadata(device, select_device_ids(device, count))
+    # Every training batch has the same shape, so letting cuDNN time its conv
+    # algorithms once and keep the fastest pays off; without it cuDNN picks by
+    # heuristic, which can be far off for depthwise and fp16 convolutions.
+    if device.type == "cuda" and config["runtime"].get("cudnn_benchmark", True):
+        torch.backends.cudnn.benchmark = True
+        info["cudnn_benchmark"] = True
     print("Execution: " + json.dumps(info))
     return info
 

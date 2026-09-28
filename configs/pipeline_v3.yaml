@@ -402,8 +402,8 @@ phase2:
   # Van chon duoc: image_decoder: resnet_pixel dung hai khoa duoi.
   image_resnet_width: 64
   image_resnet_blocks: 8
-  # p16: mixed precision cho phase 2 — conv/nhan ma tran chay fp16 tren tensor core cua T4,
-  # trong so, loss, optimizer, LayerNorm, FFT, bien doi wavelet giu fp32; GradScaler chong
-  # gradient nho bi lam tron ve 0. Chi bat tren CUDA; tren CPU cung config chay fp32.
-  # Phase 1 van fp32 (bat buoc) va dang duoc dung lai.
-  precision: amp_fp16
+  # p16 thu amp_fp16 (conv fp16 tren tensor core, loss/optimizer fp32): tren Kaggle T4 x2 no
+  # CHAM HON 5 lan — 160 update mat 20 phut (7,5 s/update; p14 fp32: 1,46 s/update). Nghi pham:
+  # conv depthwise cua NAFNet o fp16 va cuDNN chua bat benchmark. Quay ve fp32 cho toi khi
+  # tools/decoder_speed_probe.py do ra cau hinh fp16 nhanh hon that. amp_fp16 van chon duoc.
+  precision: fp32

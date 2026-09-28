@@ -12,7 +12,14 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-Run Kaggle mới nhất là **p16** (OUT `outputs/p16_amp_vgg`) = p15 + hai thay đổi, chỉ ở phase 2
+**p16 bản fp32** (OUT `outputs/p16_fp32`) là run hiện tại: bản fp16 bên dưới chạy **chậm gấp 5
+lần** trên Kaggle T4 × 2 (160 update mất 20 phút, 7,5 s/update; p14 fp32: 1,46 s/update), nên phase 2
+quay về fp32 và bật `runtime.cudnn_benchmark` (cuDNN đo một lần rồi giữ thuật toán conv nhanh
+nhất). Loss VGG 0,5 trên mảnh cắt 128² và CNN làm nét giữ nguyên. `tools/decoder_speed_probe.py`
+đo từng khối (NAFNet, CNN làm nét, VGG, cả bước train) ở fp32/fp16, có/không benchmark, trên 1 GPU
+với dữ liệu giả, khoảng 2 phút — dùng nó trước khi bật lại `amp_fp16`.
+
+Bản fp16 (OUT `outputs/p16_amp_vgg`) = p15 + hai thay đổi, chỉ ở phase 2
 (dùng lại phase 1 của p12–p15). p14 chạy phase 2 mất 122 phút (1,5 s/update) mà ảnh vẫn mềm; loss
 VGG ở trọng số 0,05 chỉ góp ~6% tổng loss nhưng chiếm 40% phép tính. (1) **fp16 mixed precision**
 (`precision: amp_fp16`): conv và nhân ma trận chạy fp16 trên tensor core của T4; trọng số, loss,
