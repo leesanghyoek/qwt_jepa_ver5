@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import nullcontext
 from typing import Any
 
@@ -106,6 +107,10 @@ class Phase2Trainer:
         lr = self._set_lr()
         totals: dict[str, float] = {"loss": 0.0, "image_l1": 0.0, "imu_accel_smooth_l1": 0.0,
                                     "imu_gyro_smooth_l1": 0.0}
+        # Summed on the device and read back once per update, with the gradient norm:
+        # a float() per logged term was ~20 GPU syncs per microbatch, each stopping the
+        # CPU from queueing the next microbatch while the GPU finished this one.
+        pending: dict[str, torch.Tensor] = {}
         for index, raw_batch in enumerate(microbatches):
             batch = _to_device(raw_batch, self.device)
             # DDP averages gradients only on the last microbatch of the update.
@@ -189,22 +194,26 @@ class Phase2Trainer:
                 loss = self.phase["reconstruction_loss_weight"] * loss
                 # x world: only this rank's share carries a graph, and DDP averages over ranks.
                 self.scaler.scale(loss * self.world / expected).backward()
-                totals["loss"] += float(loss.detach()) / expected
+                pending["loss"] = pending.get("loss", 0.0) + loss.detach() / expected
                 for key, value in parts.items():
-                    totals[key] = totals.get(key, 0.0) + float(value.detach()) / expected
+                    pending[key] = pending.get(key, 0.0) + value.detach() / expected
         self.scaler.unscale_(self.optimizer)
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
+        names = list(pending)
+        values = torch.stack([pending[name].float() for name in names] + [gradient_norm.float()]).tolist()
+        totals.update(zip(names, values[:-1]))
+        norm = values[-1]
         amp_report: dict[str, float | bool] = {}
         if self.amp:
             # An fp16 overflow is routine while the scale settles: the scaler skips
             # that optimizer step and lowers the scale. The data is still consumed,
             # so the update counts; the log says it was an overflow.
-            overflow = not bool(torch.isfinite(gradient_norm))
+            overflow = not math.isfinite(norm)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             amp_report = {"amp_overflow": overflow, "amp_scale": float(self.scaler.get_scale())}
         else:
-            if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
+            if not math.isfinite(norm) or not _finite_gradients(self.parameters):
                 self.optimizer.zero_grad(set_to_none=True)
                 return {"skipped": True, "reason": "non_finite_gradient", **totals}
             self.optimizer.step()
@@ -213,7 +222,7 @@ class Phase2Trainer:
             "skipped": False,
             **totals,
             **amp_report,
-            "gradient_norm": float(gradient_norm),
+            "gradient_norm": norm,
             "learning_rate": lr,
             "successful_updates": self.successful_updates,
         }

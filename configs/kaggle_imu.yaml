@@ -17,7 +17,10 @@ phase2:
   split_edge_naf_dec_blocks: [3, 2, 2, 2]
   split_edge_refiner_scale: 1        # CNN lam net o 256x256 nhu p15/p16
   split_edge_refiner_width: 32
-  precision: fp32
+  # Nhanh hon, khong doi model: fp16 (p18 chay fp16 + DDP tren T4: 3/5000 update tran so). Notebook
+  # do fp32/fp16 (co/khong cuDNN benchmark) tren T4 cua phien truoc khi train, ve fp32 neu fp16
+  # khong nhanh hon. LayerNorm gop va DDP da co san.
+  precision: amp_fp16
   # --- IMU (p16: sai so giua 2 mau lien ke / sai so tong con 0,70 accel, 0,78 gyro).
   # Decoder IMU tra ve he so Haar NHIEU + hieu chinh, va doc tin hieu nhieu qua dung mot conv
   # 3 tap (~60 ms); Haar 1 muc nen moi thu duoi 25 Hz (rung 8-45 Hz, spike, cơn nhieu manh)

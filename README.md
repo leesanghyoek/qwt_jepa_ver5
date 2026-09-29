@@ -20,6 +20,9 @@ nhiễu dưới 25 Hz đi thẳng qua. (B) `phase2.imu_refiner_blocks/width`: CN
 1-2-4-8 (nhìn 0,65 s), đọc cả IMU nhiễu, zero-init. (C) `phase2.imu_jitter_weight`: chỉ phạt thay đổi giữa
 hai mẫu vượt tín hiệu sạch (`excess_jitter`). (A) `tools/imu_postfilter_probe.py`: không train, đo lọc Gauss
 / median cố định trên đầu ra IMU của một checkpoint. Thiếu các khoá này = không có gì thay đổi.
+Phase 2 nhanh hơn mà không đổi model: DDP 2 GPU, LayerNorm gộp, fp16 và cuDNN benchmark nếu speed probe
+trên T4 của phiên thấy nhanh hơn ≥ 5%, và mỗi update chỉ đọc số liệu log về CPU một lần (trước đó ~20
+lần đồng bộ GPU mỗi microbatch, cộng một lần cho mỗi tensor gradient khi kiểm tra hữu hạn).
 
 **p18** (OUT `outputs/p18_fast_2gpu`) là run hiện tại: p17 train nhanh hơn trên Kaggle T4 × 2, chỉ
 đổi phase 2 và dùng lại phase 1 của p12–p17. Đo trên RTX 4060, NAFNet chiếm ~75% mỗi bước train

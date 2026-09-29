@@ -74,7 +74,9 @@ def jepa_report_terms(features: dict[str, torch.Tensor]) -> dict[str, float]:
 
 
 def _finite_gradients(parameters: list[torch.nn.Parameter]) -> bool:
-    return all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in parameters)
+    # One device sync for all gradients, not one per parameter tensor (hundreds).
+    checks = [torch.isfinite(parameter.grad).all() for parameter in parameters if parameter.grad is not None]
+    return not checks or bool(torch.stack(checks).all())
 
 
 class Phase1Trainer:

@@ -149,7 +149,7 @@ def test_the_imu_recipe_is_p16_plus_the_imu_keys():
     assert phase2["split_edge_naf_widths"] == [48, 64, 96, 128, 160]
     assert phase2["split_edge_naf_enc_blocks"] == [3, 2, 4, 4] and phase2["split_edge_naf_dec_blocks"] == [3, 2, 2, 2]
     assert phase2["split_edge_refiner_scale"] == 1 and phase2["split_edge_refiner_width"] == 32
-    assert phase2["precision"] == "fp32" and phase2["perceptual_weight"] == 0.5
+    assert phase2["precision"] == "amp_fp16" and phase2["perceptual_weight"] == 0.5    # speed only
     assert (phase2["imu_refiner_blocks"], phase2["imu_refiner_width"], phase2["imu_jitter_weight"]) == (4, 32, 2.0)
     base = load_config("configs/kaggle_tartanair_v2.yaml")
     assert configuration_hash(imu, "phase1") == configuration_hash(base, "phase1")     # same phase 1 recipe
