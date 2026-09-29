@@ -171,6 +171,14 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.reconstruction_detail_weight cannot be negative")
     if phase2.get("imu_variation_weight", 0.0) < 0:
         raise ValueError("phase2.imu_variation_weight cannot be negative")
+    # Absent from configs before the IMU refiner: 0 blocks, no refiner, no jitter term.
+    for key, default, least in (("imu_refiner_blocks", 0, 0), ("imu_refiner_width", 32, 1)):
+        value = phase2.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            raise ValueError(f"phase2.{key} must be an integer >= {least}")
+    jitter_weight = phase2.get("imu_jitter_weight", 0.0)
+    if isinstance(jitter_weight, bool) or not isinstance(jitter_weight, (int, float)) or jitter_weight < 0:
+        raise ValueError("phase2.imu_jitter_weight must be a nonnegative number")
     if phase2.get("detail_energy_weight", 0.0) < 0:
         raise ValueError("phase2.detail_energy_weight cannot be negative")
     if phase2.get("image_detail_loss", "coefficient") not in ("coefficient", "modulus"):
@@ -455,6 +463,10 @@ def build_decoders(
         image_decoder=image_decoder,
         resnet_width=int(config["phase2"].get("image_resnet_width", 64)),
         resnet_blocks=int(config["phase2"].get("image_resnet_blocks", 8)),
+        imu_refiner={
+            "width": int(config["phase2"].get("imu_refiner_width", 32)),
+            "blocks": int(config["phase2"]["imu_refiner_blocks"]),
+        } if int(config["phase2"].get("imu_refiner_blocks", 0)) > 0 else None,
         split={
             "color_width": int(config["phase2"].get("split_color_width", 32)),
             "color_blocks": int(config["phase2"].get("split_color_blocks", 6)),

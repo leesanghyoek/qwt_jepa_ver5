@@ -188,6 +188,11 @@ class RestorationSystem(nn.Module):
             )
             image = transform.synthesis(image_coeff, latent.image_layout)
         imu_norm = self.backbone.imu_transform.synthesis(imu_coeff, latent.imu_layout)
+        if self.decoders.imu_refiner is not None:
+            noisy = self.backbone.imu_transform.synthesis(latent.imu_coefficients, latent.imu_layout)
+            imu_norm = self.decoders.imu_refiner(imu_norm, noisy)
+            # Coefficients OF the smoothed signal: the Haar detail terms score what is output.
+            imu_coeff, _ = self.backbone.imu_transform.analysis(imu_norm)
         return RestoredBatch(
             image=image,
             imu_normalized=imu_norm,

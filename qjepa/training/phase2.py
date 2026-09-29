@@ -152,6 +152,7 @@ class Phase2Trainer:
                     imu_coefficient_target=imu_target,
                     detail_weight=detail_weight,
                     variation_weight=float(self.phase.get("imu_variation_weight", 0.0)),
+                    jitter_weight=float(self.phase.get("imu_jitter_weight", 0.0)),
                     detail_energy_weight=float(self.phase.get("detail_energy_weight", 0.0)),
                     # Absent from configs written before the term existed, which must
                     # keep meaning what they meant when they were trained.

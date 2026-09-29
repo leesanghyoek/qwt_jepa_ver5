@@ -379,6 +379,20 @@ def first_difference_l1(predicted: torch.Tensor, target: torch.Tensor) -> torch.
     return F.l1_loss(predicted.diff(dim=-1), target.diff(dim=-1))
 
 
+def excess_jitter(predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """Sample-to-sample change the prediction has BEYOND the reference's, averaged.
+
+    first_difference_l1 charges any mismatch of the change, a smoother output
+    included; this charges only extra jitter -- noise the output kept. Zero for
+    the clean signal and for anything smoother, so real fast motion, where the
+    clean signal itself changes a lot, is not pushed flat. The IMU counterpart of
+    the image's excess roughness.
+    """
+    if predicted.shape != reference.shape:
+        raise ValueError(f"IMU {tuple(predicted.shape)} != {tuple(reference.shape)}")
+    return F.relu(predicted.diff(dim=-1).abs() - reference.diff(dim=-1).abs()).mean()
+
+
 def phase2_reconstruction_loss(
     image_restored: torch.Tensor,
     image_clean: torch.Tensor,
@@ -391,6 +405,7 @@ def phase2_reconstruction_loss(
     imu_coefficient_target: torch.Tensor | None = None,
     detail_weight: float = 0.0,
     variation_weight: float = 0.0,
+    jitter_weight: float = 0.0,
     detail_energy_weight: float = 0.0,
     image_detail_loss: str = "coefficient",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -438,6 +453,12 @@ def phase2_reconstruction_loss(
         total = total + variation_weight * (accel_variation + gyro_variation)
         parts["imu_accel_variation_l1"] = accel_variation
         parts["imu_gyro_variation_l1"] = gyro_variation
+    if jitter_weight > 0:
+        accel_jitter = excess_jitter(imu_restored_normalized[:, :3], imu_clean_normalized[:, :3])
+        gyro_jitter = excess_jitter(imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:])
+        total = total + jitter_weight * (accel_jitter + gyro_jitter)
+        parts["imu_accel_jitter"] = accel_jitter
+        parts["imu_gyro_jitter"] = gyro_jitter
     return total, parts
 
 

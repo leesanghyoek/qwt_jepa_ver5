@@ -1,0 +1,33 @@
+# p16_imu_smooth: IMU muot hon. Anh = dung recipe p16; IMU them (B) CNN lam muot va (C) loss
+# "rung thua"; train lai CA HAI phase (phase 1 = recipe p10, nhu p12-p16). Notebook rieng:
+# qwt-jaco-jepa-imu.ipynb. Config rieng de khong dung toi recipe/notebook cua run khac.
+extends: kaggle_tartanair_v2.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_imu_smooth
+  # Phase 2 tren 2 GPU bang DDP (moi GPU mot tien trinh; loss tren ca batch nen khop 1 GPU,
+  # tests/test_ddp.py). Phase 1 luon 1 GPU. Notebook dat lai tu GPU_COUNT / PARALLEL.
+  gpu_count: 2
+  parallel: ddp
+
+phase2:
+  # --- Anh: dung p16. pipeline_v3 / kaggle_tartanair_v2 da doi sau p16, nen ghi lai tuong minh.
+  split_edge_naf_widths: [48, 64, 96, 128, 160]
+  split_edge_naf_enc_blocks: [3, 2, 4, 4]
+  split_edge_naf_dec_blocks: [3, 2, 2, 2]
+  split_edge_refiner_scale: 1        # CNN lam net o 256x256 nhu p15/p16
+  split_edge_refiner_width: 32
+  precision: fp32
+  # --- IMU (p16: sai so giua 2 mau lien ke / sai so tong con 0,70 accel, 0,78 gyro).
+  # Decoder IMU tra ve he so Haar NHIEU + hieu chinh, va doc tin hieu nhieu qua dung mot conv
+  # 3 tap (~60 ms); Haar 1 muc nen moi thu duoi 25 Hz (rung 8-45 Hz, spike, cơn nhieu manh)
+  # di thang qua tru khi latent (8 token x 160 ms) tru duoc tung mau.
+  # (B) CNN 1-D sau decoder, doc ca IMU nhieu, dilation 1-2-4-8: nhin 65 mau (0,65 s).
+  # 4 khoi x 32 kenh, 27 K tham so, zero-init (bat dau = identity).
+  imu_refiner_blocks: 4
+  imu_refiner_width: 32
+  # (C) Chi phat thay doi giua 2 mau VUOT tin hieu sach (= 0 cho sach va moi thu muot hon).
+  # Do tren 192 cua so that (chuan hoa): IMU nhieu 0,038 / 0,068 (accel / gyro) = 60-70% loss
+  # sai phan dang co; Gauss 1 mau con 0,008 / 0,014. Gauss 2 mau lam SmoothL1 accel +54%, nen
+  # SmoothL1 va loss sai phan giu khong cho lam muot qua tay. Trong so = imu_variation_weight.
+  imu_jitter_weight: 2.0

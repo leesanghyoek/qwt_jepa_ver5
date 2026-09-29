@@ -632,6 +632,42 @@ class SplitColorEdgeDecoder(nn.Module):
         return compose(base, light, detail), parts
 
 
+class ImuRefiner(nn.Module):
+    """A small 1-D CNN after the IMU decoder that can smooth, in the time domain.
+
+    The IMU decoder returns the noisy Haar coefficients plus a correction, and it
+    reads the noisy signal through one 3-tap conv over 64 coefficients: about 60 ms
+    at 100 Hz. Haar has one level, so everything below 25 Hz -- the corruption's
+    vibration tones (8-45 Hz), spikes, bursts of stronger white noise -- sits in the
+    approximation band and goes straight through unless the latent cancels it
+    sample by sample, and ZU has 8 tokens of 160 ms each. This refiner reads the
+    restored and the noisy signal through dilated convolutions (dilation 2^i in
+    block i): 4 blocks see 65 samples, 0.65 s, enough to tell a burst from motion.
+    Replicate padding, so a window edge is not a jump. The last conv is
+    zero-initialised: it starts as the identity on the decoder's output.
+    """
+
+    def __init__(self, channels: int = 6, width: int = 32, blocks: int = 4) -> None:
+        super().__init__()
+
+        def conv(inputs: int, outputs: int, dilation: int = 1) -> nn.Conv1d:
+            return nn.Conv1d(inputs, outputs, 3, padding=dilation, dilation=dilation, padding_mode="replicate")
+
+        self.head = nn.Sequential(conv(2 * channels, width), nn.ReLU())
+        self.trunk = nn.ModuleList(
+            nn.Sequential(conv(width, width, 2 ** index), nn.ReLU(), conv(width, width, 2 ** index))
+            for index in range(blocks))
+        self.tail = conv(width, channels)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, restored: torch.Tensor, noisy: torch.Tensor) -> torch.Tensor:
+        h = self.head(torch.cat((restored, noisy), dim=1))
+        for block in self.trunk:
+            h = h + block(h)
+        return restored + self.tail(h)
+
+
 class LatentDecoders(nn.Module):
     """Decode ZI/ZU into wavelet coefficients, optionally with input paths.
 
@@ -654,6 +690,7 @@ class LatentDecoders(nn.Module):
         resnet_width: int = 64,
         resnet_blocks: int = 8,
         split: dict | None = None,
+        imu_refiner: dict | None = None,
     ) -> None:
         super().__init__()
         if image_decoder not in IMAGE_DECODERS:
@@ -676,6 +713,8 @@ class LatentDecoders(nn.Module):
             residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
             sees_input=sees_input,
         )
+        # None: no parameters, so checkpoints from before the refiner load as they are.
+        self.imu_refiner = ImuRefiner(6, **imu_refiner) if imu_refiner else None
 
     def forward(
         self,

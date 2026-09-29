@@ -18,9 +18,12 @@ import torch
 import yaml
 
 from qjepa.cli import RESTART_EXIT_CODE, _RankShare, main
-from qjepa.config import load_config, serializable_config, validate_config
+from qjepa.config import build_decoders, build_phase1_model, load_config, seed_everything, serializable_config, validate_config
+from qjepa.data import ImuNormalizer
 from qjepa.distributed import rank_and_world, share_rank0_rng, spawn
+from qjepa.models import RestorationSystem
 from qjepa.training.checkpoints import load_checkpoint
+from qjepa.training.phase2 import Phase2Trainer
 from test_kaggle_workflow import _write_dataset
 
 
@@ -132,5 +135,58 @@ def test_two_processes_train_the_weights_of_one(tmp_path):
     for key in ("loss", "gradient_norm"):
         assert _logged(tmp_path / "ddp", key) == pytest.approx(_logged(tmp_path / "single", key), rel=1e-5), key
     assert finals["single"].keys() == finals["ddp"].keys()
+    # AdamW moves a weight by about the learning rate whatever its gradient's size, so
+    # float noise that flips a near-zero gradient's sign can part the runs by up to
+    # two steps per update (seen: 9e-5 in the colour trunk). The gradients themselves
+    # are checked to 1e-4 below, per parameter.
+    drift = 2.0 * sum(_logged(tmp_path / "single", "learning_rate"))
     for key, value in finals["single"].items():
-        assert torch.allclose(value, finals["ddp"][key], atol=1e-5), key
+        assert torch.allclose(value, finals["ddp"][key], atol=drift), key
+
+
+def _step_config():
+    config = copy.deepcopy(load_config("configs/smoke.yaml"))
+    config["phase2"].update(batch_size=2, gradient_accumulation=2, imu_refiner_blocks=1, imu_refiner_width=4,
+                            imu_jitter_weight=1.0)
+    return config
+
+
+def _global_microbatches():
+    generator = torch.Generator().manual_seed(5)
+    times = torch.arange(32).float().mul(0.01).repeat(2, 1)
+    batches = []
+    for _ in range(2):
+        clean, imu = torch.rand(2, 3, 32, 32, generator=generator), torch.randn(2, 6, 32, generator=generator)
+        batches.append({"image_clean": clean, "image_noisy": (clean * 0.35).clamp(0, 1), "imu_clean_phys": imu,
+                        "imu_noisy_phys": imu + 0.05 * torch.randn(imu.shape, generator=generator),
+                        "image_time": times.mean(dim=1), "imu_times": times, "sample_id": ["a", "b"]})
+    return batches
+
+
+def _gradients_of_one_update(folder):
+    rank, world = rank_and_world()
+    config = _step_config()
+    seed_everything(3)
+    phase1 = build_phase1_model(config, ImuNormalizer())
+    seed_everything(config["phase2"]["decoder_initialization_seed"])
+    system = RestorationSystem(phase1.backbone, phase1.normalizer, build_decoders(config))
+    trainer = Phase2Trainer(system, config, torch.device("cpu"), "phase1.pt")
+    shares = [{key: value[rank::world] for key, value in batch.items()} for batch in _global_microbatches()]
+    trainer.step(shares)
+    if rank == 0:
+        torch.save({name: p.grad.clone() for name, p in system.decoders.named_parameters() if p.grad is not None},
+                   folder / f"gradients_{world}.pt")
+
+
+def test_every_parameter_gets_the_one_process_gradient(tmp_path):
+    # The weights alone are a loose check: AdamW moves every weight by about the
+    # learning rate whatever its gradient's size, so float noise that flips the
+    # sign of a near-zero gradient shows up at ~lr. The gradients must match.
+    torch.set_num_threads(1)
+    _gradients_of_one_update(tmp_path)
+    spawn(_gradients_of_one_update, tmp_path, world=2, cuda=False)
+    single, ddp = torch.load(tmp_path / "gradients_1.pt"), torch.load(tmp_path / "gradients_2.pt")
+    assert single.keys() == ddp.keys() and any(name.startswith("imu_refiner.") for name in single)
+    for name, gradient in single.items():
+        scale = float(gradient.norm()) + 1e-12
+        assert float((gradient - ddp[name]).norm()) / scale < 1e-4, name

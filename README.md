@@ -12,6 +12,15 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p16_imu_smooth** (OUT `outputs/p16_imu_smooth`; notebook riêng `qwt-jaco-jepa-imu.ipynb`, config
+riêng `configs/kaggle_imu.yaml`): ảnh giữ đúng recipe p16, IMU mượt hơn, train lại cả hai phase. p16 để
+lại sai số IMU chủ yếu là rung (sai số giữa 2 mẫu liền kề / sai số tổng 0,70 accel, 0,78 gyro): decoder
+IMU trả về hệ số Haar nhiễu + hiệu chỉnh và đọc tín hiệu nhiễu qua một conv 3 tap (~60 ms), Haar 1 mức nên
+nhiễu dưới 25 Hz đi thẳng qua. (B) `phase2.imu_refiner_blocks/width`: CNN 1-D sau decoder, dilation
+1-2-4-8 (nhìn 0,65 s), đọc cả IMU nhiễu, zero-init. (C) `phase2.imu_jitter_weight`: chỉ phạt thay đổi giữa
+hai mẫu vượt tín hiệu sạch (`excess_jitter`). (A) `tools/imu_postfilter_probe.py`: không train, đo lọc Gauss
+/ median cố định trên đầu ra IMU của một checkpoint. Thiếu các khoá này = không có gì thay đổi.
+
 **p18** (OUT `outputs/p18_fast_2gpu`) là run hiện tại: p17 train nhanh hơn trên Kaggle T4 × 2, chỉ
 đổi phase 2 và dùng lại phase 1 của p12–p17. Đo trên RTX 4060, NAFNet chiếm ~75% mỗi bước train
 (VGG trên mảnh cắt 128²: ~2%), và riêng tầng 256² của nó chiếm ~3/4 thời gian NAFNet. Bốn thay đổi:
