@@ -1,0 +1,16 @@
+# p16_fourier_imu: p16_imu_smooth (anh = p16; IMU = CNN lam muot + loss rung thua) + (D) khoi
+# wavelet-Fourier trong NAFNet cua nhanh duong net. Notebook rieng: qwt-jaco-jepa-fourier.ipynb.
+extends: kaggle_imu.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_fourier_imu
+
+phase2:
+  # (D) NAFBlock chi nhin 3x3 va mot trung binh kenh ca anh; khu mo la mot bo loc ca khung hinh, va
+  # go no la mot he so khuech dai theo tung tan so. Khoi D: LayerNorm, 1x1 xuong 16 kenh, tach Haar
+  # (4 dai o nua do phan giai), FFT toan anh, 1x1 -> ReLU -> 1x1 tren phan thuc/ao, iFFT, ghep
+  # Haar, 1x1 ve lai; residual nhan gamma = 0 luc dau (bat dau = identity). Nhu Res FFT-ReLU cua
+  # FNAFNet (AAAI 2023, NAFNet-64 33,69 -> 33,85 dB GoPro) va token mixer FFT toan anh cua PW-FNet.
+  # Sau stage encoder va decoder o tang 256x256 va 128x128 (4 khoi): +~0,9 GMAC/anh, ~5% decoder.
+  split_edge_naf_fourier_levels: [0, 1]
+  split_edge_naf_fourier_width: 16

@@ -24,6 +24,13 @@ Phase 2 nhanh hơn mà không đổi model: DDP 2 GPU, LayerNorm gộp, fp16 và
 trên T4 của phiên thấy nhanh hơn ≥ 5%, và mỗi update chỉ đọc số liệu log về CPU một lần (trước đó ~20
 lần đồng bộ GPU mỗi microbatch, cộng một lần cho mỗi tensor gradient khi kiểm tra hữu hạn).
 
+**p16_fourier_imu** (OUT `outputs/p16_fourier_imu`; notebook `qwt-jaco-jepa-fourier.ipynb`, config
+`configs/kaggle_fourier.yaml`) = p16_imu_smooth + (D) 4 khối wavelet–Fourier trong NAFNet
+(`split_edge_naf_fourier_levels: [0, 1]`, `split_edge_naf_fourier_width: 16`): sau stage encoder và decoder ở
+256² và 128², LayerNorm → 1×1 → tách Haar → FFT toàn ảnh → 1×1 · ReLU · 1×1 → iFFT → ghép Haar → 1×1, residual
+γ = 0 lúc đầu. Như Res FFT-ReLU của FNAFNet (AAAI 2023) và token mixer của PW-FNet (2025). +0,14 M tham số,
++0,95 GMAC/ảnh (+9% NAFNet). Thiếu hai khoá = NAFNet của p16.
+
 **p18** (OUT `outputs/p18_fast_2gpu`) là run hiện tại: p17 train nhanh hơn trên Kaggle T4 × 2, chỉ
 đổi phase 2 và dùng lại phase 1 của p12–p17. Đo trên RTX 4060, NAFNet chiếm ~75% mỗi bước train
 (VGG trên mảnh cắt 128²: ~2%), và riêng tầng 256² của nó chiếm ~3/4 thời gian NAFNet. Bốn thay đổi:

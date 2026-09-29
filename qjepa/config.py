@@ -370,6 +370,15 @@ def _validate_nafnet_edge(phase2: dict[str, Any], image_size: list[int]) -> None
         raise ValueError("phase2.split_edge_aux_weight must be a nonnegative number")
     if weight > 0 and not factors:
         raise ValueError("phase2.split_edge_aux_weight > 0 needs split_edge_aux_factors")
+    fourier = phase2.get("split_edge_naf_fourier_levels", [])
+    if (not isinstance(fourier, (list, tuple)) or len(set(fourier)) != len(fourier)
+            or any(isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= len(widths) - 2
+                   for level in fourier)):
+        raise ValueError("phase2.split_edge_naf_fourier_levels must list distinct NAFNet levels "
+                         f"in 0..{len(widths) - 2}")
+    fourier_width = phase2.get("split_edge_naf_fourier_width", 16)
+    if isinstance(fourier_width, bool) or not isinstance(fourier_width, int) or fourier_width < 1:
+        raise ValueError("phase2.split_edge_naf_fourier_width must be a positive integer")
 
 
 def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
@@ -486,6 +495,9 @@ def build_decoders(
                 "middle_blocks": int(config["phase2"].get("split_edge_naf_middle_blocks", 0)),
                 "dec_blocks": tuple(config["phase2"].get("split_edge_naf_dec_blocks", ())),
                 "aux_factors": tuple(config["phase2"].get("split_edge_aux_factors", ())),
+                # Absent before p16_fourier_imu: no wavelet-Fourier blocks.
+                "fourier_levels": tuple(config["phase2"].get("split_edge_naf_fourier_levels", ())),
+                "fourier_width": int(config["phase2"].get("split_edge_naf_fourier_width", 16)),
             } if config["phase2"].get("split_branch_arch") == "nafnet_edge" else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),

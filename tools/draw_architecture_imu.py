@@ -2,13 +2,17 @@
 
 p16's figure -- the image side of this run is p16's recipe -- plus what the run adds on
 the IMU: (B) the 1-D refiner after the IMU decoder and (C) the excess-jitter loss term,
-both tagged "mới". Kept apart from draw_architecture.py, which follows the shared
+both tagged "mới"; with --fourier, also (D) the wavelet-Fourier blocks in the NAFNet edge
+branch (the p16_fourier_imu run, qwt-jaco-jepa-fourier.ipynb). Kept apart from draw_architecture.py, which follows the shared
 notebook's recipe, so neither run's figure moves when the other changes.
 
 Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
+       python3 tools/draw_architecture_imu.py docs/kien_truc_fourier.svg --fourier
 """
 import sys
 from xml.sax.saxutils import escape
+
+FOURIER = '--fourier' in sys.argv[2:]
 
 W, H = 1520, 720
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
@@ -108,7 +112,17 @@ def unet_block(x, yc, kind, title, below=False):
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet + 4 WF' if FOURIER
+                 else 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
+if FOURIER:
+    # (D) a wavelet-Fourier block after the encoder and the decoder stage at 256² and 128²:
+    # the wide ends of the two trapezoids
+    for x in (FX + 4, FX + 198):
+        el.append(f'<rect x="{x}" y="266" width="30" height="17" rx="4" fill="#FCE4EC" '
+                  f'stroke="#D81B60" stroke-width="1.6"/>')
+        text(x + 15, 279, 'WF', size=10, weight='bold', color='#D81B60')
+        arrow([(x + 15, 283), (x + 15, 296)], color='#D81B60', width=1.4)
+    badge(FX + 236, 263, 'mới · D')
 # p15: small full-resolution CNN on the edge map only (colour already split off)
 refine = node(1160, 296, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
 join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
@@ -119,8 +133,14 @@ imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-text(W - 20, 34, 'p16_imu_smooth — ảnh như p16 · IMU: CNN làm mượt (B) + loss rung thừa (C)',
-     size=15, weight='bold', color='#D81B60', anchor='end')
+if FOURIER:
+    text(W - 20, 30, 'p16_fourier_imu — ảnh: p16 + khối wavelet–Fourier (D) · IMU: CNN làm mượt (B) + rung thừa (C)',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 50, 'WF: LayerNorm → 1×1 → tách Haar → FFT toàn ảnh → 1×1 · ReLU · 1×1 → iFFT → ghép Haar → 1×1'
+         ' · sau stage encoder / decoder ở 256² và 128²', size=12, color='#AD1457', anchor='end')
+else:
+    text(W - 20, 34, 'p16_imu_smooth — ảnh như p16 · IMU: CNN làm mượt (B) + loss rung thừa (C)',
+         size=15, weight='bold', color='#D81B60', anchor='end')
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
 teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])

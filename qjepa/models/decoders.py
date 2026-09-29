@@ -413,6 +413,59 @@ class NAFBlock(nn.Module):
         return y + self.conv5(self._gate(self.conv4(self.norm2(y)))) * self.gamma
 
 
+def _haar_kernel(channels: int, like: torch.Tensor) -> torch.Tensor:
+    """Orthonormal 2-D Haar as a grouped 2x2 stride-2 kernel: LL, LH, HL, HH per channel."""
+    bands = torch.tensor([[[1, 1], [1, 1]], [[1, -1], [1, -1]], [[1, 1], [-1, -1]], [[1, -1], [-1, 1]]],
+                         dtype=like.dtype, device=like.device) * 0.5
+    return bands.unsqueeze(1).repeat(channels, 1, 1, 1)
+
+
+def haar_split(x: torch.Tensor) -> torch.Tensor:
+    """C x H x W -> 4C x H/2 x W/2 (per channel LL, LH, HL, HH), one grouped conv."""
+    return F.conv2d(x, _haar_kernel(x.shape[1], x), stride=2, groups=x.shape[1])
+
+
+def haar_merge(bands: torch.Tensor) -> torch.Tensor:
+    """Exact inverse of haar_split: the transposed conv of an orthonormal kernel."""
+    channels = bands.shape[1] // 4
+    return F.conv_transpose2d(bands, _haar_kernel(channels, bands), stride=2, groups=channels)
+
+
+class WaveletFourierBlock(nn.Module):
+    """Frame-wide mixing for NAFNet: Haar bands, a learned mixing of their spectra, back.
+
+    A NAFBlock sees a 3x3 neighbourhood and one image-wide channel mean. Blur is a
+    frame-wide filter, and undoing a filter is a gain per frequency -- which a 1x1
+    conv over a spectrum is, chosen by the input through its channels. So: 1x1 down
+    to ``width`` channels, orthonormal Haar split (free, and the edge bands LH/HL/HH
+    get channels of their own), a global 2-D FFT, 1x1 conv -> ReLU -> 1x1 conv on the
+    real and imaginary parts, inverse FFT, Haar merge, 1x1 back. The recipe of
+    FNAFNet's Res FFT-ReLU block (Mao et al., AAAI 2023: NAFNet-64 33.69 -> 33.85 dB
+    on GoPro) and of PW-FNet's token mixer (global FFT beat windowed FFT there), with
+    the Haar split in front as in PW-FNet's wavelet pyramid. The spectrum is computed
+    in fp32 even under fp16 autocast. ``gamma`` starts at zero: the block starts as
+    the identity, like a fresh NAFBlock.
+    """
+
+    def __init__(self, channels: int, width: int = 16) -> None:
+        super().__init__()
+        self.norm = LayerNorm2d(channels)
+        self.reduce = nn.Conv2d(channels, width, 1)
+        spectral = 2 * 4 * width                               # real + imaginary of the 4 bands
+        self.spectral = nn.Sequential(nn.Conv2d(spectral, spectral, 1), nn.ReLU(), nn.Conv2d(spectral, spectral, 1))
+        self.expand = nn.Conv2d(width, channels, 1)
+        self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bands = haar_split(self.reduce(self.norm(x)))
+        size = bands.shape[-2:]
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            spectrum = torch.fft.rfft2(bands.float(), norm="ortho")
+            real, imag = self.spectral(torch.cat((spectrum.real, spectrum.imag), dim=1)).chunk(2, dim=1)
+            bands = torch.fft.irfft2(torch.complex(real, imag), s=size, norm="ortho")
+        return x + self.expand(haar_merge(bands.to(x.dtype))) * self.gamma
+
+
 class NAFNetBranch(nn.Module):
     """NAFNet's U-Net for the edge branch, with the JEPA latent at its bottom.
 
@@ -431,7 +484,8 @@ class NAFNetBranch(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, latent_channels: int,
                  widths: tuple[int, ...], enc_blocks: tuple[int, ...], middle_blocks: int,
-                 dec_blocks: tuple[int, ...], aux_factors: tuple[int, ...] = ()) -> None:
+                 dec_blocks: tuple[int, ...], aux_factors: tuple[int, ...] = (),
+                 fourier_levels: tuple[int, ...] = (), fourier_width: int = 16) -> None:
         super().__init__()
         levels = len(widths)
         if levels < 2 or len(enc_blocks) != levels - 1 or len(dec_blocks) != levels - 1:
@@ -458,6 +512,14 @@ class NAFNetBranch(nn.Module):
         for head in (self.ending, *self.aux_heads.values()):
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
+        # Wavelet-Fourier blocks after the encoder and the decoder stage of these levels;
+        # none by default, so earlier checkpoints load as they are.
+        if any(level < 0 or level > levels - 2 for level in fourier_levels):
+            raise ValueError(f"fourier levels must lie in 0..{levels - 2}")
+        self.fourier_enc = nn.ModuleDict({str(level): WaveletFourierBlock(widths[level], fourier_width)
+                                          for level in fourier_levels})
+        self.fourier_dec = nn.ModuleDict({str(level): WaveletFourierBlock(widths[level], fourier_width)
+                                          for level in fourier_levels})
 
     def forward_with_aux(
         self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None
@@ -468,8 +530,10 @@ class NAFNetBranch(nn.Module):
         base = x if base is None else base
         h = self.intro(x)
         skips = []
-        for encoder, down in zip(self.encoders, self.downs):
+        for level, (encoder, down) in enumerate(zip(self.encoders, self.downs)):
             h = encoder(h)
+            if str(level) in self.fourier_enc:
+                h = self.fourier_enc[str(level)](h)
             skips.append(h)
             h = down(h)
         z = self.latent(latent)
@@ -479,6 +543,8 @@ class NAFNetBranch(nn.Module):
         aux = {}
         for level in reversed(range(self.levels - 1)):
             h = self.decoders[level](self.ups[level](h) + skips[level])
+            if str(level) in self.fourier_dec:
+                h = self.fourier_dec[str(level)](h)
             key = str(2 ** level)
             if key in self.aux_heads:
                 aux[2 ** level] = F.avg_pool2d(base, 2 ** level) + self.aux_heads[key](h)
@@ -599,7 +665,8 @@ class SplitColorEdgeDecoder(nn.Module):
             self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
             self.edge = NAFNetBranch(2, 1, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
                                      int(naf["middle_blocks"]), tuple(naf["dec_blocks"]),
-                                     tuple(naf.get("aux_factors", ())))
+                                     tuple(naf.get("aux_factors", ())),
+                                     tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)))
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
             self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
