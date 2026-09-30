@@ -213,3 +213,20 @@ def test_one_broken_trajectory_is_skipped_and_the_rest_are_built(tmp_path):
     assert "ValueError" in report["skipped"][0]["skipped"]
     assert report["trajectories"] == 7
     assert broken not in {item.key for item in discover_trajectories(out)}
+
+
+def test_packing_leaves_one_zip_per_environment_that_unzips_to_the_same_dataset(tmp_path):
+    source = _source(tmp_path / "src")
+    out = tmp_path / "tartanair640"
+    _build(source, out, budget_frames=48)
+    before = build_manifest(out)["meta"]["samples_per_split"]
+    pack = tmp_path / "tartanair640_zip"
+    packed = builder.pack_environments(out, pack, log=lambda *_: None)
+    assert sorted(path.name for path in pack.iterdir()) == ["AmericanDiner.zip", "Office.zip"]
+    assert not any(out.iterdir()) and all(item["files"] > 0 for item in packed)
+    assert builder.pack_environments(out, pack, log=lambda *_: None) == []  # nothing left to do
+    restored = tmp_path / "restored"
+    for archive in pack.glob("*.zip"):
+        with zipfile.ZipFile(archive) as opened:
+            opened.extractall(restored)
+    assert build_manifest(restored)["meta"]["samples_per_split"] == before

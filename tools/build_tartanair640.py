@@ -676,6 +676,36 @@ def build_shard(
     }
 
 
+def pack_environments(out_root: str | Path, pack_root: str | Path, log=print) -> list[dict[str, object]]:  # noqa: ANN001
+    """One uncompressed zip per environment, then that environment's folder is removed.
+
+    Kaggle saves a few large files far faster than a shard's ~47k small ones. The
+    frames are compressed already, so the zip stores them as they are. Members are
+    named <environment>/<difficulty>/<trajectory>/..., so unzipping every archive into
+    one folder gives back the tree the loader reads. A folder is removed only after
+    its archive has been read back in full (CRC of every member), so stopping half
+    way loses nothing and running it again carries on.
+    """
+    out_root, pack_root = Path(out_root), Path(pack_root)
+    pack_root.mkdir(parents=True, exist_ok=True)
+    packed = []
+    for environment in sorted(path for path in out_root.iterdir() if path.is_dir()):
+        files = sorted(path for path in environment.rglob("*") if path.is_file())
+        partial = pack_root / f"{environment.name}.zip.part"
+        with zipfile.ZipFile(partial, "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
+            for path in files:
+                archive.write(path, path.relative_to(out_root).as_posix())
+        with zipfile.ZipFile(partial) as archive:
+            if archive.testzip() is not None or len(archive.namelist()) != len(files):
+                raise IOError(f"{partial}: the archive does not read back whole")
+        target = pack_root / f"{environment.name}.zip"
+        os.replace(partial, target)
+        shutil.rmtree(environment)
+        packed.append({"environment": environment.name, "files": len(files), "bytes": target.stat().st_size})
+        log(f"{environment.name}: {len(files)} files, {target.stat().st_size / 1e9:.2f} GB")
+    return packed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--source", default="huggingface", help="huggingface, airlab, a URL prefix or a local directory")
