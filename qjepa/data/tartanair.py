@@ -103,6 +103,33 @@ def discover_trajectories(root: str | Path) -> list[Trajectory]:
     return sorted(found, key=lambda item: item.key)
 
 
+def link_trajectories(roots: list[str | Path], target: str | Path) -> Path:
+    """One dataset root over several: ``target/<env>/<difficulty>/<Pxxx>`` links to each trajectory.
+
+    The 640x640 dataset comes as three Kaggle datasets, and Kaggle unpacks an archive
+    into a folder named after it, so a shard may hold its environments a level or two
+    deeper (shard 0: ``AbandonedCable/tartanair640/AbandonedCable/Data_easy/...``).
+    Discovery reads the last three levels of a trajectory's path, so the depth does not
+    matter; the same trajectory found twice is an error.
+    """
+    target = Path(target)
+    target.mkdir(parents=True, exist_ok=True)
+    found: dict[str, Path] = {}
+    for root in roots:
+        for trajectory in discover_trajectories(root):
+            if trajectory.key in found:
+                raise ValueError(f"{trajectory.key} is in both {found[trajectory.key]} and {trajectory.path}")
+            found[trajectory.key] = trajectory.path
+            link = target / trajectory.environment / trajectory.difficulty / trajectory.trajectory_id
+            if link.is_symlink():
+                if link.resolve() != trajectory.path.resolve():
+                    raise ValueError(f"{link} already points at {link.resolve()}")
+                continue
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(trajectory.path.resolve(), target_is_directory=True)
+    return target
+
+
 def audit_trajectory(trajectory: Trajectory, window: int = 128) -> dict[str, object]:
     imu, imu_times = trajectory.load_imu()
     camera_times = trajectory.load_camera_times()

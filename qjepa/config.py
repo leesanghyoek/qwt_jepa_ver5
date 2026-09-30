@@ -308,6 +308,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase2.perceptual_crop cannot exceed the image size")
     if data.get("split_unit") != "trajectory":
         raise ValueError("Data split unit must be trajectory")
+    if data.get("split_rule", "hash") not in ("hash", "per_environment"):
+        raise ValueError("data.split_rule must be hash (a draw over all trajectories) or per_environment")
     if data.get("minimum_trajectories_per_batch", 0) < 1:
         raise ValueError("minimum_trajectories_per_batch must be positive")
 

@@ -104,3 +104,58 @@ def test_root_one_level_too_high_names_the_offending_directories(tmp_path):
     assert "points one level too high" in message
     # Pointing at the right root works.
     assert len(discover_trajectories(tmp_path / "tartanair-v2")) == 8
+
+
+def test_link_trajectories_merges_shards_whatever_their_nesting(tmp_path):
+    from qjepa.data.tartanair import link_trajectories
+
+    # Shard 0 as Kaggle unpacked its tar files: <env>/tartanair640/<env>/Data_easy/P000.
+    shard0 = tmp_path / "input" / "tartanair640-s0" / "tartanair640_archives"
+    _trajectory(shard0 / "AmericanDiner" / "tartanair640", "AmericanDiner", "Data_easy", "P000", 40)
+    _trajectory(shard0 / "AmericanDiner" / "tartanair640", "AmericanDiner", "Data_hard", "P000", 40)
+    # Shard 1 as Kaggle unpacks the builder's zips: tartanair640/<env>/Data_easy/P000.
+    shard1 = tmp_path / "input" / "tartanair640-s1" / "tartanair640"
+    _trajectory(shard1, "Office", "Data_easy", "P000", 40)
+    _trajectory(shard1, "Office", "Data_easy", "P001", 40)
+
+    merged = link_trajectories([shard0, shard1], tmp_path / "merged")
+    keys = sorted(item.key for item in discover_trajectories(merged))
+    assert keys == ["AmericanDiner/Data_easy/P000", "AmericanDiner/Data_hard/P000",
+                    "Office/Data_easy/P000", "Office/Data_easy/P001"]
+    manifest = build_manifest(merged, window=WINDOW)
+    paths = [sample.image_path for split in manifest["samples"].values() for sample in split]
+    assert paths and all(str(tmp_path / "input") in path for path in paths)  # resolved to the real files
+    assert link_trajectories([shard0, shard1], tmp_path / "merged") == tmp_path / "merged"  # rerun is harmless
+    with pytest.raises(ValueError, match="is in both"):
+        link_trajectories([shard1, shard1], tmp_path / "twice")
+
+
+def test_per_environment_split_draws_valid_and_test_from_every_environment():
+    from qjepa.data.manifest import SHARED_PATH_SCENES
+    from qjepa.data.tartanair import Trajectory
+
+    sizes = {"Big": 9, "Five": 5, "Four": 4, "Two": 2, "One": 1,
+             "ArchVizTinyHouseDay": 7, "ArchVizTinyHouseNight": 7}
+    trajectories = [
+        Trajectory(Path(f"/data/{env}/{difficulty}/P{index:03d}"), env, difficulty, f"P{index:03d}")
+        for env, count in sizes.items() for index in range(count) for difficulty in ("Data_easy", "Data_hard")
+    ]
+    split = assign_splits(trajectories, rule="per_environment")
+    groups = {}
+    for trajectory in trajectories:
+        scene = SHARED_PATH_SCENES.get(trajectory.environment, trajectory.environment)
+        groups.setdefault(scene, {}).setdefault(trajectory.trajectory_id, set()).add(split[trajectory.key])
+    # Easy and hard of a Pxxx, and a Pxxx by day and by night, never part ways.
+    assert all(len(splits) == 1 for scene in groups.values() for splits in scene.values())
+    count = {scene: {name: sum(next(iter(s)) == name for s in ids.values()) for name in ("train", "valid", "test")}
+             for scene, ids in groups.items()}
+    assert count["Big"] == {"train": 7, "valid": 1, "test": 1}
+    assert count["Five"] == {"train": 3, "valid": 1, "test": 1}
+    assert count["Four"] == {"train": 3, "valid": 0, "test": 1}
+    assert count["Two"] == {"train": 1, "valid": 0, "test": 1}
+    assert count["One"] == {"train": 1, "valid": 0, "test": 0}
+    assert count["ArchVizTinyHouse"] == {"train": 5, "valid": 1, "test": 1}
+    # The default stays the hash rule.
+    assert assign_splits(trajectories) == assign_splits(trajectories, rule="hash")
+    with pytest.raises(ValueError, match="Unknown split rule"):
+        assign_splits(trajectories, rule="random")

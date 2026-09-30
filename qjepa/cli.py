@@ -690,7 +690,8 @@ def command_build_manifest(args: argparse.Namespace) -> None:
     root = args.data_root or config["data"].get("root")
     if not root:
         raise ValueError("Pass --data-root or set data.root")
-    manifest = build_manifest(root, window=config["data"]["imu_window"], seed=config["data"]["corruption_seed"])
+    manifest = build_manifest(root, window=config["data"]["imu_window"], seed=config["data"]["corruption_seed"],
+                              split_rule=config["data"].get("split_rule", "hash"))
     write_manifest(manifest, args.output)
     print(json.dumps(manifest["meta"]["samples_per_split"], indent=2))
 

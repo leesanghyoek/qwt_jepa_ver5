@@ -676,29 +676,29 @@ def build_shard(
     }
 
 
-def pack_environments(out_root: str | Path, pack_root: str | Path, log=print) -> list[dict[str, object]]:  # noqa: ANN001
-    """One uncompressed zip per environment, then that environment's folder is removed.
+def pack_environments(out_root: str | Path, log=print) -> list[dict[str, object]]:  # noqa: ANN001
+    """Replace each environment folder by one uncompressed zip, ``<out_root>/<env>.zip``.
 
-    Kaggle saves a few large files far faster than a shard's ~47k small ones. The
-    frames are compressed already, so the zip stores them as they are. Members are
-    named <environment>/<difficulty>/<trajectory>/..., so unzipping every archive into
-    one folder gives back the tree the loader reads. A folder is removed only after
-    its archive has been read back in full (CRC of every member), so stopping half
-    way loses nothing and running it again carries on.
+    Kaggle saves a few large files far faster than a shard's ~47k small ones, and
+    when a dataset is made from the output it unpacks each archive into a folder named
+    after it. Members are therefore named relative to the environment
+    (``Data_easy/P000/...``), so the dataset reads ``tartanair640/<env>/Data_easy/...``
+    with no level repeated. The frames are compressed already, so the zip stores them
+    as they are. A folder is removed only after its archive has been read back in full
+    (CRC of every member), so stopping half way loses nothing and a rerun carries on.
     """
-    out_root, pack_root = Path(out_root), Path(pack_root)
-    pack_root.mkdir(parents=True, exist_ok=True)
+    out_root = Path(out_root)
     packed = []
     for environment in sorted(path for path in out_root.iterdir() if path.is_dir()):
         files = sorted(path for path in environment.rglob("*") if path.is_file())
-        partial = pack_root / f"{environment.name}.zip.part"
+        partial = out_root / f"{environment.name}.zip.part"
         with zipfile.ZipFile(partial, "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
             for path in files:
-                archive.write(path, path.relative_to(out_root).as_posix())
+                archive.write(path, path.relative_to(environment).as_posix())
         with zipfile.ZipFile(partial) as archive:
             if archive.testzip() is not None or len(archive.namelist()) != len(files):
                 raise IOError(f"{partial}: the archive does not read back whole")
-        target = pack_root / f"{environment.name}.zip"
+        target = out_root / f"{environment.name}.zip"
         os.replace(partial, target)
         shutil.rmtree(environment)
         packed.append({"environment": environment.name, "files": len(files), "bytes": target.stat().st_size})

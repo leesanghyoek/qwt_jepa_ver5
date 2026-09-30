@@ -37,15 +37,59 @@ class PairedSample:
 
 
 FIELDS = tuple(PairedSample.__dataclass_fields__)
+SPLIT_RULES = ("hash", "per_environment")
+# TartanAir V2 renders two environments twice, by day and by night, along the very
+# same camera paths: same difficulty, same Pxxx, identical poses. A scan of all 1122
+# V2 trajectories finds no other pair. "per_environment" keeps each such Pxxx in one
+# split, so a path trained on by day is not tested on by night.
+SHARED_PATH_SCENES = {
+    "ArchVizTinyHouseDay": "ArchVizTinyHouse",
+    "ArchVizTinyHouseNight": "ArchVizTinyHouse",
+    "OldBrickHouseDay": "OldBrickHouse",
+    "OldBrickHouseNight": "OldBrickHouse",
+}
+
+
+def _per_environment_splits(
+    trajectories: list[Trajectory], ratios: tuple[float, float, float], seed: int
+) -> dict[str, str]:
+    """Valid and test drawn from every environment rather than from the pool.
+
+    With 74 environments, a 10% hash draw over the pool leaves about half of them out
+    of test. Here each environment gives max(1, round(ratio * n)) of its n Pxxx groups
+    to test when n >= 2, and the same to valid when that still leaves three groups to
+    train (n >= 5 at 10%); the rest trains. Groups are Pxxx within an environment
+    (easy and hard together), or within a SHARED_PATH_SCENES scene.
+    """
+    scenes: dict[str, dict[str, list[Trajectory]]] = {}
+    for trajectory in trajectories:
+        scene = SHARED_PATH_SCENES.get(trajectory.environment, trajectory.environment)
+        scenes.setdefault(scene, {}).setdefault(f"{scene}/{trajectory.trajectory_id}", []).append(trajectory)
+    assignment: dict[str, str] = {}
+    for groups in scenes.values():
+        keys = sorted(groups, key=lambda key: hashlib.sha256(f"{seed}|{key}".encode()).hexdigest())
+        count = len(keys)
+        test = max(1, round(ratios[2] * count)) if ratios[2] > 0 and count >= 2 else 0
+        valid = max(1, round(ratios[1] * count)) if ratios[1] > 0 else 0
+        if count - test - valid < 3:
+            valid = 0
+        for index, key in enumerate(keys):
+            split = "test" if index < test else "valid" if index < test + valid else "train"
+            for trajectory in groups[key]:
+                assignment[trajectory.key] = split
+    return assignment
 
 
 def assign_splits(
     trajectories: list[Trajectory],
     ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
     seed: int = 73128,
+    rule: str = "hash",
 ) -> dict[str, str]:
     if len(ratios) != 3 or any(value < 0 for value in ratios) or not np.isclose(sum(ratios), 1.0):
         raise ValueError("Split ratios must be three non-negative values summing to one")
+    if rule not in SPLIT_RULES:
+        raise ValueError(f"Unknown split rule {rule!r}; choose one of {SPLIT_RULES}")
     hints = {trajectory.motion_key: trajectory.split_hint for trajectory in trajectories}
     if any(trajectory.split_hint is not None for trajectory in trajectories):
         if not all(trajectory.split_hint is not None for trajectory in trajectories):
@@ -63,6 +107,8 @@ def assign_splits(
             if hints[trajectory.motion_key] != trajectory.split_hint:
                 raise ValueError(f"Conflicting split hints for {trajectory.motion_key}")
         return {trajectory.key: str(trajectory.split_hint) for trajectory in trajectories}
+    if rule == "per_environment":
+        return _per_environment_splits(trajectories, ratios, seed)
 
     groups: dict[str, list[Trajectory]] = {}
     for trajectory in trajectories:
@@ -208,9 +254,10 @@ def build_manifest(
     window: int = 128,
     ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
     seed: int = 73128,
+    split_rule: str = "hash",
 ) -> dict[str, object]:
     trajectories = discover_trajectories(root)
-    assignments = assign_splits(trajectories, ratios, seed)
+    assignments = assign_splits(trajectories, ratios, seed, split_rule)
     samples: dict[str, list[PairedSample]] = {"train": [], "valid": [], "test": []}
     audit = []
     for trajectory in trajectories:
@@ -223,6 +270,7 @@ def build_manifest(
         "window": window,
         "seed": seed,
         "split_unit": "environment/trajectory_id",
+        "split_rule": split_rule,
         "samples_per_split": {key: len(value) for key, value in samples.items()},
         "trajectories_per_split": {
             split: sorted(item.key for item in trajectories if assignments[item.key] == split)
