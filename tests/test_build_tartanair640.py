@@ -33,7 +33,10 @@ def _png(index: int) -> bytes:
     return buffer.getvalue()
 
 
-def _source(root: Path, environments=("AmericanDiner", "Office"), trajectories=("P000", "P001")) -> Path:
+def _source(root: Path, environments=("AmericanDiner", "Office"), trajectories=("P000", "P001"),
+            imu_files: dict[str, bytes] | None = None) -> Path:
+    """``imu_files``: zip member name -> bytes, replacing a generated file or adding one."""
+    imu_files = imu_files or {}
     for environment in environments:
         for difficulty in ("Data_easy", "Data_hard"):
             folder = root / environment / difficulty
@@ -62,9 +65,13 @@ def _source(root: Path, environments=("AmericanDiner", "Office"), trajectories=(
                     for name, array in arrays.items():
                         buffer = io.BytesIO()
                         np.save(buffer, array)
-                        imu.writestr(f"{prefix}/imu/{name}.npy", buffer.getvalue())
+                        member = f"{prefix}/imu/{name}.npy"
+                        imu.writestr(member, imu_files.get(member, buffer.getvalue()))
                         imu.writestr(f"{prefix}/imu/{name}.txt", "ignored")
                     imu.writestr(f"{prefix}/imu/parameter.yaml", "img_fps: 10\nimu_fps: 100\n")
+                    for member, data in imu_files.items():
+                        if member.startswith(f"{prefix}/imu/") and Path(member).stem not in arrays:
+                            imu.writestr(member, data)
     return root
 
 
@@ -185,3 +192,24 @@ def test_an_interrupted_trajectory_is_invisible_and_the_rerun_finishes_it(tmp_pa
 def test_a_frame_of_the_wrong_size_is_refused():
     with pytest.raises(ValueError, match="expected 640x640"):
         builder.encode_frame(_png(0), "webp")
+
+
+def test_a_leftover_hidden_download_next_to_the_real_file_is_ignored(tmp_path):
+    # CarWelding/Data_hard/imu.zip really ships one: all zeros, not an .npy at all.
+    leftover = "AmericanDiner/Data_hard/P001/imu/.azDownload-11e5a608-ori_global.npy"
+    source = _source(tmp_path / "src", imu_files={leftover: bytes(4096)})
+    out = tmp_path / "tartanair640"
+    _, _, report = _build(source, out, budget_frames=48)
+    assert not report["skipped"] and report["trajectories"] == 8
+    assert not list(out.rglob(".azDownload*"))
+
+
+def test_one_broken_trajectory_is_skipped_and_the_rest_are_built(tmp_path):
+    broken = "Office/Data_easy/P000"
+    source = _source(tmp_path / "src", imu_files={f"{broken}/imu/imu_time.npy": b"not an npy file"})
+    out = tmp_path / "tartanair640"
+    _, _, report = _build(source, out, budget_frames=48)
+    assert [item["trajectory"] for item in report["skipped"]] == [broken]
+    assert "ValueError" in report["skipped"][0]["skipped"]
+    assert report["trajectories"] == 7
+    assert broken not in {item.key for item in discover_trajectories(out)}

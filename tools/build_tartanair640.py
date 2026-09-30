@@ -295,7 +295,7 @@ def list_catalog(
         entries: dict[str, TrajectoryEntry] = {}
         for member in members:
             parts = member.name.split("/")
-            if len(parts) < 4 or parts[0] != environment or parts[1] != difficulty:
+            if len(parts) < 4 or parts[0] != environment or parts[1] != difficulty or _hidden(parts[-1]):
                 continue
             entry = entries.setdefault(parts[2], TrajectoryEntry(environment, difficulty, parts[2]))
             if parts[3] == f"pose_{CAMERA}.txt" and len(parts) == 4:
@@ -583,12 +583,19 @@ def build_trajectory(
     return report
 
 
+def _hidden(name: str) -> bool:
+    # CarWelding/Data_hard/imu.zip ships P008/imu/.azDownload-<uuid>-ori_global.npy: an
+    # unfinished Azure download, all zeros, next to the real ori_global.npy.
+    return name.startswith(".")
+
+
 def _imu_members(imu_zip: RemoteZip) -> dict[str, dict[str, Member]]:
     """{trajectory: {file name: member}} for the IMU files of one environment/difficulty."""
     result: dict[str, dict[str, Member]] = {}
     for member in imu_zip.members():
         parts = member.name.split("/")
-        if len(parts) == 5 and parts[3] == "imu" and (parts[4].endswith(".npy") or parts[4] == "parameter.yaml"):
+        if len(parts) == 5 and parts[3] == "imu" and not _hidden(parts[4]) \
+                and (parts[4].endswith(".npy") or parts[4] == "parameter.yaml"):
             result.setdefault(parts[2], {})[parts[4]] = member
     return result
 
@@ -640,10 +647,14 @@ def build_shard(
             if not members:
                 report: dict[str, object] = {"trajectory": key, "skipped": "no IMU in imu.zip"}
             else:
-                report = build_trajectory(
-                    entry, plan[key], members, image_zip=remote(entry.image_zip), imu_zip=remote(entry.imu_zip),
-                    out_root=out_root, fmt=fmt, pool=pool, token=token, seed=seed, frame_size=frame_size,
-                )
+                try:
+                    report = build_trajectory(
+                        entry, plan[key], members, image_zip=remote(entry.image_zip), imu_zip=remote(entry.imu_zip),
+                        out_root=out_root, fmt=fmt, pool=pool, token=token, seed=seed, frame_size=frame_size,
+                    )
+                except Exception as error:  # one bad trajectory must not end a two-hour run
+                    # It has no done marker, so running the shard again retries it.
+                    report = {"trajectory": key, "skipped": f"{type(error).__name__}: {error}"}
             reports.append(report)
             written += float(report.get("stored_bytes", 0))
             elapsed = time.perf_counter() - started
