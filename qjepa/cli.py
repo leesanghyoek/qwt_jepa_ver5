@@ -699,10 +699,17 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     config = load_config(_config_path(args.config))
     manifest, _ = _manifest(config, args.manifest)
     device = resolve_device(args.device or config["runtime"]["device"])
-    if config["runtime"].get("parallel") == "ddp" and not getattr(args, "gpus", None):
-        # DDP is phase 2 only (VICReg needs the whole batch in one place), and
-        # DataParallel races on Kaggle's torch 2.10: phase 1 takes one GPU.
-        config["runtime"]["gpu_count"] = 1
+    rank, world = rank_and_world()
+    ranks = _ddp_world(config, args, device)
+    if ranks > 1 and world == 1:
+        # runtime.parallel ddp: one process per GPU. The ranks gather their features,
+        # so VICReg, the coding rate and InfoNCE still see the whole batch.
+        spawn_ranks(command_train_phase1, args, ranks, cuda=device.type == "cuda")
+        return
+    lead = rank == 0                              # validates, logs and saves
+    if world > 1:
+        args.gpus = "1"                           # each rank sees only its own GPU
+        config["data"]["num_workers"] = -(-int(config["data"]["num_workers"]) // world)
     execution = _configure_execution(config, args, device)
     seed_everything(config["phase1"]["initialization_seed"])
     normalizer = build_normalizer(manifest["meta"])
@@ -736,17 +743,20 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         config["phase1"]["batch_size"],
         start_microbatch=trainer.successful_updates,
         namespace="phase1",
+        rank=rank,
+        world=world,
     )
     output = Path(args.output or config["runtime"]["output_dir"]) / "phase1"
-    _prepare_run(output, args.resume, trainer.successful_updates)
-    _write_resolved(config, output)
-    write_json(output / "execution.json", execution)
-    write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
-    log = _Jsonl(output / "train.jsonl")
+    if lead:
+        _prepare_run(output, args.resume, trainer.successful_updates)
+        _write_resolved(config, output)
+        write_json(output / "execution.json", execution)
+        write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+    log = _Jsonl(output / "train.jsonl" if lead else None)
     if resume_payload is None:
         reference = _validate_latent(
-            model, validation_loader, device, len(validation_loader), trainer.forward_model
-        )
+            model, validation_loader, device, len(validation_loader), trainer.evaluation_model
+        ) if lead else {}
         warning_checks = 0
         log.write({"event": "initialization_reference", **reference})
     else:
@@ -755,6 +765,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             raise ValueError("Resume checkpoint lacks the initialization latent reference")
         reference = saved_metrics["reference"]
         warning_checks = int(saved_metrics.get("consecutive_warning_checks", 0))
+    share_rank0_rng()                             # the reference drew on rank 0 only
     maximum = config["phase1"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
     started, first_update = time.perf_counter(), trainer.successful_updates
@@ -771,8 +782,13 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 f" jepa={metrics['jepa']:.6f}{anchor} {_pace(started, first_update, update)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
+            if not lead:
+                # Rank 0 validates, gates and saves; take its RNG and its restart decision.
+                share_rank0_rng()
+                _restart_if_memory_high(config, _memory_mib(), update, maximum)
+                continue
             validation = _validate_latent(
-                model, validation_loader, device, len(validation_loader), trainer.forward_model
+                model, validation_loader, device, len(validation_loader), trainer.evaluation_model
             )
             passed, gate_reasons = _latent_gate(reference, validation, config["monitor"])
             warning_checks = 0 if passed else warning_checks + 1
@@ -812,9 +828,11 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     "Latent diversity/scale gate failed on consecutive checks; inspect phase1/train.jsonl"
                 )
+            share_rank0_rng()
             _restart_if_memory_high(config, memory, update, maximum)
-    plot_training(output)
-    print(f"Saved phase-1 checkpoint and training_curves.png: {output}")
+    if lead:
+        plot_training(output)
+        print(f"Saved phase-1 checkpoint and training_curves.png: {output}")
 
 
 def _load_phase1_for_phase2(

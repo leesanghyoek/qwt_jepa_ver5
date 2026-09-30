@@ -75,8 +75,10 @@ def validate_config(config: dict[str, Any]) -> None:
     parallel = config["runtime"].get("parallel", "data_parallel")
     if parallel not in {"data_parallel", "ddp"}:
         raise ValueError("runtime.parallel must be data_parallel or ddp")
-    if parallel == "ddp" and str(config["runtime"].get("gpu_count", "auto")) != "1" and phase2["batch_size"] % 2:
-        raise ValueError("runtime.parallel ddp splits phase2.batch_size over 2 GPUs; it must be even")
+    if parallel == "ddp" and str(config["runtime"].get("gpu_count", "auto")) != "1":
+        for name, section in (("phase1", phase1), ("phase2", phase2)):
+            if section["batch_size"] % 2:
+                raise ValueError(f"runtime.parallel ddp splits {name}.batch_size over 2 GPUs; it must be even")
     restart_limit = config["runtime"].get("restart_above_rss_gib")
     if restart_limit is not None and (isinstance(restart_limit, bool)
                                       or not isinstance(restart_limit, (int, float)) or restart_limit <= 0):

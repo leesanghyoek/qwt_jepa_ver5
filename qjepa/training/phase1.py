@@ -7,7 +7,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
+from ..distributed import gather_shares, rank_and_world
 from ..models.masking import sample_seeds
 from ..models.predictors import image_tokens, imu_tokens
 from ..models.pipeline import LatentPretrainingModel
@@ -137,6 +139,13 @@ class Phase1Trainer:
         self.forward_model, self.device_ids = parallel_forward(
             Phase1Forward(self.model, self.masking), device, config["runtime"].get("gpu_count", "auto")
         )
+        self.rank, self.world = rank_and_world()
+        if self.world > 1:
+            # One process per GPU (qjepa.distributed), as in phase 2. The teachers
+            # move by EMA from identical online weights, so no buffers to broadcast.
+            self.forward_model = nn.parallel.DistributedDataParallel(
+                self.forward_model, device_ids=[torch.cuda.current_device()] if self.device.type == "cuda" else None,
+                broadcast_buffers=False)
         self.manifest_hash = manifest_hash
         self.decoder_forward_calls = 0
         self.successful_updates = 0
@@ -150,6 +159,19 @@ class Phase1Trainer:
             weight_decay=self.phase["weight_decay"],
         )
         self.initialization_hash = state_dict_hash(model.backbone)
+
+    @property
+    def evaluation_model(self):
+        """The forward for validation: under DDP only rank 0 validates, on its own GPU."""
+        return self.forward_model.module if self.world > 1 else self.forward_model
+
+    def _gather(self, value):
+        """This rank's share of a batch-first tensor -> the whole batch (graph kept locally)."""
+        if self.world == 1 or not isinstance(value, torch.Tensor):
+            return value
+        if value.dtype == torch.bool:                      # NCCL gathers bytes, not bools
+            return gather_shares(value.to(torch.uint8), keep_graph=False).bool()
+        return gather_shares(value, keep_graph=True)
 
     def _set_lr(self) -> float:
         lr = warmup_cosine_lr(
@@ -165,7 +187,8 @@ class Phase1Trainer:
 
     def step(self, raw_batch: dict[str, Any]) -> dict[str, float | str | bool]:
         batch = _to_device(raw_batch, self.device)
-        batch_size = int(batch["image_noisy"].shape[0])
+        # Under DDP this rank holds 1/world of the batch; statistics see all of it.
+        batch_size = int(batch["image_noisy"].shape[0]) * self.world
         minimum_batch = int(self.phase["minimum_statistics_batch"])
         if batch_size < minimum_batch:
             raise ValueError(
@@ -215,6 +238,9 @@ class Phase1Trainer:
         mask_seeds = None
         if self.masking is not None:
             mask_seeds = sample_seeds(self.phase["position_seed"], self.successful_updates, batch_size)
+            if self.world > 1:                             # this rank's samples keep their own seeds
+                share = batch_size // self.world
+                mask_seeds = mask_seeds[self.rank * share:(self.rank + 1) * share]
         # Gather dense features, not per-device scalar losses. Statistics below
         # see all B samples even when each GPU processed only B/2 samples.
         features = self.forward_model(
@@ -223,6 +249,12 @@ class Phase1Trainer:
             probe_noise=probe_noise, probe_signal=probe_signal, probe_source=source,
             mask_seeds=mask_seeds,
         )
+        if self.world > 1:
+            # This rank ran its share; every loss below sees the whole batch, as one GPU does.
+            features = {key: self._gather(value) for key, value in features.items()}
+            probe_valid, noise_energy, signal_energy = (
+                self._gather(value) if value is not None else None
+                for value in (probe_valid, noise_energy, signal_energy))
         # Masked tokens count like any other: the loss is still the mean over all
         # tokens, only the predictor's view of them changed.
         jepa, jepa_image, jepa_imu = jepa_latent_loss(
@@ -364,7 +396,8 @@ class Phase1Trainer:
         if not torch.isfinite(total):
             self.optimizer.zero_grad(set_to_none=True)
             return {"skipped": True, "reason": "non_finite_loss", "loss": float(total.detach())}
-        total.backward()
+        # x world: only this rank's share carries a graph, and DDP averages over ranks.
+        (total * self.world).backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
         if not torch.isfinite(gradient_norm) or not _finite_gradients(self.parameters):
             self.optimizer.zero_grad(set_to_none=True)
@@ -421,7 +454,7 @@ class Phase1Trainer:
                 "normalizer_hash": state_dict_hash(self.model.normalizer),
                 "configuration_hash": configuration_hash(config, "phase1"),
                 "latent_gate_status": latent_gate_status,
-                "execution": execution_metadata(self.device, self.device_ids),
+                "execution": execution_metadata(self.device, self.device_ids, self.world),
             },
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),

@@ -190,3 +190,63 @@ def test_every_parameter_gets_the_one_process_gradient(tmp_path):
     for name, gradient in single.items():
         scale = float(gradient.norm()) + 1e-12
         assert float((gradient - ddp[name]).norm()) / scale < 1e-4, name
+
+
+def _phase1_logged(run, key):
+    records = [json.loads(line) for line in (run / "phase1/train.jsonl").read_text().splitlines()]
+    return [record[key] for record in records if key in record and "successful_updates" in record and "loss" in record]
+
+
+def test_phase1_on_two_processes_trains_what_one_does(tmp_path):
+    # Phase 1 used to stay on one GPU: VICReg needs the whole batch in one place.
+    # The ranks now gather their features, so every statistic -- VICReg, the
+    # coding rate, InfoNCE across all tokens -- sees the whole batch; exact
+    # through restarts from checkpoints.
+    torch.set_num_threads(1)
+    root, manifest = tmp_path / "dataset", tmp_path / "manifest"
+    _write_dataset(root)
+    config = serializable_config(load_config("configs/smoke.yaml"))
+    config["phase1"].update(batch_size=2, max_successful_updates=3, predictor_type="spatial",
+                            multiscale_fine_weight=0.5, multiscale_finer_weight=0.25,
+                            coding_rate_weight=0.2, infonce_weight=0.05)
+    config["phase2"]["batch_size"] = 2                                  # both batches split over 2 ranks
+    config["encoder_sensitivity"]["signal_floor_log_gain"] = {"image": 6.9, "imu": 5.8}
+    single = tmp_path / "single.yaml"
+    single.write_text(yaml.safe_dump(config))
+    config["runtime"].update(parallel="ddp", gpu_count=2, restart_above_rss_gib=1e-6)
+    ddp = tmp_path / "ddp.yaml"
+    ddp.write_text(yaml.safe_dump(config))
+    main(["build-manifest", "--config", str(single), "--data-root", str(root), "--output", str(manifest)])
+    finals = {}
+    for name, path in (("single", single), ("ddp", ddp)):
+        output = tmp_path / name
+        arguments = ["train-phase1", "--config", str(path), "--manifest", str(manifest), "--output", str(output)]
+        restarts = 0
+        while True:
+            last = output / "phase1/last.pt"
+            try:
+                main([*arguments, *(["--resume", str(last)] if last.exists() else [])])
+                break
+            except SystemExit as stop:
+                assert stop.code == RESTART_EXIT_CODE
+                restarts += 1
+        assert restarts == (2 if name == "ddp" else 0)
+        payload = load_checkpoint(output / "phase1/last.pt")
+        assert payload["successful_updates"] == 3 and payload["metadata"]["latent_gate_status"] == "PASS"
+        finals[name] = payload["model"]
+    assert json.loads((tmp_path / "ddp/phase1/execution.json").read_text())["backend"] == "ddp"
+    for key in ("loss", "coding_rate", "infonce", "jepa_image_finer", "gradient_norm", "sensitivity_keep"):
+        ddp_values, single_values = _phase1_logged(tmp_path / "ddp", key), _phase1_logged(tmp_path / "single", key)
+        assert len(ddp_values) == len(single_values) == 3, key
+        # The first update is the same computation split over two processes: float
+        # precision. The probe gains are finite differences over a 1/255 step, which
+        # blow float noise up ~1000x (seen: gains 1e-4, gradient norm 1.6e-5, while
+        # every other term agrees to 1e-6). After it, AdamW turns float noise in
+        # near-zero gradients into ~lr-sized weight differences (seen: 1.5e-4).
+        probed = key in ("gradient_norm", "sensitivity_keep")
+        assert ddp_values[0] == pytest.approx(single_values[0], rel=1e-4 if probed else 1e-5), key
+        assert ddp_values == pytest.approx(single_values, rel=2e-3), key
+    drift = 2.0 * sum(_phase1_logged(tmp_path / "single", "learning_rate"))
+    for key, value in finals["single"].items():
+        if value.is_floating_point():
+            assert torch.allclose(value, finals["ddp"][key], atol=max(drift, 1e-6)), key
