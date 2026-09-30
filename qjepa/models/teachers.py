@@ -30,6 +30,7 @@ class EMATeachers(nn.Module):
         imu_clean_normalized: torch.Tensor,
         *,
         image_fine: bool = False,
+        image_finer: bool = False,
     ) -> tuple[torch.Tensor, ...]:
         """TI, TU; with ``image_fine`` also the image encoder's previous stage,
         which the same forward computes anyway (twice TI's resolution)."""
@@ -38,6 +39,9 @@ class EMATeachers(nn.Module):
         if not image_fine:
             return self.image_encoder(image_coeff), self.imu_encoder(imu_coeff)
         target_image, stages = self.image_encoder(image_coeff, return_stages=True)
+        if image_finer:
+            # the stage before: four times TI's resolution
+            return target_image, self.imu_encoder(imu_coeff), stages[0], stages[1]
         return target_image, self.imu_encoder(imu_coeff), stages[0]
 
     @torch.no_grad()

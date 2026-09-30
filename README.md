@@ -24,6 +24,15 @@ Phase 2 nhanh hơn mà không đổi model: DDP 2 GPU, LayerNorm gộp, fp16 và
 trên T4 của phiên thấy nhanh hơn ≥ 5%, và mỗi update chỉ đọc số liệu log về CPU một lần (trước đó ~20
 lần đồng bộ GPU mỗi microbatch, cộng một lần cho mỗi tensor gradient khi kiểm tra hữu hạn).
 
+**p16_infomax** (OUT `outputs/p16_infomax`; notebook `qwt-jaco-jepa-infomax.ipynb`, config
+`configs/kaggle_infomax.yaml`) = p16_fourier_imu + (E) 4 số hạng phase 1 ép latent chứa nhiều thông tin hơn +
+(F) tầng mịn của encoder JEPA vào NAFNet + phase 2 3000 update. (E): `phase1.coding_rate_weight` (−½ logdet(I +
+D/(Nε²) ZᵀZ)/D, MCR²), `phase1.infonce_weight` (InfoNCE dày đặc giữa token dự đoán và đích teacher),
+`encoder_sensitivity.signal_floor_log_gain` (sàn độ nhạy với chi tiết 2–4 px), `phase1.multiscale_finer_weight`
+(đích JEPA 64×64). (F): `phase2.split_edge_naf_stage_levels` — tầng 1/2, 1/4, 1/8 khung qua conv 1×1 zero-init
+(trước đây decoder ảnh chỉ nhận ZI 16×16). Phase 1 đổi recipe nên phải train lại. `tools/latent_probe.py` đo
+thêm tầng 1/8 và 1/4. Thiếu các khoá = như cũ.
+
 **p16_fourier_imu** (OUT `outputs/p16_fourier_imu`; notebook `qwt-jaco-jepa-fourier.ipynb`, config
 `configs/kaggle_fourier.yaml`) = p16_imu_smooth + (D) 4 khối wavelet–Fourier trong NAFNet
 (`split_edge_naf_fourier_levels: [0, 1]`, `split_edge_naf_fourier_width: 16`): sau stage encoder và decoder ở

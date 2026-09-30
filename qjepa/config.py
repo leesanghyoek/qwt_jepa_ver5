@@ -124,6 +124,10 @@ def validate_config(config: dict[str, Any]) -> None:
     if phase1.get("covariance_pooling", "per_position") not in ("per_position", "pooled"):
         raise ValueError("phase1.covariance_pooling must be per_position or pooled")
     _validate_phase1_predictor(phase1)
+    floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
+    if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
+        raise ValueError("encoder_sensitivity.signal_floor_log_gain must map image/imu to numbers")
     if phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0:
         raise ValueError("Main latent training requires explicit variance and covariance losses")
     if phase1.get("jepa_weight") != 1.0 or phase1.get("precision") != "fp32":
@@ -376,6 +380,15 @@ def _validate_nafnet_edge(phase2: dict[str, Any], image_size: list[int]) -> None
                    for level in fourier)):
         raise ValueError("phase2.split_edge_naf_fourier_levels must list distinct NAFNet levels "
                          f"in 0..{len(widths) - 2}")
+    stage_levels = phase2.get("split_edge_naf_stage_levels", [])
+    if (not isinstance(stage_levels, (list, tuple)) or len(set(stage_levels)) != len(stage_levels)
+            or any(isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= min(3, len(widths) - 2)
+                   for level in stage_levels)):
+        raise ValueError("phase2.split_edge_naf_stage_levels must list distinct levels in 1..3 "
+                         "(the image encoder's stages at 1/2, 1/4, 1/8 of the frame)")
+    if stage_levels and not phase2.get("encoder_skips", False):
+        raise ValueError("phase2.split_edge_naf_stage_levels needs phase2.encoder_skips: true "
+                         "(the encoder stages are computed only then)")
     fourier_width = phase2.get("split_edge_naf_fourier_width", 16)
     if isinstance(fourier_width, bool) or not isinstance(fourier_width, int) or fourier_width < 1:
         raise ValueError("phase2.split_edge_naf_fourier_width must be a positive integer")
@@ -411,6 +424,20 @@ def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
         raise ValueError("phase1 multi-scale JEPA weights cannot be negative")
     if fine > 0 and predictor != "spatial":
         raise ValueError("phase1.multiscale_fine_weight > 0 needs phase1.predictor_type: spatial")
+    # Absent before p16_infomax: 0, none of the four information terms.
+    finer = phase1.get("multiscale_finer_weight", 0.0)
+    if isinstance(finer, bool) or not isinstance(finer, (int, float)) or finer < 0:
+        raise ValueError("phase1.multiscale_finer_weight must be a nonnegative number")
+    if finer > 0 and not fine > 0:
+        raise ValueError("phase1.multiscale_finer_weight > 0 needs phase1.multiscale_fine_weight > 0")
+    for key in ("coding_rate_weight", "infonce_weight"):
+        value = phase1.get(key, 0.0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"phase1.{key} must be a nonnegative number")
+    for key, default in (("coding_rate_eps_squared", 0.5), ("infonce_temperature", 0.1)):
+        value = phase1.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"phase1.{key} must be a positive number")
     if coarse > 0:
         pool = phase1.get("multiscale_coarse_pool")
         if not isinstance(pool, int) or pool < 2:
@@ -430,6 +457,7 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         predictor_kernel=int(phase1.get("predictor_kernel", 3)),
         predictor_layers=int(phase1.get("predictor_mixing_layers", 2)),
         fine_scale=float(phase1.get("multiscale_fine_weight", 0.0)) > 0,
+        finer_scale=float(phase1.get("multiscale_finer_weight", 0.0)) > 0,
         # Neo phase 1 khong bao gio nhan skip: neu no co duong vong tu encoder thi
         # no thoa man duoc neo ma khong ep gi vao latent — dung cai ma neo sinh ra
         # de ngan. Cung ly do voi viec no giu he so tuyet doi thay vi residual.
@@ -498,6 +526,10 @@ def build_decoders(
                 # Absent before p16_fourier_imu: no wavelet-Fourier blocks.
                 "fourier_levels": tuple(config["phase2"].get("split_edge_naf_fourier_levels", ())),
                 "fourier_width": int(config["phase2"].get("split_edge_naf_fourier_width", 16)),
+                # Absent before p16_infomax: no encoder stages. Level l (1/2^l of the frame)
+                # takes the image encoder's stage at that resolution: channels[l - 1].
+                "stage_channels": {int(level): int(channels[int(level) - 1]) for level in
+                                   config["phase2"].get("split_edge_naf_stage_levels", ())},
             } if config["phase2"].get("split_branch_arch") == "nafnet_edge" else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),

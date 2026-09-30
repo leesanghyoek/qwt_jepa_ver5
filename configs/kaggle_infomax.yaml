@@ -1,0 +1,41 @@
+# p16_infomax: p16_fourier_imu + phase 1 ep latent chua nhieu thong tin hon (4 so hang) + phase 2 dung
+# cac tang min cua encoder JEPA + train phase 2 ngan hon. Notebook rieng: qwt-jaco-jepa-infomax.ipynb.
+# Phase 1 doi recipe nen PHAI train lai (khong dung lai phase 1 cu).
+extends: kaggle_fourier.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p16_infomax
+  # 6 lan validation + checkpoint thay vi 12 (validation chay 1 GPU, GPU kia cho).
+  checkpoint_every_updates: 500
+
+phase1:
+  # (1) Coding rate: -1/2 logdet(I + D/(N eps^2) Z^T Z) / D (MCR^2). VICReg dung o std 1 va covariance
+  # chi nang 0,01 (p16: covariance 4,70 -> 4,60 ca phase 1); coding rate van tra cong cho moi huong
+  # latent trai them ra. Tren 8 ban do nhu VICReg.
+  coding_rate_weight: 0.2
+  coding_rate_eps_squared: 0.5
+  # (2) InfoNCE day dac: token du doan (tu anh NHIEU) phai nhan ra DUNG dich cua no (teacher, anh
+  # SACH) giua moi token khac, ke ca hang xom cung anh -> latent phai giu cai lam hang xom khac
+  # nhau: canh, texture, vat nho. log(N) - loss la can duoi cua thong tin tuong ho.
+  infonce_weight: 0.05
+  infonce_temperature: 0.1
+  # (4) Dich JEPA o tang 64x64 (1/4 khung, o 4x4 px), mo tu dau fine 32x32: moi token 16x16 px
+  # phai noi ca 16 o 4x4 cua no chua gi.
+  multiscale_finer_weight: 0.25
+
+encoder_sensitivity:
+  # (3) San tuyet doi cho do nhay voi chi tiet 2-4 px: relu(g0 - log gain_tin_hieu). Ti so nhieu/tin
+  # hieu khong phu thuoc thang do va nam o san tu giua run (p16: 0,05), nen no khong con doi GIU
+  # chi tiet. p16 cuoi: gain anh ~500, IMU ~170; san = gap doi: log(1000), log(340).
+  signal_floor_log_gain:
+    image: 6.9
+    imu: 5.8
+
+phase2:
+  # Cac tang min cua encoder JEPA (1/2, 1/4, 1/8 khung: 32, 64, 96 kenh) vao NAFNet o tang cung do
+  # phan giai, qua conv 1x1 zero-init. Truoc day decoder anh chi nhan ZI 16x16 + anh mo, du
+  # encoder da tinh san cac tang nay (encoder_skips). Khong co no, (1)-(4) khong toi duoc anh.
+  split_edge_naf_stage_levels: [1, 2, 3]
+  # Nhanh hon: SSIM bao hoa tu ~3000 update o moi run (p16_imu_smooth: 0,8808 @3000, 0,8819 @5000).
+  # Lich cosine co lai theo so update nen hoi tu trong 3000.
+  max_successful_updates: 3000

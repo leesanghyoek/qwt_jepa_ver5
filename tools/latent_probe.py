@@ -67,12 +67,12 @@ def main() -> None:
         model.load_state_dict(payload["model"], strict=True)
         model.eval()
         system = None
-        encode = model.encode_online
+        backbone = model.backbone
         normalize = model.normalizer.normalize
         print("checkpoint: PHASE 1 — chi do latent, khong co decoder de so sanh")
     else:
         system, config = _system_from_phase2(args.checkpoint, device)
-        encode = system.encode
+        backbone = system.backbone
         normalize = system.normalizer.normalize
         print("checkpoint: PHASE 2 — do ca latent lan decoder da train")
     dataset = _dataset(config, manifest, args.split, fixed_realization=True,
@@ -81,6 +81,10 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     imu_features, imu_targets, cells, patches = [], [], [], []
+    # The image encoder's finer stages (1/8 and 1/4 of the frame): how much of an
+    # 8x8 and a 4x4 tile they hold, next to ZI's 16x16.
+    stage_cells: dict[int, list] = {0: [], 1: []}
+    stage_patches: dict[int, list] = {0: [], 1: []}
     bin_features, bin_targets = [], []
     decoded_imu_error = decoded_image_error = 0.0
     decoded_imu_count = decoded_image_count = 0
@@ -90,8 +94,8 @@ def main() -> None:
             break
         batch = _to_device(raw, device)
         with torch.no_grad():
-            latent = encode(batch["image_noisy"], batch["imu_noisy_phys"],
-                            batch["image_time"], batch["imu_times"])
+            latent = backbone.encode_online(batch["image_noisy"], normalize(batch["imu_noisy_phys"]),
+                                            batch["image_time"], batch["imu_times"], with_skips=True)
             imu_clean = normalize(batch["imu_clean_phys"])
             restored = system.decode(latent) if system is not None else None
         # Decoder that da train, do tren cung mau -> so sanh thang voi probe.
@@ -121,6 +125,17 @@ def main() -> None:
         picked = rng.choice(rows * columns, size=min(args.cells_per_image, rows * columns), replace=False)
         cells.append(grid[:, picked].reshape(-1, grid.shape[-1]).cpu().numpy())
         patches.append(tiles[:, picked].reshape(-1, tiles.shape[-1]).cpu().numpy())
+        for index in stage_cells:
+            stage = latent.image_skips[index]
+            s_rows, s_columns = stage.shape[2], stage.shape[3]
+            s_h, s_w = height // s_rows, width // s_columns
+            s_tiles = image.unfold(2, s_h, s_h).unfold(3, s_w, s_w)
+            s_tiles = s_tiles.permute(0, 2, 3, 1, 4, 5).reshape(count, s_rows * s_columns, -1)
+            s_grid = stage.permute(0, 2, 3, 1).reshape(count, s_rows * s_columns, -1)
+            s_picked = rng.choice(s_rows * s_columns, size=min(args.cells_per_image, s_rows * s_columns),
+                                  replace=False)
+            stage_cells[index].append(s_grid[:, s_picked].reshape(-1, s_grid.shape[-1]).cpu().numpy())
+            stage_patches[index].append(s_tiles[:, s_picked].reshape(-1, s_tiles.shape[-1]).cpu().numpy())
 
         if restored is not None:
             out_tiles = restored.image.clamp(0.0, 1.0).unfold(2, tile_h, tile_h).unfold(3, tile_w, tile_w)
@@ -140,9 +155,14 @@ def main() -> None:
 
     imu_baseline = float(np.abs(imu_targets - imu_targets.mean(0, keepdims=True)).mean())
     image_baseline = float(np.abs(patches - patches.mean(0, keepdims=True)).mean())
+    stage_rows = []
+    for index, name in ((0, "ANH tang 1/8 "), (1, "ANH tang 1/4 ")):
+        if stage_cells[index]:
+            stage_rows.append((name, np.concatenate(stage_cells[index]).astype(np.float64),
+                               np.concatenate(stage_patches[index]).astype(np.float64)))
     for label, features, targets in (("IMU ca cua so", imu_features, imu_targets),
                                      ("IMU theo bin ", bin_features, bin_targets),
-                                     ("ANH theo o   ", cells, patches)):
+                                     ("ANH theo o   ", cells, patches), *stage_rows):
         if len(features) <= features.shape[1] * 2:
             print(f"{label} : chi {len(features)} hang cho {features.shape[1]} chieu"
                   f" — tang --samples, ket qua khong dang tin")

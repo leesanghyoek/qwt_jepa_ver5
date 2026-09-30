@@ -106,6 +106,41 @@ def dense_positions(feature: torch.Tensor, indices: torch.Tensor | None = None) 
     return tokens if indices is None else tokens.index_select(1, indices.to(tokens.device))
 
 
+def coding_rate_loss(positions: torch.Tensor, eps_squared: float = 0.5) -> torch.Tensor:
+    """Minus the coding rate of the features, per dimension: -R / D with
+    R = 1/2 logdet(I + D / (N eps^2) Z^T Z) (MCR^2, Yu et al., NeurIPS 2020).
+
+    R is the Gaussian entropy of the N samples in D dimensions. VICReg's hinge
+    stops at std 1 and its covariance weight is 0.01 (the covariance stayed ~4.6
+    through p16's phase 1); R keeps paying for every direction the features
+    spread into, so it pushes the effective rank up instead of stopping at a
+    threshold. Rows are centred over the samples and scaled to unit length, so
+    the rate does not grow by inflating the features. ``positions`` [B,K,D].
+    """
+    values = positions.float().reshape(-1, positions.shape[-1])
+    values = values - values.mean(dim=0, keepdim=True)
+    values = F.normalize(values, dim=-1)
+    count, dim = values.shape
+    gram = torch.eye(dim, device=values.device, dtype=values.dtype) + (dim / (count * eps_squared)) * (values.T @ values)
+    return -0.5 * torch.linalg.slogdet(gram).logabsdet / dim
+
+
+def dense_infonce_loss(predicted: torch.Tensor, target: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
+    """InfoNCE between predicted and teacher tokens: each prediction must pick its
+    own target out of all the tokens given, its neighbours in the same frame included.
+
+    ``predicted`` and ``target`` [B,K,D], same positions. The JEPA regression is
+    satisfied by a smooth latent in which neighbouring tokens look alike; telling a
+    token from its neighbours needs what differs between them -- edges, texture,
+    small objects. log(B*K) - loss lower-bounds the mutual information between
+    prediction and target (van den Oord et al., 2018). Targets are detached.
+    """
+    queries = F.normalize(layer_norm_no_affine(predicted.float()).reshape(-1, predicted.shape[-1]), dim=-1)
+    keys = F.normalize(layer_norm_no_affine(target.float().detach()).reshape(-1, target.shape[-1]), dim=-1)
+    logits = queries @ keys.T / temperature
+    return F.cross_entropy(logits, torch.arange(len(logits), device=logits.device))
+
+
 def variance_covariance_loss(
     positions: torch.Tensor,
     gamma: float = 1.0,

@@ -82,12 +82,16 @@ class Phase1Forward(nn.Module):
         clean = self.model.encode_online(image_clean, imu_clean_phys, image_time, imu_times)
         image_mask, imu_mask = self._masks(mask_seeds, noisy)
         prediction_i, prediction_u, prediction_i_fine = self.model.predictions(noisy, image_mask, imu_mask)
-        targets = self.model.targets(image_clean, imu_clean_phys, fine=self.model.fine_scale)
+        targets = self.model.targets(image_clean, imu_clean_phys, fine=self.model.fine_scale,
+                                     finer=getattr(self.model, "finer_scale", False))
         result = {"prediction_i": prediction_i, "prediction_u": prediction_u,
                   "target_i": targets[0], "target_u": targets[1]}
         if self.model.fine_scale:
             result["prediction_i_fine"] = prediction_i_fine
             result["target_i_fine"] = targets[2]
+        if getattr(self.model, "finer_scale", False):
+            result["prediction_i_finer"] = self.model.image_predictor.finer(prediction_i_fine)
+            result["target_i_finer"] = targets[3]
         for name, mask in (("image_mask", image_mask), ("imu_mask", imu_mask)):
             if mask is not None:
                 result[name] = mask

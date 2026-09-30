@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -485,7 +487,8 @@ class NAFNetBranch(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, latent_channels: int,
                  widths: tuple[int, ...], enc_blocks: tuple[int, ...], middle_blocks: int,
                  dec_blocks: tuple[int, ...], aux_factors: tuple[int, ...] = (),
-                 fourier_levels: tuple[int, ...] = (), fourier_width: int = 16) -> None:
+                 fourier_levels: tuple[int, ...] = (), fourier_width: int = 16,
+                 stage_channels: dict[int, int] | None = None) -> None:
         super().__init__()
         levels = len(widths)
         if levels < 2 or len(enc_blocks) != levels - 1 or len(dec_blocks) != levels - 1:
@@ -520,9 +523,21 @@ class NAFNetBranch(nn.Module):
                                           for level in fourier_levels})
         self.fourier_dec = nn.ModuleDict({str(level): WaveletFourierBlock(widths[level], fourier_width)
                                           for level in fourier_levels})
+        # The JEPA encoder's own finer stages (the fine JEPA target is one of them),
+        # added at the input of the level with the same resolution through a
+        # zero-initialised 1x1 conv: the branch starts as it was. {level: channels}.
+        stage_channels = dict(stage_channels or {})
+        if any(level < 1 or level > levels - 2 for level in stage_channels):
+            raise ValueError(f"encoder-stage levels must lie in 1..{levels - 2}")
+        self.stage_in = nn.ModuleDict({str(level): nn.Conv2d(channels, widths[level], 1)
+                                       for level, channels in stage_channels.items()})
+        for conv in self.stage_in.values():
+            nn.init.zeros_(conv.weight)
+            nn.init.zeros_(conv.bias)
 
     def forward_with_aux(
-        self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None
+        self, latent: torch.Tensor, x: torch.Tensor, base: torch.Tensor | None = None,
+        stages: dict[int, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
         step = 2 ** (self.levels - 1)
         if x.shape[-2] % step or x.shape[-1] % step:
@@ -531,6 +546,11 @@ class NAFNetBranch(nn.Module):
         h = self.intro(x)
         skips = []
         for level, (encoder, down) in enumerate(zip(self.encoders, self.downs)):
+            if stages is not None and str(level) in self.stage_in and level in stages:
+                feature = stages[level]
+                if feature.shape[-2:] != h.shape[-2:]:
+                    feature = F.interpolate(feature, size=h.shape[-2:], mode="bilinear", align_corners=False)
+                h = h + self.stage_in[str(level)](feature.to(h.dtype))
             h = encoder(h)
             if str(level) in self.fourier_enc:
                 h = self.fourier_enc[str(level)](h)
@@ -666,7 +686,8 @@ class SplitColorEdgeDecoder(nn.Module):
             self.edge = NAFNetBranch(2, 1, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
                                      int(naf["middle_blocks"]), tuple(naf["dec_blocks"]),
                                      tuple(naf.get("aux_factors", ())),
-                                     tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)))
+                                     tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)),
+                                     naf.get("stage_channels"))
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
             self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
@@ -675,7 +696,13 @@ class SplitColorEdgeDecoder(nn.Module):
         else:
             raise ValueError("branch_arch must be resnet, unet, unet_edge or nafnet_edge")
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    @property
+    def uses_stages(self) -> bool:
+        """Whether the edge branch takes the JEPA encoder's finer stages."""
+        return isinstance(self.edge, NAFNetBranch) and len(self.edge.stage_in) > 0
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor,
+                stages: tuple[torch.Tensor, ...] | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         size = image.shape[-2:]
         if size[0] % self.illumination_scale or size[1] % self.illumination_scale:
             raise ValueError(f"Image sides {tuple(size)} must divide by {self.illumination_scale}")
@@ -686,7 +713,11 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_in = torch.cat((y, light.detach()), dim=1)
         aux = {}
         if isinstance(self.edge, NAFNetBranch):
-            detail, aux = self.edge.forward_with_aux(latent, edge_in, base=detail_in)
+            # Encoder stages by resolution: 1/2 of the frame is NAFNet level 1, 1/4 level 2, ...
+            by_level = None
+            if stages is not None and self.uses_stages:
+                by_level = {round(math.log2(size[0] / stage.shape[-2])): stage for stage in stages}
+            detail, aux = self.edge.forward_with_aux(latent, edge_in, base=detail_in, stages=by_level)
         else:
             detail = self.edge(latent, edge_in, base=detail_in)
         parts = {}

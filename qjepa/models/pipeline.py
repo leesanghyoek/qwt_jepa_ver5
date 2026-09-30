@@ -34,17 +34,21 @@ class LatentPretrainingModel(nn.Module):
         predictor_kernel: int = 3,
         predictor_layers: int = 2,
         fine_scale: bool = False,
+        finer_scale: bool = False,
     ) -> None:
         super().__init__()
         if predictor_type not in PREDICTOR_TYPES:
             raise ValueError(f"predictor_type must be one of {PREDICTOR_TYPES}")
         if fine_scale and predictor_type != "spatial":
             raise ValueError("The fine-scale JEPA target needs the spatial predictor")
+        if finer_scale and not fine_scale:
+            raise ValueError("The finer JEPA target grows from the fine one: enable fine_scale too")
         self.backbone = backbone or MultimodalBackbone()
         self.normalizer = normalizer or ImuNormalizer()
         embedding_dim = self.backbone.image_encoder.out_channels
         self.predictor_type = predictor_type
         self.fine_scale = fine_scale
+        self.finer_scale = finer_scale
         if predictor_type == "token":
             # Layer names unchanged: checkpoints up to p9 load strictly.
             self.image_predictor = LatentPredictor(embedding_dim, predictor_hidden)
@@ -52,9 +56,11 @@ class LatentPretrainingModel(nn.Module):
         else:
             # The fine target is the stage before the last: skip_channels[0].
             fine_channels = self.backbone.image_encoder.skip_channels[0] if fine_scale else 0
+            # And the stage before it for the finer target: skip_channels[1].
+            finer_channels = self.backbone.image_encoder.skip_channels[1] if finer_scale else 0
             self.image_predictor = SpatialPredictor(
                 embedding_dim, predictor_hidden, spatial_dims=2, kernel=predictor_kernel,
-                layers=predictor_layers, fine_channels=fine_channels,
+                layers=predictor_layers, fine_channels=fine_channels, finer_channels=finer_channels,
             )
             self.imu_predictor = SpatialPredictor(
                 embedding_dim, predictor_hidden, spatial_dims=1, kernel=predictor_kernel,
@@ -110,10 +116,12 @@ class LatentPretrainingModel(nn.Module):
         return image, imu, fine
 
     @torch.no_grad()
-    def targets(self, image_clean: torch.Tensor, imu_clean_phys: torch.Tensor, *, fine: bool = False):
+    def targets(self, image_clean: torch.Tensor, imu_clean_phys: torch.Tensor, *, fine: bool = False,
+                finer: bool = False):
         """Teacher TI, TU from the clean pair; with ``fine``, also the fine image target."""
         return self.teachers.encode_clean(
-            self.backbone, image_clean, self.normalizer.normalize(imu_clean_phys), image_fine=fine
+            self.backbone, image_clean, self.normalizer.normalize(imu_clean_phys), image_fine=fine,
+            image_finer=finer,
         )
 
 
@@ -174,7 +182,11 @@ class RestorationSystem(nn.Module):
             # The QWT reconstructs perfectly, so this IS the blurry input image;
             # decode(latent) keeps its signature for the ZI-ablation tools.
             blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
-            image = self.decoders.image(latent.ZI, blurry)
+            if getattr(self.decoders.image, "uses_stages", False):
+                # The JEPA encoder's finer stages (image_skips: 1/8, 1/4, 1/2 of the frame).
+                image = self.decoders.image(latent.ZI, blurry, stages=latent.image_skips)
+            else:
+                image = self.decoders.image(latent.ZI, blurry)
             if isinstance(image, tuple):
                 image, parts = image
             # Coefficients OF the image, so nothing downstream can score energy

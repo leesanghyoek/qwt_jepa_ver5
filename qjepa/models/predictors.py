@@ -47,6 +47,8 @@ class SpatialPredictor(nn.Module):
 
     ``fine_channels`` adds a head that predicts a map at twice the grid's
     resolution (the teacher's previous encoder stage) from the same hidden grid.
+    ``finer_channels`` adds one more, twice the fine map's resolution (the stage
+    before that), grown from the fine map: ``finer(fine)``.
     """
 
     def __init__(
@@ -58,6 +60,7 @@ class SpatialPredictor(nn.Module):
         kernel: int = 3,
         layers: int = 2,
         fine_channels: int = 0,
+        finer_channels: int = 0,
     ) -> None:
         super().__init__()
         if spatial_dims not in (1, 2):
@@ -82,6 +85,15 @@ class SpatialPredictor(nn.Module):
                 nn.PixelShuffle(2),
                 # Smooths the 2x2 blocks PixelShuffle leaves behind.
                 nn.Conv2d(fine_channels, fine_channels, 3, padding=1, groups=fine_channels),
+            )
+        self.finer = None
+        if finer_channels:
+            if not fine_channels:
+                raise ValueError("The finer head grows from the fine one: set fine_channels too")
+            self.finer = nn.Sequential(
+                nn.Conv2d(fine_channels, 4 * finer_channels, 1),
+                nn.PixelShuffle(2),
+                nn.Conv2d(finer_channels, finer_channels, 3, padding=1, groups=finer_channels),
             )
 
     def forward(

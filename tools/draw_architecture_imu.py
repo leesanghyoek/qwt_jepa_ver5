@@ -7,12 +7,14 @@ branch (the p16_fourier_imu run, qwt-jaco-jepa-fourier.ipynb). Kept apart from d
 notebook's recipe, so neither run's figure moves when the other changes.
 
 Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
+       python3 tools/draw_architecture_imu.py docs/kien_truc_infomax.svg --infomax   (D + E + F)
        python3 tools/draw_architecture_imu.py docs/kien_truc_fourier.svg --fourier
 """
 import sys
 from xml.sax.saxutils import escape
 
-FOURIER = '--fourier' in sys.argv[2:]
+INFOMAX = '--infomax' in sys.argv[2:]      # p16_infomax: (E) phase-1 information terms, (F) stages
+FOURIER = '--fourier' in sys.argv[2:] or INFOMAX
 
 W, H = 1520, 720
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
@@ -133,7 +135,12 @@ imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-if FOURIER:
+if INFOMAX:
+    text(W - 20, 30, 'p16_infomax — phase 1 ép latent chứa nhiều hơn (E) · tầng mịn JEPA vào NAFNet (F) · WF (D) · IMU: B, C',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 50, 'E: coding rate (log-det) · InfoNCE dày đặc · sàn độ nhạy chi tiết 2–4 px · đích JEPA 64²'
+         '   ·   phase 2: 3000 update', size=12, color='#AD1457', anchor='end')
+elif FOURIER:
     text(W - 20, 30, 'p16_fourier_imu — ảnh: p16 + khối wavelet–Fourier (D) · IMU: CNN làm mượt (B) + rung thừa (C)',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 50, 'WF: LayerNorm → 1×1 → tách Haar → FFT toàn ảnh → 1×1 · ReLU · 1×1 → iFFT → ghép Haar → 1×1'
@@ -143,8 +150,15 @@ else:
          size=15, weight='bold', color='#D81B60', anchor='end')
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
-teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH', 'đích 16² + mịn 32²'])
-loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg gộp · neo · Jacobian'])
+teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH',
+                                                      'đích 16² · 32² · 64²' if INFOMAX else 'đích 16² + mịn 32²'])
+if INFOMAX:
+    loss1 = node(420, 546, 230, 98, 'loss', 'Loss phase 1', ['JEPA ảnh+IMU · mịn · thô · 64²',
+                                                           'VICReg gộp · neo · Jacobian',
+                                                           'log-det · InfoNCE · sàn chi tiết'])
+    badge(592, 537, 'mới · E')
+else:
+    loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg gộp · neo · Jacobian'])
 pred_u = node(705, 555, 110, 70, 'p1', 'Predictor', ['IMU · lân cận', 'che 25% token'])
 pred_i = node(862, 555, 115, 70, 'p1', 'Predictor', ['ảnh · lân cận 5×5', 'che 30% token'])
 
@@ -172,6 +186,15 @@ arrow([mid_right(edgb), mid_left(refine)])
 arrow([mid_right(refine), (1286, 320), (1286, 269), (1292, 269)])
 arrow([mid_right(join), mid_left(img_out)])
 arrow([mid_right(zu), (850, 400), (850, 428), (FX, 428)])
+if INFOMAX:
+    # (F) the image encoder's finer stages (1/2, 1/4, 1/8 of the frame) into NAFNet at the same size;
+    # over the backbone, down just left of the edge branch, in under the blurry-image skip
+    el.append('<path d="M 480 205 L 480 190 L 585 190 L 585 140 L 857 140 L 857 253 A 7 7 0 0 1 857 267 '
+              'L 857 340 L 903 340" '
+              'fill="none" stroke="#8E24AA" stroke-width="2.2" stroke-dasharray="7 4" marker-end="url(#ah-8E24AA)"/>')
+    text(690, 133, 'tầng mịn encoder JEPA (1/2 · 1/4 · 1/8 khung) → NAFNet cùng cỡ', size=12,
+         weight='bold', color='#8E24AA')
+    badge(884, 124, 'mới · F')
 arrow([mid_right(imu_dec), mid_left(imu_ref)])
 arrow([mid_right(imu_ref), mid_left(imu_out)])
 # ---------------- arrows: phase 1

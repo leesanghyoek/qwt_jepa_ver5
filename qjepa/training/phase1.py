@@ -6,12 +6,16 @@ import hashlib
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from ..models.masking import sample_seeds
+from ..models.predictors import image_tokens, imu_tokens
 from ..models.pipeline import LatentPretrainingModel
 from ..execution import Phase1Forward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from .losses import (
+    coding_rate_loss,
+    dense_infonce_loss,
     dense_positions,
     jepa_coarse_loss,
     jepa_diagnostics,
@@ -96,6 +100,12 @@ class Phase1Trainer:
         "jepa_image_fine",
         "jepa_image_fine_normalized",
         "jepa_image_coarse",
+        "jepa_image_finer",
+        "coding_rate",
+        "infonce",
+        "infonce_image",
+        "infonce_imu",
+        "sensitivity_keep",
         "variance",
         "covariance",
         "encoder_sensitivity",
@@ -226,6 +236,12 @@ class Phase1Trainer:
             fine = jepa_fine_loss(features["prediction_i_fine"], features["target_i_fine"])
             multiscale = multiscale + fine_weight * fine
             jepa_report["jepa_image_fine"] = float(fine.detach())
+        finer_weight = float(self.phase.get("multiscale_finer_weight", 0.0))
+        if finer_weight > 0:
+            # 64x64: each 16x16-px token must also say what its sixteen 4x4 cells hold.
+            finer = jepa_fine_loss(features["prediction_i_finer"], features["target_i_finer"])
+            multiscale = multiscale + finer_weight * finer
+            jepa_report["jepa_image_finer"] = float(finer.detach())
         if coarse_weight > 0:
             coarse = jepa_coarse_loss(features["prediction_i"], features["target_i"],
                                       int(self.phase["multiscale_coarse_pool"]))
@@ -271,6 +287,27 @@ class Phase1Trainer:
         ]
         variance = torch.stack([item[0] for item in regularizers]).mean()
         covariance = torch.stack([item[1] for item in regularizers]).mean()
+        # Absent before p16_infomax: 0, and nothing below runs.
+        rate_weight = float(self.phase.get("coding_rate_weight", 0.0))
+        rate = jepa.new_zeros(())
+        if rate_weight > 0:
+            eps_squared = float(self.phase.get("coding_rate_eps_squared", 0.5))
+            rate = torch.stack([coding_rate_loss(dense_positions(feature, indices), eps_squared)
+                                for feature, indices in maps]).mean()
+        nce_weight = float(self.phase.get("infonce_weight", 0.0))
+        nce = jepa.new_zeros(())
+        nce_report: dict[str, float] = {}
+        if nce_weight > 0:
+            temperature = float(self.phase.get("infonce_temperature", 0.1))
+            positions = image_indices.to(features["prediction_i"].device)
+            nce_image = dense_infonce_loss(features["prediction_i"].index_select(1, positions),
+                                           image_tokens(features["target_i"]).index_select(1, positions),
+                                           temperature)
+            nce_imu = dense_infonce_loss(features["prediction_u"], imu_tokens(features["target_u"]),
+                                         temperature)
+            nce = 0.5 * (nce_image + nce_imu)
+            nce_report = {"infonce": float(nce.detach()), "infonce_image": float(nce_image.detach()),
+                          "infonce_imu": float(nce_imu.detach())}
 
         reconstruction = jepa.new_zeros(())
         reconstruction_parts: dict[str, float] = {}
@@ -303,6 +340,16 @@ class Phase1Trainer:
                 noise_gain, signal_gain, probe_valid,
                 floor_log_ratio=self.sensitivity.get("floor_log_ratio"),
             )
+            # The ratio is scale free and sits on its floor from mid-run on (p16: 0.05):
+            # it no longer asks for detail to be KEPT, only to beat the noise. The
+            # floor asks the latent to move at least this much per unit of 2-4 px detail.
+            floors = self.sensitivity.get("signal_floor_log_gain") or {}
+            if source in floors:
+                gains = signal_gain if probe_valid is None else signal_gain[probe_valid]
+                keep = (F.relu(float(floors[source]) - torch.log(gains + eps)).mean()
+                        if gains.numel() else encoder_term.new_zeros(()))
+                encoder_term = encoder_term + keep
+                sensitivity_report["sensitivity_keep"] = float(keep.detach())
 
         total = (
             self.phase["jepa_weight"] * jepa
@@ -311,6 +358,8 @@ class Phase1Trainer:
             + self.phase["covariance_weight"] * covariance
             + encoder_weight * encoder_term
             + reconstruction_weight * reconstruction
+            + rate_weight * rate
+            + nce_weight * nce
         )
         if not torch.isfinite(total):
             self.optimizer.zero_grad(set_to_none=True)
@@ -338,6 +387,8 @@ class Phase1Trainer:
             **jepa_report,
             "variance": float(variance.detach()),
             "covariance": float(covariance.detach()),
+            **({"coding_rate": float(rate.detach())} if rate_weight > 0 else {}),
+            **nce_report,
             "encoder_sensitivity": float(encoder_term.detach()),
             **reconstruction_parts,
             "encoder_sensitivity_weight": encoder_weight,
