@@ -43,7 +43,9 @@ class Trajectory:
         directory = self.path / IMAGE_DIRECTORY
         paths = list(directory.glob(f"*_{CAMERA}.png"))
         if not paths:
-            paths = [*directory.glob("*.png"), *directory.glob("*.jpg"), *directory.glob("*.jpeg")]
+            # tools/build_tartanair640.py stores the 640x640 frames as lossless WebP.
+            paths = [*directory.glob("*.png"), *directory.glob("*.jpg"), *directory.glob("*.jpeg"),
+                     *directory.glob("*.webp")]
         return sorted(set(paths))
 
     def load_imu(self) -> tuple[np.ndarray, np.ndarray]:
