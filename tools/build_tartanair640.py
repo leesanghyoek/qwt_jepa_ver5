@@ -46,6 +46,7 @@ import math
 import os
 import shutil
 import struct
+import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -95,6 +96,8 @@ DEFAULT_MARGIN = 7
 ISA_T0, ISA_LAPSE = 288.15, 0.0065
 ISA_EXPONENT = 9.80665 * 0.0289644 / (8.3144598 * ISA_LAPSE)
 DONE = "build_done.json"
+# What the loader and the baro need in every trajectory's imu/.
+REQUIRED_IMU = ("acc.npy", "gyro.npy", "imu_time.npy", "cam_time.npy", "pos_global.npy", "baro.npy", "baro.json")
 
 
 def _seed(*parts: object) -> int:
@@ -676,34 +679,268 @@ def build_shard(
     }
 
 
-def pack_environments(out_root: str | Path, log=print) -> list[dict[str, object]]:  # noqa: ANN001
-    """Replace each environment folder by one uncompressed zip, ``<out_root>/<env>.zip``.
+def _md5():  # noqa: ANN202
+    return hashlib.md5(usedforsecurity=False)
 
-    Kaggle saves a few large files far faster than a shard's ~47k small ones, and
-    when a dataset is made from the output it unpacks each archive into a folder named
-    after it. Members are therefore named relative to the environment
-    (``Data_easy/P000/...``), so the dataset reads ``tartanair640/<env>/Data_easy/...``
-    with no level repeated. The frames are compressed already, so the zip stores them
-    as they are. A folder is removed only after its archive has been read back in full
-    (CRC of every member), so stopping half way loses nothing and a rerun carries on.
+
+def _file_md5(path: Path) -> str:
+    digest = _md5()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(1 << 22):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def trajectory_key(parts: tuple[str, ...] | list[str]) -> str | None:
+    """``<env>/<difficulty>/<Pxxx>/...`` for a file at any depth, or None outside a trajectory.
+
+    The same file sits at ``tartanair640/<env>/Data_easy/P000/...`` in a shard built in
+    place, at ``tartanair640_archives/<env>/tartanair640/<env>/Data_easy/...`` in the
+    shard-0 dataset Kaggle unpacked from tar files, and as ``Data_easy/P000/...`` inside
+    ``<env>.tar``. Keys from the environment on make the three comparable.
     """
-    out_root = Path(out_root)
+    for index in range(len(parts) - 2, 0, -1):
+        if parts[index] in DIFFICULTIES:
+            return "/".join(parts[index - 1:])
+    return None
+
+
+def tree_stats(root: str | Path) -> dict[str, object]:
+    """Every file under ``root`` as the filesystem has it: count and bytes, per top-level entry."""
+    root = Path(root)
+    top: dict[str, list[int]] = {}
+    for directory, _, names in os.walk(root):
+        relative = Path(directory).relative_to(root).parts
+        for name in names:
+            row = top.setdefault(relative[0] if relative else name, [0, 0])
+            row[0] += 1
+            row[1] += os.path.getsize(os.path.join(directory, name))
+    return {"files": sum(row[0] for row in top.values()), "bytes": sum(row[1] for row in top.values()),
+            "top": {name: {"files": row[0], "bytes": row[1]} for name, row in sorted(top.items())}}
+
+
+def file_inventory(root: str | Path, *, threads: int = 8) -> dict[str, tuple[int, str]]:
+    """{trajectory_key: (bytes, md5)} for every trajectory file under ``root``, at any depth."""
+    root = Path(root)
+    paths: dict[str, Path] = {}
+    for directory, _, names in os.walk(root):
+        for name in names:
+            path = Path(directory) / name
+            key = trajectory_key(path.relative_to(root).parts)
+            if key is None:
+                continue
+            if key in paths:
+                raise ValueError(f"{key} is both {paths[key]} and {path}")
+            paths[key] = path
+    with ThreadPoolExecutor(threads) as executor:  # hashlib lets go of the GIL on large buffers
+        digests = executor.map(_file_md5, paths.values())
+        return {key: (path.stat().st_size, digest) for (key, path), digest in zip(paths.items(), digests)}
+
+
+def archive_inventory(path: str | Path) -> dict[str, tuple[int, str]]:
+    """{trajectory_key: (bytes, md5)} for every file in a tar, read back from the archive itself."""
+    path = Path(path)
+    entries: dict[str, tuple[int, str]] = {}
+    with tarfile.open(path, "r:") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            key = trajectory_key((path.name.split(".tar")[0], *member.name.split("/")))  # <env>.tar[.part]
+            if key is None:
+                raise ValueError(f"{path}: {member.name} is not inside a trajectory")
+            handle = archive.extractfile(member)
+            digest, size = _md5(), 0
+            while chunk := handle.read(1 << 22):
+                digest.update(chunk)
+                size += len(chunk)
+            entries[key] = (size, digest.hexdigest())
+    return entries
+
+
+def compare_inventories(expected: dict[str, tuple[int, str]], actual: dict[str, tuple[int, str]]) -> dict[str, object]:
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    different = sorted(key for key in set(expected) & set(actual) if expected[key] != actual[key])
+    return {"expected": len(expected), "actual": len(actual), "missing": len(missing), "extra": len(extra),
+            "different": len(different), "examples": (missing + extra + different)[:10],
+            "match": not (missing or extra or different)}
+
+
+def write_inventory(path: str | Path, inventory: dict[str, tuple[int, str]]) -> None:
+    lines = [f"{key}\t{size}\t{digest}\n" for key, (size, digest) in sorted(inventory.items())]
+    Path(path).write_text("path\tbytes\tmd5\n" + "".join(lines))
+
+
+def read_inventory(path: str | Path) -> dict[str, tuple[int, str]]:
+    rows = Path(path).read_text().splitlines()[1:]
+    return {key: (int(size), digest) for key, size, digest in (row.split("\t") for row in rows)}
+
+
+def check_shard(root: str | Path, report: dict[str, object]) -> dict[str, object]:
+    """A shard as found under ``root`` (any depth) against the report ``build_shard`` wrote for it.
+
+    Per trajectory: the done marker equals its report entry, the frame count and the
+    frames' bytes match it, ``frames.npy`` names the very frames on disk, and the
+    IMU the loader reads is there with one camera time per kept frame.
+    """
+    root = Path(root)
+    found: dict[str, Path] = {}
+    problems: list[str] = []
+    for done in root.rglob(DONE):
+        key = "/".join(done.parent.parts[-3:])
+        if key in found:
+            problems.append(f"{key}: both {found[key]} and {done.parent}")
+        found[key] = done.parent
+    totals = {"trajectories": 0, "frames": 0, "image_bytes": 0}
+    environments = set()
+    for item in report["reports"]:
+        if "skipped" in item:
+            continue
+        key = item["trajectory"]
+        path = found.pop(key, None)
+        if path is None:
+            problems.append(f"{key}: missing")
+            continue
+        images = sorted((path / f"image_{CAMERA}").glob(f"*_{CAMERA}.*"))
+        image_bytes = sum(image.stat().st_size for image in images)
+        indices = [int(image.name.split("_", 1)[0]) for image in images]
+        imu = path / "imu"
+        absent = [name for name in REQUIRED_IMU if not (imu / name).is_file()]
+        if json.loads((path / DONE).read_text()) != item:
+            problems.append(f"{key}: {DONE} differs from the build report")
+        if len(images) != item["frames_kept"] or image_bytes != item["stored_bytes"]:
+            problems.append(f"{key}: {len(images)} frames, {image_bytes} B; report {item['frames_kept']}, "
+                            f"{item['stored_bytes']} B")
+        if np.load(path / "frames.npy").tolist() != indices:
+            problems.append(f"{key}: frames.npy does not name the frames on disk")
+        if absent:
+            problems.append(f"{key}: imu/ lacks {absent}")
+        elif len(np.load(imu / "cam_time.npy", mmap_mode="r")) != len(images) \
+                or len(np.load(imu / "imu_time.npy", mmap_mode="r")) != item["imu_rows"]:
+            problems.append(f"{key}: cam_time/imu_time lengths do not match the frames and the report")
+        totals["trajectories"] += 1
+        totals["frames"] += len(images)
+        totals["image_bytes"] += image_bytes
+        environments.add(key.split("/")[0])
+    problems += [f"{key}: not in the build report" for key in sorted(found)]
+    return {**totals, "environments": len(environments), "problems": problems}
+
+
+def _tar_bytes(files: list[Path], directories: int) -> int:
+    # A 512-byte header per member, data padded to 512, two zero blocks, 10240-byte records.
+    body = sum(512 + -(-path.stat().st_size // 512) * 512 for path in files) + 512 * directories + 1024
+    return -(-body // 10240) * 10240
+
+
+def plan_archives(source_root: str | Path) -> dict[str, dict[str, int]]:
+    """{environment: files, bytes, tar_bytes} of the tars ``pack_environments`` would write."""
+    plan = {}
+    for environment in sorted(path for path in Path(source_root).iterdir() if path.is_dir()):
+        entries = list(environment.rglob("*"))
+        files = [path for path in entries if path.is_file()]
+        plan[environment.name] = {"files": len(files), "bytes": sum(path.stat().st_size for path in files),
+                                  "tar_bytes": _tar_bytes(files, len(entries) - len(files))}
+    return plan
+
+
+class _HashingReader:
+    def __init__(self, handle):  # noqa: ANN001
+        self.handle, self.digest, self.size = handle, _md5(), 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.handle.read(size)
+        self.digest.update(data)
+        self.size += len(data)
+        return data
+
+
+def _write_tar(source: Path, target: Path) -> dict[str, tuple[int, str]]:
+    """Members relative to ``source``, directories before their contents, GNU format as GNU tar writes."""
+    entries: dict[str, tuple[int, str]] = {}
+    with tarfile.open(target, "w", format=tarfile.GNU_FORMAT) as archive:
+        for path in sorted(source.rglob("*")):
+            info = tarfile.TarInfo(path.relative_to(source).as_posix())
+            stat = path.stat()
+            info.mtime = int(stat.st_mtime)
+            if path.is_dir():
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                archive.addfile(info)
+                continue
+            info.size, info.mode = stat.st_size, 0o644
+            with open(path, "rb") as handle:
+                reader = _HashingReader(handle)
+                archive.addfile(info, reader)
+            if reader.size != info.size:
+                raise IOError(f"{path}: read {reader.size} of {info.size} bytes")
+            key = trajectory_key((source.name, *info.name.split("/")))
+            if key is None:
+                raise ValueError(f"{path} is not inside a trajectory")
+            entries[key] = (info.size, reader.digest.hexdigest())
+    return entries
+
+
+def pack_environments(
+    source_root: str | Path,
+    archive_dir: str | Path,
+    *,
+    remove_source: bool = False,
+    margin_bytes: int = 512 * 2**20,
+    log=print,  # noqa: ANN001
+) -> dict[str, object]:
+    """One uncompressed tar per environment, ``archive_dir/<env>.tar``, and an inventory of every file.
+
+    Kaggle's *New Dataset* from a notebook's output takes only the first 500 files:
+    shard 2 saved 46,941, and the dialog offered build_meta's 3 plus 497 frames. It
+    does unpack an archive into a folder named after it (shard 0's 24 tars became
+    46,700 files, every frame byte for byte). Members are named relative to the
+    environment (``Data_easy/P000/...``), so the dataset reads
+    ``tartanair640/<env>/Data_easy/...`` with no level repeated.
+
+    Every file is hashed (MD5) on its way into the archive, and the archive is read
+    back member by member and hashed again before it is renamed into place. The
+    source is left alone unless ``remove_source``; then an environment's folder goes
+    only once its own archive has read back identical. Returns the inventory
+    ({trajectory_key: (bytes, md5)}) for checking the dataset after Kaggle unpacks it.
+    """
+    source_root, archive_dir = Path(source_root), Path(archive_dir)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    sizes = plan_archives(source_root)
+    if not sizes and not any(archive_dir.glob("*.tar")):
+        raise FileNotFoundError(f"no environment folders under {source_root}")
+    same_device = os.stat(source_root).st_dev == os.stat(archive_dir).st_dev
+    # Removing a folder only frees room on the archive's disk when both share it.
+    needed = max((row["tar_bytes"] for row in sizes.values()), default=0) if remove_source and same_device \
+        else sum(row["tar_bytes"] for row in sizes.values())
+    free = shutil.disk_usage(archive_dir).free
+    log(f"{len(sizes)} environments, {sum(row['files'] for row in sizes.values())} files, "
+        f"{sum(row['tar_bytes'] for row in sizes.values()) / 1e9:.2f} GB of tar; needs {needed / 1e9:.2f} GB, "
+        f"{archive_dir} has {free / 1e9:.2f} GB free")
+    if free < needed + margin_bytes:
+        raise OSError(f"{archive_dir}: {free / 1e9:.2f} GB free, packing needs {(needed + margin_bytes) / 1e9:.2f} GB; "
+                      "nothing was written or removed")
+
+    inventory: dict[str, tuple[int, str]] = {}
     packed = []
-    for environment in sorted(path for path in out_root.iterdir() if path.is_dir()):
-        files = sorted(path for path in environment.rglob("*") if path.is_file())
-        partial = out_root / f"{environment.name}.zip.part"
-        with zipfile.ZipFile(partial, "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
-            for path in files:
-                archive.write(path, path.relative_to(environment).as_posix())
-        with zipfile.ZipFile(partial) as archive:
-            if archive.testzip() is not None or len(archive.namelist()) != len(files):
-                raise IOError(f"{partial}: the archive does not read back whole")
-        target = out_root / f"{environment.name}.zip"
-        os.replace(partial, target)
-        shutil.rmtree(environment)
-        packed.append({"environment": environment.name, "files": len(files), "bytes": target.stat().st_size})
-        log(f"{environment.name}: {len(files)} files, {target.stat().st_size / 1e9:.2f} GB")
-    return packed
+    names = sorted(set(sizes) | {path.name.removesuffix(".tar") for path in archive_dir.glob("*.tar")})
+    for name in names:
+        target = archive_dir / f"{name}.tar"
+        if name not in sizes:
+            # Packed and removed by an interrupted earlier run, after its archive read back whole.
+            entries = archive_inventory(target)
+        else:
+            partial = archive_dir / f"{name}.tar.part"
+            entries = _write_tar(source_root / name, partial)
+            if archive_inventory(partial) != entries or len(entries) != sizes[name]["files"]:
+                raise IOError(f"{partial}: the archive does not read back as written; the source is untouched")
+            os.replace(partial, target)
+            if remove_source:
+                shutil.rmtree(source_root / name)
+        inventory.update(entries)
+        packed.append({"environment": name, "files": len(entries), "bytes": sum(size for size, _ in entries.values()),
+                       "tar_bytes": target.stat().st_size})
+        log(f"{name}: {len(entries)} files, {target.stat().st_size / 1e9:.2f} GB, read back identical")
+    return {"archives": packed, "files": len(inventory), "bytes": sum(size for size, _ in inventory.values()),
+            "tar_bytes": sum(item["tar_bytes"] for item in packed), "inventory": inventory}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,6 +129,41 @@ def link_trajectories(roots: list[str | Path], target: str | Path) -> Path:
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(trajectory.path.resolve(), target_is_directory=True)
     return target
+
+
+def find_shard_roots(base: str | Path = "/kaggle/input", depth: int = 4) -> dict[int, Path]:
+    """{shard: dataset root} of the 640x640 TartanAir shards mounted under ``base``.
+
+    A shard's root is the folder holding ``build_meta/shard<N>.json`` (written by
+    ``tools/build_tartanair640.py``). Every shard of the plan must be there exactly
+    once and from the same plan: the per-environment split is only stable over all
+    of them. A shard whose archives Kaggle did not unpack is refused by name.
+    """
+    base = Path(base)
+    found: dict[int, Path] = {}
+    plans: dict[int, tuple[str, int]] = {}
+    for level in range(depth):
+        for report_path in sorted(base.glob("/".join(["*"] * level + ["build_meta", "shard*.json"]))):
+            root = report_path.parent.parent
+            report = json.loads(report_path.read_text())
+            plan = json.loads((root / "build_meta" / "plan.json").read_text())
+            shard = int(report["shard"])
+            if shard in found:
+                raise ValueError(f"shard {shard} is mounted twice: {found[shard]} and {root}")
+            archives = [path for path in root.glob("tartanair640/*") if path.suffix in (".tar", ".zip")]
+            if archives:
+                raise ValueError(f"{root} holds {len(archives)} archives that Kaggle did not unpack "
+                                 f"({archives[0].name}, ...); trajectories must be folders")
+            found[shard] = root
+            plans[shard] = (report["fingerprint"], int(plan["num_shards"]))
+    if not found:
+        raise FileNotFoundError(f"no build_meta/shard*.json within {depth} levels of {base}")
+    if len(set(plans.values())) != 1:
+        raise ValueError(f"the shards come from different plans: {plans}")
+    expected = range(next(iter(plans.values()))[1])
+    if sorted(found) != list(expected):
+        raise ValueError(f"shards {sorted(set(expected) - set(found))} are not mounted (found {sorted(found)})")
+    return dict(sorted(found.items()))
 
 
 def audit_trajectory(trajectory: Trajectory, window: int = 128) -> dict[str, object]:

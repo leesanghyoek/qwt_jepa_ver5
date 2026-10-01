@@ -7,7 +7,9 @@ camera times, the full IMU, and a barometer that follows the true height.
 from __future__ import annotations
 
 import io
+import shutil
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -216,24 +218,78 @@ def test_one_broken_trajectory_is_skipped_and_the_rest_are_built(tmp_path):
 
 
 def _kaggle_unpack(archive_dir: Path, into: Path) -> None:
-    """What Kaggle does when a dataset is made from the output: <name>.zip -> folder <name>/."""
-    for archive in sorted(archive_dir.glob("*.zip")):
-        with zipfile.ZipFile(archive) as opened:
-            opened.extractall(into / archive.stem)
+    """What Kaggle does when a dataset is made from the output: <name>.tar -> folder <name>/."""
+    for archive in sorted(archive_dir.glob("*.tar")):
+        with tarfile.open(archive) as opened:
+            opened.extractall(into / archive.stem, filter="data")
 
 
-def test_packing_leaves_one_zip_per_environment_that_kaggle_unpacks_to_the_same_dataset(tmp_path):
+def test_packing_writes_one_tar_per_environment_that_kaggle_unpacks_to_the_same_dataset(tmp_path):
     source = _source(tmp_path / "src")
-    out = tmp_path / "tartanair640"
-    _build(source, out, budget_frames=48)
-    before = build_manifest(out)["meta"]["samples_per_split"]
-    packed = builder.pack_environments(out, log=lambda *_: None)
-    assert sorted(path.name for path in out.iterdir()) == ["AmericanDiner.zip", "Office.zip"]
-    assert all(item["files"] > 0 for item in packed)
-    assert builder.pack_environments(out, log=lambda *_: None) == []  # nothing left to do
+    built = tmp_path / "stage" / "tartanair640"
+    _, _, report = _build(source, built, budget_frames=48)
+    before = build_manifest(built)["meta"]["samples_per_split"]
+    original = builder.file_inventory(built)
+    out = tmp_path / "working" / "tartanair640"
+    packed = builder.pack_environments(built, out, log=lambda *_: None)
+    assert sorted(path.name for path in out.iterdir()) == ["AmericanDiner.tar", "Office.tar"]
+    assert packed["inventory"] == original and packed["files"] == len(original)
+    assert builder.file_inventory(built) == original  # the source is left alone
     restored = tmp_path / "dataset" / "tartanair640"
     _kaggle_unpack(out, restored)
     # No level repeated: tartanair640/<env>/Data_easy/P000
     assert sorted(path.relative_to(restored).as_posix() for path in restored.glob("*/*/P000")) == [
         "AmericanDiner/Data_easy/P000", "AmericanDiner/Data_hard/P000", "Office/Data_easy/P000", "Office/Data_hard/P000"]
+    assert builder.compare_inventories(original, builder.file_inventory(restored))["match"]
     assert build_manifest(restored)["meta"]["samples_per_split"] == before
+    assert builder.check_shard(restored, report)["problems"] == []
+
+
+def test_packing_that_removes_the_source_resumes_from_the_archives_it_kept(tmp_path):
+    built = tmp_path / "working" / "build"
+    _build(_source(tmp_path / "src"), built, budget_frames=48)
+    original = builder.file_inventory(built)
+    out = tmp_path / "working" / "tartanair640"
+    first = builder.pack_environments(built, out, remove_source=True, log=lambda *_: None)
+    assert first["inventory"] == original and list(built.iterdir()) == []
+    # A rerun (a session that died after packing) rebuilds the inventory from the tars.
+    assert builder.pack_environments(built, out, remove_source=True, log=lambda *_: None)["inventory"] == original
+
+
+def test_packing_without_room_writes_and_removes_nothing(tmp_path, monkeypatch):
+    built = tmp_path / "build"
+    _build(_source(tmp_path / "src"), built, budget_frames=48)
+    original = builder.file_inventory(built)
+    monkeypatch.setattr(builder.shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(10**12, 10**12, 10**6))
+    with pytest.raises(OSError, match="nothing was written or removed"):
+        builder.pack_environments(built, tmp_path / "out", remove_source=True, log=lambda *_: None)
+    assert list((tmp_path / "out").iterdir()) == [] and builder.file_inventory(built) == original
+
+
+def test_check_shard_finds_a_lost_frame_and_reads_any_nesting(tmp_path):
+    built = tmp_path / "tartanair640"
+    _, _, report = _build(_source(tmp_path / "src"), built, budget_frames=48)
+    # Shard 0's dataset: tartanair640_archives/<env>/tartanair640/<env>/Data_easy/...
+    nested = tmp_path / "dataset" / "tartanair640_archives"
+    for environment in ("AmericanDiner", "Office"):
+        shutil.copytree(built / environment, nested / environment / "tartanair640" / environment)
+    assert builder.check_shard(nested, report) == {**builder.check_shard(built, report), "problems": []}
+    assert builder.compare_inventories(builder.file_inventory(built), builder.file_inventory(nested))["match"]
+
+    frame = next((built / "Office" / "Data_easy" / "P000" / "image_lcam_front").iterdir())
+    frame.unlink()
+    problems = builder.check_shard(built, report)["problems"]
+    assert len(problems) == 3 and all(problem.startswith("Office/Data_easy/P000:") for problem in problems)
+    shutil.rmtree(built / "Office" / "Data_hard" / "P001")
+    assert "Office/Data_hard/P001: missing" in builder.check_shard(built, report)["problems"]
+    lost = builder.compare_inventories(builder.file_inventory(nested), builder.file_inventory(built))
+    assert not lost["match"] and lost["missing"] > 1 and lost["extra"] == 0
+
+
+def test_trajectory_keys_agree_across_the_three_layouts():
+    key = "AbandonedCable/Data_easy/P000/imu/acc.npy"
+    assert builder.trajectory_key(("tartanair640", "AbandonedCable", "Data_easy", "P000", "imu", "acc.npy")) == key
+    assert builder.trajectory_key(("tartanair640_archives", "AbandonedCable", "tartanair640", "AbandonedCable",
+                                   "Data_easy", "P000", "imu", "acc.npy")) == key
+    assert builder.trajectory_key(("AbandonedCable", "Data_easy", "P000", "imu", "acc.npy")) == key
+    assert builder.trajectory_key(("build_meta", "plan.json")) is None

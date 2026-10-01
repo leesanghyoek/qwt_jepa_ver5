@@ -7,6 +7,7 @@ matching the dataset. Images are small here because framing does not depend on
 pixel size; the timing is the part under test.
 """
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -159,3 +160,36 @@ def test_per_environment_split_draws_valid_and_test_from_every_environment():
     assert assign_splits(trajectories) == assign_splits(trajectories, rule="hash")
     with pytest.raises(ValueError, match="Unknown split rule"):
         assign_splits(trajectories, rule="random")
+
+
+def test_find_shard_roots_wants_every_shard_of_one_plan_once(tmp_path):
+    import json
+
+    from qjepa.data.tartanair import find_shard_roots
+
+    def shard(root: Path, number: int, fingerprint: str = "6707c5738eaa") -> Path:
+        (root / "build_meta").mkdir(parents=True)
+        (root / "build_meta" / f"shard{number}.json").write_text(json.dumps({"shard": number, "fingerprint": fingerprint}))
+        (root / "build_meta" / "plan.json").write_text(json.dumps({"num_shards": 3}))
+        return root
+
+    base = tmp_path / "input"
+    roots = {0: shard(base / "tartanairshard0", 0), 1: shard(base / "tartanair640-s1", 1),
+             2: shard(base / "datasets" / "owner" / "tartanair640-s2", 2)}
+    assert find_shard_roots(base) == roots
+    shard(base / "copy-of-s1", 1)
+    with pytest.raises(ValueError, match="shard 1 is mounted twice"):
+        find_shard_roots(base)
+    shutil.rmtree(base / "copy-of-s1")
+    shutil.rmtree(roots[2])
+    with pytest.raises(ValueError, match=r"shards \[2\] are not mounted"):
+        find_shard_roots(base)
+    shard(base / "other-plan", 2, fingerprint="000000000000")
+    with pytest.raises(ValueError, match="different plans"):
+        find_shard_roots(base)
+    shutil.rmtree(base / "other-plan")
+    packed = shard(base / "tartanair640-s2", 2)
+    (packed / "tartanair640").mkdir()
+    (packed / "tartanair640" / "Office.tar").write_bytes(b"")
+    with pytest.raises(ValueError, match="did not unpack"):
+        find_shard_roots(base)
