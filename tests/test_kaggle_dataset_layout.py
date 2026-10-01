@@ -184,6 +184,11 @@ def test_find_shard_roots_wants_every_shard_of_one_plan_once(tmp_path):
     shutil.rmtree(roots[2])
     with pytest.raises(ValueError, match=r"shards \[2\] are not mounted"):
         find_shard_roots(base)
+    # A trial on the shards there are: only those asked for, still all from one plan.
+    assert find_shard_roots(base, shards=(0, 1)) == {0: roots[0], 1: roots[1]}
+    assert find_shard_roots(base, shards=[1]) == {1: roots[1]}
+    with pytest.raises(ValueError, match=r"shards \[2\] are not mounted"):
+        find_shard_roots(base, shards=(0, 2))
     shard(base / "other-plan", 2, fingerprint="000000000000")
     with pytest.raises(ValueError, match="different plans"):
         find_shard_roots(base)

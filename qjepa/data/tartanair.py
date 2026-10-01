@@ -131,13 +131,20 @@ def link_trajectories(roots: list[str | Path], target: str | Path) -> Path:
     return target
 
 
-def find_shard_roots(base: str | Path = "/kaggle/input", depth: int = 4) -> dict[int, Path]:
+def find_shard_roots(
+    base: str | Path = "/kaggle/input", depth: int = 4, shards: tuple[int, ...] | list[int] | None = None
+) -> dict[int, Path]:
     """{shard: dataset root} of the 640x640 TartanAir shards mounted under ``base``.
 
     A shard's root is the folder holding ``build_meta/shard<N>.json`` (written by
-    ``tools/build_tartanair640.py``). Every shard of the plan must be there exactly
-    once and from the same plan: the per-environment split is only stable over all
-    of them. A shard whose archives Kaggle did not unpack is refused by name.
+    ``tools/build_tartanair640.py``). Each shard must be there once and all from the
+    same plan. ``shards=None`` wants every shard of the plan; a list takes just those
+    (others mounted are left out). With ``split_rule: per_environment`` a subset
+    keeps every trajectory in the split it has over all shards: each scene lies in
+    one shard, and the one that spans two (ArchVizTinyHouse Day/Night) has the same
+    Pxxx in both. Checked on the real plan: shards 0+2 move none of 766 trajectories.
+    The hash rule draws over the whole pool, so there a subset does move them. A
+    shard whose archives Kaggle did not unpack is refused by name.
     """
     base = Path(base)
     found: dict[int, Path] = {}
@@ -160,10 +167,10 @@ def find_shard_roots(base: str | Path = "/kaggle/input", depth: int = 4) -> dict
         raise FileNotFoundError(f"no build_meta/shard*.json within {depth} levels of {base}")
     if len(set(plans.values())) != 1:
         raise ValueError(f"the shards come from different plans: {plans}")
-    expected = range(next(iter(plans.values()))[1])
-    if sorted(found) != list(expected):
+    expected = sorted(shards) if shards is not None else list(range(next(iter(plans.values()))[1]))
+    if not set(expected) <= set(found):
         raise ValueError(f"shards {sorted(set(expected) - set(found))} are not mounted (found {sorted(found)})")
-    return dict(sorted(found.items()))
+    return {shard: found[shard] for shard in expected}
 
 
 def audit_trajectory(trajectory: Trajectory, window: int = 128) -> dict[str, object]:
