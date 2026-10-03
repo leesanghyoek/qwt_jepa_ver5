@@ -790,6 +790,7 @@ class LatentDecoders(nn.Module):
         split: dict | None = None,
         imu_refiner: dict | None = None,
         predictor_merge: bool = False,
+        image_coefficient_channels: int = 48,
     ) -> None:
         super().__init__()
         if image_decoder not in IMAGE_DECODERS:
@@ -804,8 +805,9 @@ class LatentDecoders(nn.Module):
         elif image_decoder == "split_color_edge":
             self.image = SplitColorEdgeDecoder(channels[3], **(split or {}))
         else:
+            # 48 for an RGB QWT, 16 when it reads luminance (model.image_input).
             self.image = LatentCoefficientDecoder(
-                48, image_coefficient_size, channels, dim=2, groups=groups,
+                image_coefficient_channels, image_coefficient_size, channels, dim=2, groups=groups,
                 residual=residual, skip_channels=skip_channels, skip_gating=skip_gating,
                 sees_input=sees_input,
             )

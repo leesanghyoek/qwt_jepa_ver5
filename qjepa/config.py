@@ -22,7 +22,7 @@ from .corruptions import (
 )
 from .corruptions.image import DEGRADATION_FEATURES
 from .data.normalize import ImuNormalizer
-from .transforms import QWT_BACKENDS
+from .transforms import IMAGE_INPUTS, QWT_BACKENDS
 from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
 from .models.blocks import ENCODER_NORMS
 from .models.decoders import PIXEL_IMAGE_DECODERS
@@ -356,6 +356,8 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
         image_transform=model["image_transform"],
         # Absent before the sharpness plan: GroupNorm, the encoders every checkpoint holds.
         encoder_norm=model.get("encoder_norm", "group"),
+        # Absent before the luminance arm: RGB, the 48-channel QWT every checkpoint holds.
+        image_input=model.get("image_input", "rgb"),
     )
 
 
@@ -465,6 +467,13 @@ def _validate_sharpness(config: dict[str, Any]) -> None:
     phase1, phase2 = config["phase1"], config["phase2"]
     if config["model"].get("encoder_norm", "group") not in ENCODER_NORMS:
         raise ValueError(f"model.encoder_norm must be one of {ENCODER_NORMS}")
+    image_input = config["model"].get("image_input", "rgb")
+    if image_input not in IMAGE_INPUTS:
+        raise ValueError(f"model.image_input must be one of {IMAGE_INPUTS}")
+    if image_input == "luminance" and phase2.get("image_decoder", "qwt_coefficients") not in PIXEL_IMAGE_DECODERS:
+        # Luminance coefficients synthesise back to Y: only a pixel decoder, which
+        # reads the RGB frame itself, can put the colour back.
+        raise ValueError("model.image_input luminance needs phase2.image_decoder resnet_pixel or split_color_edge")
     if config.get("encoder_sensitivity", {}).get("noise_direction", "corruption") not in NOISE_DIRECTIONS:
         raise ValueError(f"encoder_sensitivity.noise_direction must be one of {NOISE_DIRECTIONS}")
     for name, section in (("phase1", phase1), ("phase2", phase2)):
@@ -568,6 +577,7 @@ def build_decoders(
     return LatentDecoders(
         predictor_merge=predictor_input,
         image_coefficient_size=(image_size[0] // 2, image_size[1] // 2),
+        image_coefficient_channels=48 if config["model"].get("image_input", "rgb") == "rgb" else 16,
         imu_coefficient_length=config["data"]["imu_window"] // 2,
         channels=channels,
         groups=config["model"]["groupnorm_groups"],

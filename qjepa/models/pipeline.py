@@ -182,6 +182,10 @@ class RestorationSystem(nn.Module):
             raise ValueError("A latent predictor and the decoders' predictor_merge come together")
         if latent_predictor is not None and (latent_predictor.condition is None) != (degradation_head is None):
             raise ValueError("A conditioned predictor needs its degradation head, and only then")
+        if (backbone.image_transform.image_input == "luminance"
+                and self.decoders.image_decoder not in PIXEL_IMAGE_DECODERS):
+            # Synthesis of luminance coefficients gives Y back, never RGB.
+            raise ValueError("A luminance backbone needs a pixel image decoder (resnet_pixel or split_color_edge)")
         self.latent_predictor = latent_predictor
         self.degradation_head = degradation_head
         self.backbone_trainable = False
@@ -240,8 +244,12 @@ class RestorationSystem(nn.Module):
         parts = None
         if self.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
             # The QWT reconstructs perfectly, so this IS the blurry input image;
-            # decode(latent) keeps its signature for the ZI-ablation tools.
-            blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
+            # decode(latent) keeps its signature for the ZI-ablation tools. A luminance
+            # QWT holds no colour, so the backbone kept the RGB frame for the decoder.
+            if latent.image_rgb is not None:
+                blurry = latent.image_rgb
+            else:
+                blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
             zi = self.image_latent(latent)
             if getattr(self.decoders.image, "uses_stages", False):
                 # The JEPA encoder's finer stages (image_skips: 1/8, 1/4, 1/2 of the frame).

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from qjepa.cli import _dataset, _loader
 from qjepa.config import load_config
 from qjepa.data import read_manifest
+from qjepa.models.color_edge import luminance
 from latent_probe import ridge_probe
 
 
@@ -39,6 +40,8 @@ def main() -> None:
     parser.add_argument("--cells-per-image", type=int, default=8)
     parser.add_argument("--latent-grid", type=int, default=16, help="ZI la [C, grid, grid]")
     parser.add_argument("--dims", type=int, default=128, help="so chieu cua mot o latent")
+    parser.add_argument("--luminance", action="store_true",
+                        help="mang kenh sang Y thay vi RGB: tran de so voi dong 'Y theo o' cua latent_probe.py")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -54,6 +57,8 @@ def main() -> None:
         if seen >= args.samples:
             break
         image = raw["image_clean"]
+        if args.luminance:
+            image = luminance(image)
         count, channels, height, width = image.shape
         rows = columns = args.latent_grid
         tile_h, tile_w = height // rows, width // columns
@@ -90,7 +95,7 @@ def main() -> None:
         print(f"{k:>10}{probe:>10.4f}{baseline:>10.4f}{share:>10.0f}%{mark}")
 
     print(f"\nDoc ket qua: dong danh dau la TRAN cua mot ma tuyen tinh {args.dims} chieu.")
-    print("So sanh voi 'ANH theo o' cua latent_probe.py:")
+    print(f"So sanh voi '{'Y' if args.luminance else 'ANH'} theo o' cua latent_probe.py:")
     print("  latent gan tran  -> dung du dung luong; phai noi tran moi hon duoc.")
     print("  latent kem xa    -> con du dia o phase 1 (neo, lich train, trong so bang).")
 

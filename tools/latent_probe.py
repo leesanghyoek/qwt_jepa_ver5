@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from qjepa.cli import _dataset, _loader, _system_from_phase2, _to_device
 from qjepa.config import build_normalizer, build_phase1_model
 from qjepa.data import read_manifest
+from qjepa.models.color_edge import luminance
 from qjepa.training.checkpoints import load_checkpoint
 
 
@@ -81,6 +82,9 @@ def main() -> None:
 
     rng = np.random.default_rng(0)
     imu_features, imu_targets, cells, patches = [], [], [], []
+    # Cung o latent, dich la mang kenh sang Y: don vi chung cua backbone RGB va backbone
+    # chi doc anh xam (model.image_input: luminance), vi latent xam khong con mau.
+    y_patches = []
     # The image encoder's finer stages (1/8 and 1/4 of the frame): how much of an
     # 8x8 and a 4x4 tile they hold, next to ZI's 16x16.
     stage_cells: dict[int, list] = {0: [], 1: []}
@@ -125,6 +129,9 @@ def main() -> None:
         picked = rng.choice(rows * columns, size=min(args.cells_per_image, rows * columns), replace=False)
         cells.append(grid[:, picked].reshape(-1, grid.shape[-1]).cpu().numpy())
         patches.append(tiles[:, picked].reshape(-1, tiles.shape[-1]).cpu().numpy())
+        y_tiles = luminance(image).unfold(2, tile_h, tile_h).unfold(3, tile_w, tile_w)
+        y_tiles = y_tiles.reshape(count, rows * columns, -1)
+        y_patches.append(y_tiles[:, picked].reshape(-1, y_tiles.shape[-1]).cpu().numpy())
         for index in stage_cells:
             stage = latent.image_skips[index]
             s_rows, s_columns = stage.shape[2], stage.shape[3]
@@ -150,6 +157,7 @@ def main() -> None:
     bin_targets = np.concatenate(bin_targets).astype(np.float64)
     cells = np.concatenate(cells).astype(np.float64)
     patches = np.concatenate(patches).astype(np.float64)
+    y_patches = np.concatenate(y_patches).astype(np.float64)
     print(f"mau = {seen} | ZU -> {imu_features.shape[1]}d | o anh -> {cells.shape[1]}d"
           f" -> mang {patches.shape[1]}d | hang anh = {len(cells)}")
 
@@ -162,7 +170,8 @@ def main() -> None:
                                np.concatenate(stage_patches[index]).astype(np.float64)))
     for label, features, targets in (("IMU ca cua so", imu_features, imu_targets),
                                      ("IMU theo bin ", bin_features, bin_targets),
-                                     ("ANH theo o   ", cells, patches), *stage_rows):
+                                     ("ANH theo o   ", cells, patches),
+                                     ("Y theo o     ", cells, y_patches), *stage_rows):
         if len(features) <= features.shape[1] * 2:
             print(f"{label} : chi {len(features)} hang cho {features.shape[1]} chieu"
                   f" — tang --samples, ket qua khong dang tin")

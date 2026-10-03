@@ -10,7 +10,8 @@ from PIL import Image
 
 from qjepa.cli import main
 from qjepa.config import load_config, serializable_config
-from tools.edge_probe import cells, detail_targets, edge_probe
+from tools.edge_probe import TARGETS, block_ridge_probe, cells, detail_targets, edge_probe, energy_targets
+from tools.latent_probe import ridge_probe
 from tools.latent_oracle import finish_gap, latent_gap, oracle
 
 
@@ -92,6 +93,43 @@ def test_both_tools_run_on_phase_checkpoints(tmp_path):
         result = edge_probe(checkpoint, manifest, output=tmp_path / "d2.json", samples=4,
                             cells_per_image=4, scenarios=("blur_only",), device="cpu")
         rows = result["blur_only"]
-        assert {"input", "zi", "input+zi", "input+zi_clean"} <= set(rows)
-        assert all(np.isfinite(rows[key][target]["recovered_pct"])
-                   for key in rows for target in ("fine", "edges"))
+        assert {"input", "zi", "zi_clean", "input+zi", "input+zi_clean"} <= set(rows)
+        assert all(np.isfinite(rows[key][target]["recovered_pct"]) for key in rows for target in TARGETS)
+
+
+def _recovered(scores):
+    return {name: 100.0 * (1.0 - probe / baseline) for name, (probe, baseline) in scores.items()}
+
+
+def test_a_noise_block_cannot_lower_the_d2_score_and_an_informative_block_raises_it():
+    """One shared penalty made every added block cost points -- pure noise included --
+    so "input + X" below "input" said nothing about X. Each block now has its own."""
+    rng = np.random.default_rng(0)
+    x, hidden = rng.normal(size=(3000, 64)), rng.normal(size=(3000, 16))
+    y = x @ rng.normal(size=(64, 8)) + hidden @ rng.normal(size=(16, 8)) + 0.3 * rng.normal(size=(3000, 8))
+    noise = rng.normal(size=(3000, 1000))
+    shared_alone = 100.0 * (1.0 - np.divide(*ridge_probe(x, y)))
+    shared_noise = 100.0 * (1.0 - np.divide(*ridge_probe(np.concatenate([x, noise], axis=1), y)))
+    assert shared_noise < shared_alone - 2.0                     # the artefact this fixes
+    alone = _recovered(block_ridge_probe([x], {"y": y}))["y"]
+    with_noise = _recovered(block_ridge_probe([x, noise], {"y": y}))["y"]
+    with_hidden = _recovered(block_ridge_probe([x, hidden], {"y": y}))["y"]
+    assert with_noise > alone - 0.5
+    assert with_hidden > alone + 10.0
+
+
+def test_the_energy_target_reads_edges_a_signed_target_cannot():
+    """A feature that knows how strong an edge is but not its sign: a linear probe of the
+    signed band finds nothing, the energy target finds it."""
+    rng = np.random.default_rng(1)
+    strength = rng.uniform(0.0, 1.0, size=(4000, 4))
+    sign = rng.choice((-1.0, 1.0), size=(4000, 4))
+    scores = _recovered(block_ridge_probe([strength], {"signed": sign * strength, "energy": strength}))
+    assert scores["signed"] < 3.0 and scores["energy"] > 90.0
+
+
+def test_energy_targets_are_the_rms_of_each_band_over_4x4_blocks():
+    band = torch.arange(64, dtype=torch.float64).view(1, 1, 8, 8) - 30.0
+    energy = energy_targets({"edges": band})["edges_energy"]
+    assert energy.shape == (1, 1, 2, 2)
+    assert torch.isclose(energy[0, 0, 1, 0], band[0, 0, 4:, :4].square().mean().sqrt())

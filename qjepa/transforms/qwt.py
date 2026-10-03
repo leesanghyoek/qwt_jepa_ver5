@@ -10,6 +10,12 @@ which is the standard dual-tree construction: ``i`` carries the Hilbert transfor
 along x, ``j`` along y, and ``k`` along both. Packing is
 RGB x 4 bands x 4 components = 48 real channels.
 
+With ``image_input="luminance"`` the transform first collapses RGB to luminance Y
+(BT.601, the weights of qjepa/models/color_edge.py) and analyses that one channel:
+16 real channels, edges without colour. Synthesis then returns Y, not RGB -- the
+colour is gone from the coefficients by construction, so whoever needs it must
+keep the frame itself.
+
 What decides whether this is a quaternion wavelet transform at all is whether
 tree B's wavelet is the Hilbert transform of tree A's. If it is, the quaternion
 modulus is nearly shift invariant and the three phases encode sub-pixel
@@ -50,6 +56,9 @@ from .layout import TransformLayout, fp32_transform
 BAND_ORDER = ("approx", "detail_y", "detail_x", "detail_xy")
 COMPONENT_ORDER = ("real", "i", "j", "k")
 CHANNEL_ORDER = ("R", "G", "B")
+IMAGE_INPUTS = ("rgb", "luminance")
+# BT.601, cung trong so voi qjepa/models/color_edge.luminance.
+LUMINANCE_WEIGHTS = (0.299, 0.587, 0.114)
 
 DB4_H0 = (
     0.23037781330885523,
@@ -160,10 +169,14 @@ def _synthesis_axis(
 
 
 class QuaternionWaveletTransform2D(nn.Module):
-    def __init__(self, levels: int = 1, backend: str = DEFAULT_BACKEND) -> None:
+    def __init__(self, levels: int = 1, backend: str = DEFAULT_BACKEND, image_input: str = "rgb") -> None:
         super().__init__()
         if levels != 1:
             raise ValueError("Only one QWT level is supported")
+        if image_input not in IMAGE_INPUTS:
+            raise ValueError(f"image_input must be one of {IMAGE_INPUTS}, got {image_input!r}")
+        self.image_input = image_input
+        self.input_channels = 3 if image_input == "rgb" else 1
         if backend not in FILTER_BANKS:
             raise ValueError(f"Unknown QWT backend {backend!r}; have {sorted(FILTER_BANKS)}")
         tree_a, tree_b, offsets, revision = FILTER_BANKS[backend]
@@ -182,7 +195,20 @@ class QuaternionWaveletTransform2D(nn.Module):
 
     @property
     def coeff_channels(self) -> int:
-        return 48
+        return 16 * self.input_channels
+
+    def prepare(self, x: torch.Tensor) -> torch.Tensor:
+        """The signal this transform analyses: the RGB frame itself, or its luminance.
+
+        In luminance mode a one-channel input is taken as luminance already, so
+        ``analysis(synthesis(c))`` stays well defined.
+        """
+        if self.image_input == "rgb" or (x.ndim == 4 and x.shape[1] == 1):
+            return x
+        if x.ndim != 4 or x.shape[1] != 3:
+            raise ValueError(f"Expected [B,3,H,W] or [B,1,H,W], got {tuple(x.shape)}")
+        r, g, b = LUMINANCE_WEIGHTS
+        return x[:, 0:1] * r + x[:, 1:2] * g + x[:, 2:3] * b
 
     def _trees(self, dtype: torch.dtype):
         """(h0, h1, offset) for tree A then tree B, cast to the working dtype."""
@@ -192,20 +218,21 @@ class QuaternionWaveletTransform2D(nn.Module):
         )
 
     def layout_for(self, shape: tuple[int, int, int, int]) -> TransformLayout:
+        """Layout of the PREPARED signal: [B,3,H,W] for RGB, [B,1,H,W] for luminance."""
         b, c, h, w = shape
-        if c != 3 or h % 2 or w % 2:
-            raise ValueError(f"Expected [B,3,even H,even W], got {shape}")
+        if c != self.input_channels or h % 2 or w % 2:
+            raise ValueError(f"Expected [B,{self.input_channels},even H,even W], got {shape}")
         return TransformLayout(
             backend=self.backend,
             revision=self.revision,
             original_shape=shape,
-            coefficient_shape=(b, 48, h // 2, w // 2),
+            coefficient_shape=(b, 16 * c, h // 2, w // 2),
             levels=1,
             boundary_mode="periodic",
             scale_convention="orthonormal_mean_of_four_trees",
             band_order=BAND_ORDER,
             component_order=COMPONENT_ORDER,
-            channel_order=CHANNEL_ORDER,
+            channel_order=CHANNEL_ORDER if c == 3 else ("Y",),
             extra={"tree_offsets": list(self.offsets), "taps": int(self.h0_a.numel())},
         )
 
@@ -213,10 +240,11 @@ class QuaternionWaveletTransform2D(nn.Module):
     def analysis(self, x: torch.Tensor) -> tuple[torch.Tensor, TransformLayout]:
         if x.ndim != 4:
             raise ValueError(f"Expected [B,3,H,W], got {tuple(x.shape)}")
+        x = self.prepare(x)
         layout = self.layout_for(tuple(x.shape))
-        b, _, h, w = x.shape
+        b, c, h, w = x.shape
         trees = self._trees(x.dtype)
-        out = x.new_empty(b, 3, 4, 4, h // 2, w // 2)
+        out = x.new_empty(b, c, 4, 4, h // 2, w // 2)
         for tree_x, (h0x, h1x, offset_x) in enumerate(trees):
             low_x, high_x = _analysis_axis(x, h0x, h1x, offset_x, -1)
             for tree_y, (h0y, h1y, offset_y) in enumerate(trees):
@@ -227,17 +255,17 @@ class QuaternionWaveletTransform2D(nn.Module):
                 out[:, :, 1, component] = lh
                 out[:, :, 2, component] = hl
                 out[:, :, 3, component] = hh
-        return out.reshape(b, 48, h // 2, w // 2), layout
+        return out.reshape(b, 16 * c, h // 2, w // 2), layout
 
     @fp32_transform
     def synthesis(self, coeff: torch.Tensor, layout: TransformLayout) -> torch.Tensor:
         layout.require(self.backend, self.revision)
         b, c, h, w = layout.original_shape
-        if c != 3 or tuple(coeff.shape) != (b, 48, h // 2, w // 2):
+        if c != self.input_channels or tuple(coeff.shape) != (b, 16 * c, h // 2, w // 2):
             raise ValueError(f"Coefficient shape {tuple(coeff.shape)} does not match layout")
         trees = self._trees(coeff.dtype)
-        packed = coeff.reshape(b, 3, 4, 4, h // 2, w // 2)
-        result = torch.zeros((b, 3, h, w), dtype=coeff.dtype, device=coeff.device)
+        packed = coeff.reshape(b, c, 4, 4, h // 2, w // 2)
+        result = torch.zeros((b, c, h, w), dtype=coeff.dtype, device=coeff.device)
         for tree_x, (h0x, h1x, offset_x) in enumerate(trees):
             for tree_y, (h0y, h1y, offset_y) in enumerate(trees):
                 component = tree_x + 2 * tree_y

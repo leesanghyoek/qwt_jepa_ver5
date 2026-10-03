@@ -1412,8 +1412,10 @@ def command_smoke(args: argparse.Namespace) -> None:
     batch = _synthetic_batch(config)
     model = build_phase1_model(config, ImuNormalizer())
     qwt_input = batch["image_clean"][:1].to(device)
-    coeff, layout = model.backbone.image_transform.to(device).analysis(qwt_input)
-    qwt_error = float((model.backbone.image_transform.synthesis(coeff, layout) - qwt_input).abs().max())
+    transform = model.backbone.image_transform.to(device)
+    coeff, layout = transform.analysis(qwt_input)
+    # Luminance QWT: synthesis gives Y back, so compare with the Y it analysed.
+    qwt_error = float((transform.synthesis(coeff, layout) - transform.prepare(qwt_input)).abs().max())
     trainer1 = Phase1Trainer(model, config, device, "synthetic")
     phase1_metrics = trainer1.step(batch)
     seed_everything(config["phase2"]["decoder_initialization_seed"])

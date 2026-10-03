@@ -12,6 +12,36 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p20_gray — backbone chỉ đọc ảnh xám** (config `configs/kaggle_gray.yaml` → OUT `outputs/p20_gray`). Bằng
+p19_sharp cộng đúng một khoá, nên A/B với p19_sharp là sạch. Đề xuất: tách màu ngay từ đầu, QWT và JEPA chỉ học
+đường nét trên kênh sáng Y, phase 2 khôi phục đường nét từ latent rồi ghép màu lại.
+- `model.image_input: luminance`: QWT đổi RGB → Y (BT.601, cùng trọng số với `color_edge.luminance`) rồi phân
+  tích một kênh, ra 16 hệ số thay vì 48. Encoder, teacher EMA và decoder neo phase 1 chỉ thấy Y. Đổi màu mà giữ
+  nguyên Y thì latent và đích teacher không đổi; với backbone RGB thì có đổi (`tests/test_luminance_input.py`).
+- Phase 2 giữ decoder `split_color_edge`. Backbone giữ lại ảnh RGB đầu vào (`LatentBatch.image_rgb`) cho nhánh
+  màu 128², nên ở update 0 đầu ra vẫn có đúng độ sáng và màu của ảnh vào. Màu **không** lấy thẳng từ ảnh vào: đo
+  trên 225 frame, Y hoàn hảo cộng màu của ảnh vào chỉ đạt 28,3–29,1 dB (màu sạch ở 128²: 38,9 dB), vì corruption
+  làm lệch cân bằng trắng từng kênh, áp gamma từng kênh, thêm nhiễu từng kênh và nén JPEG 4:2:0. Chế độ xám đi với
+  decoder hệ số bị từ chối, vì synthesis khi đó chỉ trả về Y.
+- Dự báo trước khi chạy: PCA trên mảng 16×16 giữ 128 chiều thì mã RGB giữ 95,5% đường nét Y, mã Y giữ 97,1% (24
+  trong 128 thành phần RGB là màu). Latent p16_infomax rút được 53%, nên khoảng cách nằm ở cách train phase 1 chứ
+  không ở dung lượng, và lợi ích kỳ vọng nhỏ. Run này kiểm chứng điều đó. So hai nhánh bằng dòng mới **Y theo o**
+  của `tools/latent_probe.py` (cùng đơn vị cho cả hai nhánh) và `tools/capacity_ceiling.py --luminance`.
+- Đổi `model` nên hash cả hai phase đổi: phải train lại phase 1. Thiếu khoá thì vẫn là RGB như cũ.
+
+Chi phí: lớp conv đầu của encoder ảnh đọc 16 kênh thay vì 48, tham số backbone 1,333 M → 1,324 M, phép tính lớp
+đó 0,23 → 0,08 GMAC/ảnh (teacher cũng vậy). Cả recipe chạy qua CLI, có resume và evaluate:
+`test_the_recipe_trains_resumes_and_evaluates`.
+
+Chạy: notebook `qwt-jaco-jepa-sharp.ipynb`, `RUN = 'p20_gray'`, phase 1 5000 update, phase 2 **4000** update (LP-FT ở
+1000 update cuối). Phase 2 của p19 trên 2 × T4: PSNR validation 23,02 dB ở update 4000 và 23,96 dB ở 11000, tức
++0,9 dB sau 7000 update (2,6 giờ, 1,32 s/update); người dùng chọn dừng ở 4000.
+
+D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
+Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
+nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent
+(`tests/test_latent_diagnostics.py`).
+
 **p19 — kế hoạch "độ nét"** (config `configs/kaggle_sharp_p2.yaml` → OUT `outputs/p19_sharp_p2`, và
 `configs/kaggle_sharp.yaml` → OUT `outputs/p19_sharp`). Báo cáo p16_imu_smooth cho thấy frame **chỉ mờ**
 còn tệ hơn đầu vào (PSNR 28,59 → 28,10): model làm sáng chứ chưa làm nét. Mỗi sửa đổi là một khoá; thiếu

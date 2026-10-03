@@ -34,6 +34,9 @@ class LatentBatch:
     # thoa man bang mot duong vong quanh no.
     image_skips: tuple[torch.Tensor, ...] | None = None
     imu_skips: tuple[torch.Tensor, ...] | None = None
+    # Anh RGB dau vao, chi giu khi QWT doc kenh sang (model.image_input: luminance):
+    # he so khi do khong con mau, nen decoder phase 2 phai doc mau tu chinh anh.
+    image_rgb: torch.Tensor | None = None
 
 
 class MultimodalBackbone(nn.Module):
@@ -48,11 +51,14 @@ class MultimodalBackbone(nn.Module):
         groups: int = 8,
         image_transform: str = DEFAULT_QWT_BACKEND,
         encoder_norm: str = "group",
+        image_input: str = "rgb",
     ) -> None:
         super().__init__()
         if channels[-1] != embedding_dim:
             raise ValueError("The final encoder width must equal embedding_dim")
-        self.image_transform = QuaternionWaveletTransform2D(backend=image_transform)
+        # "luminance": QWT, encoder va teacher chi thay kenh sang Y -- JEPA hoc duong net,
+        # mau di duong rieng o phase 2. Encoder dau vao 16 kenh thay vi 48.
+        self.image_transform = QuaternionWaveletTransform2D(backend=image_transform, image_input=image_input)
         self.imu_transform = HaarTransform1D(channels=6)
         self.image_encoder = DenseCoefficientEncoder(
             self.image_transform.coeff_channels, channels, dim=2, groups=groups, norm=encoder_norm
@@ -95,5 +101,6 @@ class MultimodalBackbone(nn.Module):
             fi = self.image_encoder(image_coeff)
             fu = self.imu_encoder(imu_coeff)
         zi, zu = self.fusion(fi, fu, build_time_metadata(image_time, imu_times))
+        image_rgb = image if self.image_transform.image_input == "luminance" else None
         return LatentBatch(fi, fu, zi, zu, image_layout, imu_layout, image_coeff, imu_coeff,
-                           image_skips, imu_skips)
+                           image_skips, imu_skips, image_rgb)

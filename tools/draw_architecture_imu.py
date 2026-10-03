@@ -6,14 +6,21 @@ both tagged "mới"; with --fourier, also (D) the wavelet-Fourier blocks in the 
 branch (the p16_fourier_imu run, qwt-jaco-jepa-fourier.ipynb). Kept apart from draw_architecture.py, which follows the shared
 notebook's recipe, so neither run's figure moves when the other changes.
 
+With --gray, the current recipe (p20_gray, configs/kaggle_gray.yaml): p16_infomax plus
+p19_sharp's changes (a, b, c, e, f) plus (G) the backbone reading luminance only, the
+colour reaching phase 2 through the blurry-image skip alone. B-F are no longer tagged
+there: they are part of the architecture, and only G is new.
+
 Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
        python3 tools/draw_architecture_imu.py docs/kien_truc_infomax.svg --infomax   (D + E + F)
        python3 tools/draw_architecture_imu.py docs/kien_truc_fourier.svg --fourier
+       python3 tools/draw_architecture_imu.py docs/kien_truc_gray.svg --gray         (p19 + G)
 """
 import sys
 from xml.sax.saxutils import escape
 
-INFOMAX = '--infomax' in sys.argv[2:]      # p16_infomax: (E) phase-1 information terms, (F) stages
+GRAY = '--gray' in sys.argv[2:]            # p20_gray: p19_sharp + QWT/JEPA on luminance only (G)
+INFOMAX = '--infomax' in sys.argv[2:] or GRAY  # p16_infomax: (E) phase-1 information terms, (F) stages
 FOURIER = '--fourier' in sys.argv[2:] or INFOMAX
 
 W, H = 1520, 720
@@ -63,6 +70,8 @@ def arrow(points, color='#455A64', width=2.2, dash=None, label=None, lx=None, ly
 
 def badge(x, y, label):
     """A small tag for what this run adds."""
+    if GRAY and label != 'mới · G':
+        return
     width = 12 + 7 * len(label)
     el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#D81B60"/>')
     text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
@@ -81,9 +90,11 @@ region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train
 img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu B'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 # ---------------- backbone
-qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['48 × 128 × 128'])
+qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'] if GRAY
+           else ['48 × 128 × 128'])
 haar = node(210, 365, 135, 70, 'tf', 'Haar', ['12 × 64'])
-enc_i = node(370, 205, 135, 70, 'bb', 'Encoder ảnh', ['CNN 4 stage'])
+enc_i = node(370, 205, 135, 70, 'bb', 'Encoder ảnh', ['CNN 4 stage', 'centre norm (b)'] if GRAY
+             else ['CNN 4 stage'])
 enc_u = node(370, 365, 135, 70, 'bb', 'Encoder IMU', ['CNN 4 stage'])
 fus = node(535, 280, 125, 80, 'bb', 'Fusion', ['có cổng'])
 # ---------------- latent
@@ -114,7 +125,8 @@ def unet_block(x, yc, kind, title, below=False):
 el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
 FX = 905                                                       # funnel x of both branches
 colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²', ['tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT · NAFNet + 4 WF' if FOURIER
+edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT (Y) · NAFNet + 4 WF' if GRAY
+                 else 'Nhánh ĐƯỜNG NÉT · NAFNet + 4 WF' if FOURIER
                  else 'Nhánh ĐƯỜNG NÉT · NAFNet 30 khối', below=True)
 if FOURIER:
     # (D) a wavelet-Fourier block after the encoder and the decoder stage at 256² and 128²:
@@ -135,7 +147,13 @@ imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-if INFOMAX:
+if GRAY:
+    text(W - 20, 26, 'p20_gray — QWT, encoder và teacher chỉ thấy kênh sáng Y (G) · màu đi đường skip, ghép lại ở phase 2',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 44, 'nền p19_sharp: Jacobian hạt nhiễu (a) · centre norm (b) · đầu hư hỏng (c) · đoán TI → decoder (e)'
+         ' · LP-FT (f)   ·   p16_infomax: WF (D) · log-det, InfoNCE (E) · tầng mịn (F) · IMU: B, C',
+         size=12, color='#AD1457', anchor='end')
+elif INFOMAX:
     text(W - 20, 30, 'p16_infomax — phase 1 ép latent chứa nhiều hơn (E) · tầng mịn JEPA vào NAFNet (F) · WF (D) · IMU: B, C',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 50, 'E: coding rate (log-det) · InfoNCE dày đặc · sàn độ nhạy chi tiết 2–4 px · đích JEPA 64²'
@@ -150,9 +168,14 @@ else:
          size=15, weight='bold', color='#D81B60', anchor='end')
 # ---------------- phase 1
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
-teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · đọc SẠCH',
+teach = node(205, 555, 135, 80, 'p1', 'Teacher EMA', ['2 encoder · Y SẠCH' if GRAY else '2 encoder · đọc SẠCH',
                                                       'đích 16² · 32² · 64²' if INFOMAX else 'đích 16² + mịn 32²'])
-if INFOMAX:
+if GRAY:
+    loss1 = node(420, 546, 230, 112, 'loss', 'Loss phase 1', ['JEPA ảnh+IMU · mịn · thô · 64²',
+                                                            'VICReg gộp · neo Y · Jacobian (a)',
+                                                            'log-det · InfoNCE · sàn chi tiết',
+                                                            'đầu hư hỏng từ ZI (c)'])
+elif INFOMAX:
     loss1 = node(420, 546, 230, 98, 'loss', 'Loss phase 1', ['JEPA ảnh+IMU · mịn · thô · 64²',
                                                            'VICReg gộp · neo · Jacobian',
                                                            'log-det · InfoNCE · sàn chi tiết'])
@@ -160,7 +183,8 @@ if INFOMAX:
 else:
     loss1 = node(420, 550, 230, 90, 'loss', 'Loss phase 1', ['JEPA ảnh + IMU · mịn · thô', 'VICReg gộp · neo · Jacobian'])
 pred_u = node(705, 555, 110, 70, 'p1', 'Predictor', ['IMU · lân cận', 'che 25% token'])
-pred_i = node(862, 555, 115, 70, 'p1', 'Predictor', ['ảnh · lân cận 5×5', 'che 30% token'])
+pred_i = node(862, 555, 115, 84 if GRAY else 70, 'p1', 'Predictor',
+              ['ảnh · lân cận 5×5', 'che 30% token'] + (['đọc hư hỏng (c)'] if GRAY else []))
 
 # ---------------- arrows: backbone
 arrow([mid_right(img_in), mid_left(qwt)]); arrow([mid_right(imu_in), mid_left(haar)])
@@ -179,7 +203,8 @@ arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
 text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA')
 # the blurry image into the funnel of both branches
 arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
-      label='skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
+      label='skip: chính ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU, QWT chỉ thấy Y' if GRAY
+      else 'skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
 arrow([(885, 200), (FX, 200)], color='#2E7D32', width=3)
 arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
 arrow([mid_right(edgb), mid_left(refine)])
@@ -195,6 +220,17 @@ if INFOMAX:
     text(690, 133, 'tầng mịn encoder JEPA (1/2 · 1/4 · 1/8 khung) → NAFNet cùng cỡ', size=12,
          weight='bold', color='#8E24AA')
     badge(884, 124, 'mới · F')
+if GRAY:
+    # (G) colour split off before the QWT: only luminance enters the backbone
+    el.append('<circle cx="190" cy="240" r="13" fill="#E8EAF6" stroke="#3949AB" stroke-width="2"/>')
+    text(190, 245, 'Y', size=14, weight='bold', color='#3949AB')
+    text(190, 196, 'tách màu', size=11, weight='bold', color='#3949AB')
+    badge(284, 186, 'mới · G')
+    # (e) the frozen phase-1 image predictor's clean-latent guess joins ZI before both branches
+    el.append('<path d="M 862 614 L 838 614 L 838 407 A 7 7 0 0 1 838 393 L 838 245" fill="none" '
+              'stroke="#8E24AA" stroke-width="2.2" stroke-dasharray="7 4" marker-end="url(#ah-8E24AA)"/>')
+    text(845, 489, 'e: đoán TI của predictor (đóng băng) cộng vào ZI', size=12, weight='bold', color='#8E24AA',
+         anchor='start')
 arrow([mid_right(imu_dec), mid_left(imu_ref)])
 arrow([mid_right(imu_ref), mid_left(imu_out)])
 # ---------------- arrows: phase 1
@@ -203,24 +239,33 @@ arrow([mid_right(teach), (420, 595)], label='đích TI, TU', lx=380, ly=585)
 arrow([mid_bot(zu), mid_top(pred_u)], label='ZU', lx=772, ly=500, lanchor='start')
 el.append('<path d="M 815 262 L 829 262 L 829 393 A 7 7 0 0 1 829 407 L 829 590 L 862 590" '
           'fill="none" stroke="#455A64" stroke-width="2.2" marker-end="url(#ah)"/>')
-text(835, 500, 'ZI', size=13, color='#455A64', anchor='start', style='font-style="italic"')
+text(823 if GRAY else 835, 500, 'ZI', size=13, color='#455A64', anchor='end' if GRAY else 'start',
+     style='font-style="italic"')
 arrow([mid_left(pred_u), (650, 590)], label='đoán TU', lx=678, ly=582)
-arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, 640)], label='đoán TI', lx=740, ly=665)
-arrow([(490, 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
-text(498, 500, 'Jacobian: nhạy với cạnh, điếc với nhiễu', size=12, color='#B26A00', anchor='start', style='font-style="italic"')
+arrow([mid_bot(pred_i), (919, 672), (535, 672), (535, loss1[1] + loss1[3] if GRAY else 640)], label='đoán TI', lx=740, ly=665)
+arrow([(490, loss1[1] if GRAY else 555), (490, 435)], color='#F9A825', dash='6 4', width=2)
+text(498, 500, 'Jacobian: nhạy cạnh, điếc hạt nhiễu (a)' if GRAY else 'Jacobian: nhạy với cạnh, điếc với nhiễu',
+     size=12, color='#B26A00', anchor='start', style='font-style="italic"')
 # ---------------- phase 2 losses (train only the two decoders)
 loss2 = node(1150, 528, 350, 132, 'loss', 'Loss phase 2', [
-    'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
+    'ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)' if GRAY else 'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
     'màu: L1 Cb/Cr + thống kê màu từng ảnh',
     'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
     ''])
 # the IMU line, with this run's new term in its colour
-el.append('<text x="1325" y="636" font-size="13" fill="#37474F" text-anchor="middle">'
-          'IMU: L1 · chi tiết Haar · độ rung · '
-          '<tspan fill="#D81B60" font-weight="bold">rung thừa</tspan></text>')
+if GRAY:
+    text(1325, 636, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
+else:
+    el.append('<text x="1325" y="636" font-size="13" fill="#37474F" text-anchor="middle">'
+              'IMU: L1 · chi tiết Haar · độ rung · '
+              '<tspan fill="#D81B60" font-weight="bold">rung thừa</tspan></text>')
 badge(1438, 520, 'mới · C')
 arrow([(1325, 528), (1325, 474)], color='#D81B60', dash='6 4', width=2)
-text(1333, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
+if GRAY:
+    text(1317, 513, 'train 2 decoder · 25% cuối thêm backbone', size=12, color='#D81B60', anchor='end',
+         style='font-style="italic"')
+else:
+    text(1333, 505, 'chỉ train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'

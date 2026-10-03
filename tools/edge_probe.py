@@ -5,17 +5,30 @@ của ảnh sạch tại ô đó từ từng bộ đặc trưng:
 
   ảnh hỏng            kênh sáng Y của ảnh hỏng quanh ô (thêm lề 4 px mỗi phía)
   ZI                  vector latent của ô, tính từ ảnh hỏng
+  ZI sạch             latent của chính ảnh sạch: lưới 16×16 của encoder này giữ được gì
   ảnh hỏng + ZI       câu hỏi chính
   ảnh hỏng + ZI sạch  trần: latent của chính ảnh sạch qua cùng encoder
   ảnh hỏng + tầng 1/8, ảnh hỏng + tầng 1/4
                       các tầng mịn hơn của encoder JEPA (tính từ ảnh hỏng)
 
-Hai đích, trên Y của ảnh sạch:
-  mịn 2–4 px          Y − G(σ=1)·Y        (vật nhỏ / xa)
-  đường nét 4–16 px   G(σ=1)·Y − G(σ=4)·Y
+Bốn đích, trên Y của ảnh sạch:
+  mịn 2–4 px          Y − G(σ=1)·Y        (vật nhỏ / xa), có dấu
+  đường nét 4–16 px   G(σ=1)·Y − G(σ=4)·Y, có dấu
+  năng lượng mịn / năng lượng nét
+                      căn bậc hai trung bình bình phương của băng đó trên từng khối 4×4:
+                      cạnh ở ĐÂU và MẠNH bao nhiêu, không cần dấu. Đặc trưng sau ReLU/norm
+                      hay mã hoá độ mạnh (như modulus QWT) chứ không giữ dấu; một probe
+                      tuyến tính đoán đích có dấu từ chúng ra gần 0 dù thông tin có ở đó.
 
 Điểm "% rút được" = 1 − MAE probe / MAE đoán trung bình, như tools/latent_probe.py.
 Hồi quy tuyến tính là cận DƯỚI của thông tin có trong đặc trưng.
+
+Mỗi khối đặc trưng có MỨC PHẠT RIÊNG, chọn trên validation tách từ phần train (kể cả
+"bỏ khối"), rồi train lại trên cả phần train và chấm trên phần test. Bản trước dùng một
+mức phạt chung: ghép thêm khối nào cũng làm điểm tụt theo số chiều, kể cả khối nhiễu
+thuần (đo trên 7200 ô TartanAir: +128 chiều nhiễu −3,4 điểm mịn, +1024 chiều −19,1), nên
+"ảnh hỏng + X" thấp hơn "ảnh hỏng" không nói gì về X. Giờ "ảnh hỏng + X" ≥ "ảnh hỏng"
+trừ sai số chọn mức phạt; chênh lệch dương mới là thông tin X mang thêm.
 
 Đọc kết quả:
   "ảnh hỏng + ZI" ≈ "ảnh hỏng"                      -> ZI không mang thêm đường nét nào.
@@ -51,10 +64,13 @@ from qjepa.config import build_normalizer, build_phase1_model  # noqa: E402
 from qjepa.data import read_manifest  # noqa: E402
 from qjepa.training.checkpoints import load_checkpoint  # noqa: E402
 from tools.image_blur_audit import SCENARIOS, _spread_indices  # noqa: E402
-from tools.latent_probe import ridge_probe  # noqa: E402
 
-TARGETS = ("fine", "edges")
-TARGET_LABELS = {"fine": "mịn 2–4 px", "edges": "đường nét 4–16 px"}
+TARGETS = ("fine", "edges", "fine_energy", "edges_energy")
+TARGET_LABELS = {"fine": "mịn 2–4 px", "edges": "đường nét 4–16 px",
+                 "fine_energy": "năng lượng mịn", "edges_energy": "năng lượng nét"}
+ENERGY_BLOCK = 4                                  # px: cạnh ở đâu, ở độ phân giải này
+# Mức phạt của mỗi khối (đặc trưng đã chuẩn hoá). 1e12 = bỏ khối: trọng số về ~0.
+PENALTIES = (1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e12)
 
 
 def luma(image: torch.Tensor) -> torch.Tensor:
@@ -77,6 +93,62 @@ def detail_targets(clean_y: torch.Tensor) -> dict[str, torch.Tensor]:
     """The two detail bands of the clean luminance, [B, 1, H, W] each."""
     smooth1 = gaussian_blur(clean_y, 1.0)
     return {"fine": clean_y - smooth1, "edges": smooth1 - gaussian_blur(clean_y, 4.0)}
+
+
+def energy_targets(bands: dict[str, torch.Tensor], block: int = ENERGY_BLOCK) -> dict[str, torch.Tensor]:
+    """Root mean square of each band over block x block tiles, [B, 1, H/block, W/block]."""
+    return {f"{name}_energy": F.avg_pool2d(band.square(), block).sqrt() for name, band in bands.items()}
+
+
+def block_ridge_probe(blocks: list[np.ndarray], targets: dict[str, np.ndarray], ratio: float = 0.7,
+                      validation: float = 0.2) -> dict[str, tuple[float, float]]:
+    """Held-out MAE per target of a ridge with one penalty PER BLOCK, and the mean-guess MAE.
+
+    Rows [0, ratio) train, the rest test. The last ``validation`` of the train rows picks
+    each block's penalty (PENALTIES, the largest of which drops the block); the model is
+    then refit on all train rows. Features are standardised and targets centred on the
+    train rows, so no intercept is needed or penalised.
+    """
+    rows = len(blocks[0])
+    split = int(rows * ratio)
+    fit = int(split * (1.0 - validation))
+    standardised = []
+    for block in blocks:
+        mean, deviation = block[:split].mean(0), block[:split].std(0) + 1e-8
+        standardised.append((block - mean) / deviation)
+    x = np.concatenate(standardised, axis=1)
+    widths = [block.shape[1] for block in blocks]
+    names = list(targets)
+    y_all = np.concatenate([targets[name] for name in names], axis=1)
+    columns = np.cumsum([0] + [targets[name].shape[1] for name in names])
+
+    def solve(train_rows: slice, penalties: tuple[float, ...]) -> np.ndarray:
+        xt, yt = x[train_rows], y_all[train_rows]
+        diagonal = np.concatenate([np.full(width, penalty) for width, penalty in zip(widths, penalties)])
+        return np.linalg.solve(xt.T @ xt + np.diag(diagonal), xt.T @ (yt - yt.mean(0)))
+
+    combos = list(np.array(np.meshgrid(*[PENALTIES] * len(blocks))).T.reshape(-1, len(blocks)))
+    best: dict[str, tuple[float, tuple[float, ...]]] = {name: (np.inf, ()) for name in names}
+    centre = y_all[:fit].mean(0)
+    for penalties in map(tuple, combos):
+        prediction = x[fit:split] @ solve(slice(0, fit), penalties) + centre
+        for index, name in enumerate(names):
+            part = slice(columns[index], columns[index + 1])
+            error = float(np.abs(prediction[:, part] - y_all[fit:split, part]).mean())
+            if error < best[name][0]:
+                best[name] = (error, penalties)
+    results = {}
+    centre = y_all[:split].mean(0)
+    refits: dict[tuple[float, ...], np.ndarray] = {}
+    for index, name in enumerate(names):
+        penalties = best[name][1]
+        if penalties not in refits:
+            refits[penalties] = x[split:] @ solve(slice(0, split), penalties) + centre
+        part = slice(columns[index], columns[index + 1])
+        probe = float(np.abs(refits[penalties][:, part] - y_all[split:, part]).mean())
+        baseline = float(np.abs(centre[part] - y_all[split:, part]).mean())
+        results[name] = (probe, baseline)
+    return results
 
 
 def cells(map_: torch.Tensor, grid: tuple[int, int], margin: int = 0) -> torch.Tensor:
@@ -130,7 +202,8 @@ def collect(backbone, normalizer, loader, device, cells_per_image: int, margin: 
             for name, index in (("stage8", 0), ("stage4", 1)):
                 if latent.image_skips is not None and len(latent.image_skips) > index:
                     parts[name] = cells(latent.image_skips[index], grid)
-            for name, band in detail_targets(luma(batch["image_clean"].clamp(0, 1))).items():
+            bands = detail_targets(luma(batch["image_clean"].clamp(0, 1)))
+            for name, band in {**bands, **energy_targets(bands)}.items():
                 parts[f"target_{name}"] = cells(band, grid)
         total = parts["zi"].shape[1]
         for sample in range(parts["zi"].shape[0]):
@@ -144,6 +217,7 @@ def collect(backbone, normalizer, loader, device, cells_per_image: int, margin: 
 FEATURE_SETS = (
     ("input", ("input",), "ảnh hỏng"),
     ("zi", ("zi",), "ZI"),
+    ("zi_clean", ("zi_clean",), "ZI sạch"),
     ("input+zi", ("input", "zi"), "ảnh hỏng + ZI"),
     ("input+zi_clean", ("input", "zi_clean"), "ảnh hỏng + ZI sạch (trần)"),
     ("input+stage8", ("input", "stage8"), "ảnh hỏng + tầng 1/8"),
@@ -156,10 +230,10 @@ def probe_all(data: dict[str, np.ndarray]) -> dict[str, dict]:
     for key, parts, label in FEATURE_SETS:
         if any(part not in data for part in parts):
             continue
-        features = np.concatenate([data[part] for part in parts], axis=1)
-        entry = {"label": label, "dims": int(features.shape[1]), "rows": int(features.shape[0])}
-        for target in TARGETS:
-            probe, baseline = ridge_probe(features, data[f"target_{target}"])
+        blocks = [data[part] for part in parts]
+        entry = {"label": label, "dims": int(sum(block.shape[1] for block in blocks)), "rows": int(len(blocks[0]))}
+        scores = block_ridge_probe(blocks, {target: data[f"target_{target}"] for target in TARGETS})
+        for target, (probe, baseline) in scores.items():
             entry[target] = {"probe_mae": probe, "mean_guess_mae": baseline,
                              "recovered_pct": 100.0 * (1.0 - probe / baseline) if baseline > 0 else float("nan")}
         results[key] = entry

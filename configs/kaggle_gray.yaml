@@ -1,0 +1,23 @@
+# p20_gray: p19_sharp + backbone chi doc anh XAM. Mot khoa duy nhat, nen A/B voi p19_sharp la sach.
+#
+# De xuat cua nguoi dung (03/10/2026): tach mau ra ngay tu dau, QWT va JEPA chi lam viec tren kenh
+# sang Y (BT.601) de hoc dac trung DUONG NET; phase 2 khoi phuc duong net tu latent roi ghep mau lai.
+#  - QWT: 16 he so (Y x 4 bang x 4 thanh phan) thay vi 48; encoder, teacher EMA va decoder neo
+#    phase 1 chi thay Y. Mot thay doi mau o cung Y khong lam doi latent (tests/test_luminance_input.py).
+#  - Phase 2 giu nguyen decoder split_color_edge: nhanh duong net tren Y o 256x256, nhanh mau o
+#    128x128 doc anh RGB nhieu ma backbone giu lai, roi compose. Mau KHONG lay thang tu anh vao:
+#    do tren 225 frame, Y hoan hao + mau anh vao chi duoc 28,3-29,1 dB (mau sach 128x128: 38,9 dB),
+#    vi corruption lam lech can bang trang tung kenh, gamma tung kenh, nhieu tung kenh va JPEG 4:2:0.
+#
+# Doi model -> doi hash ca hai phase: PHAI train lai phase 1, khong dung lai phase 1 cua run nao.
+# Du bao truoc khi chay (PCA mang 16x16, 128 chieu): ma RGB giu 95,5% duong net Y, ma Y giu 97,1%,
+# tuc tran chi tang ~1,6 diem; latent p16_infomax rut duoc 53% ("ANH theo o"). So p19_sharp va
+# p20_gray bang dong "Y theo o" cua tools/latent_probe.py (cung don vi o ca hai nhanh) va bao cao
+# danh gia (PSNR, image_edge_power, sai so mau).
+extends: kaggle_sharp.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p20_gray
+
+model:
+  image_input: luminance
