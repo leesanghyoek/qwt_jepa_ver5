@@ -3,7 +3,9 @@
 Pins: the progress line reports the seconds per update spent waiting for data next
 to the seconds per update; both phases log data_wait_seconds per update; a dataset
 sizes both IMU caches to its trajectories (capped), and a corruptor that caches
-every trajectory builds each once yet returns the very windows a small cache does.
+every trajectory builds each once yet returns the very windows a small cache does;
+under DDP the DataLoader starts its workers from a forkserver, not by forking the
+multi-threaded rank, and they produce the very batches forked workers do.
 """
 
 from __future__ import annotations
@@ -13,7 +15,12 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import torch
+
+import qjepa.cli as cli
 from qjepa.cli import _next_timed, _pace
+from qjepa.config import load_config, serializable_config
+from qjepa.data import read_manifest
 from qjepa.corruptions import ImuCorruptionConfig, TrajectoryImuCorruptor
 from qjepa.data.dataset import MAX_CACHED_TRAJECTORIES, PairedCameraImuDataset
 
@@ -60,3 +67,44 @@ def test_a_full_cache_builds_each_trajectory_once_and_returns_the_same_windows()
             b, _ = full.window(imu, times, 100, 228, **context)
             assert np.array_equal(a, b)
     assert builds[id(full)] == 20 and builds[id(small)] == 40
+
+
+def test_ddp_loaders_start_workers_from_a_forkserver_and_load_the_same_batches(tmp_path, monkeypatch):
+    """Kaggle, phase 1 update 3000: rank 0 hung opening its validation loader -- fork() from
+    a process running NCCL and pin-memory threads -- and rank 1 waited 60 min in NCCL."""
+    from test_kaggle_workflow import _write_dataset
+    _write_dataset(tmp_path / "dataset")
+    config = serializable_config(load_config("configs/smoke.yaml"))
+    config["data"]["num_workers"] = 1
+    cli.main(["build-manifest", "--config", "configs/smoke.yaml", "--data-root", str(tmp_path / "dataset"),
+              "--output", str(tmp_path / "manifest")])
+    dataset = cli._dataset(config, read_manifest(tmp_path / "manifest"), "valid", fixed_realization=True)
+    single = cli._loader(config, dataset, 2, train=False)
+    assert single.multiprocessing_context is None                      # one process: unchanged
+    monkeypatch.setattr(cli, "rank_and_world", lambda: (0, 2))
+    ranked = cli._loader(config, dataset, 2, train=False)
+    assert ranked.multiprocessing_context.get_start_method() == "forkserver"
+    for a, b in zip(single, ranked):
+        for key in ("image_noisy", "image_clean", "imu_noisy_phys"):
+            assert torch.equal(a[key], b[key]), key
+
+
+def test_worker_memory_counts_grandchildren(tmp_path):
+    """Under DDP the workers are the forkserver's children, not the rank's."""
+    import subprocess
+    import sys
+    ready = tmp_path / "ready"
+    grandchild = f"import pathlib, time; x = b'1' * (60 * 2**20); pathlib.Path({str(ready)!r}).touch(); time.sleep(60)"
+    child = subprocess.Popen([sys.executable, "-c",
+                              f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {grandchild!r}]);"
+                              " time.sleep(60)"])
+    try:
+        deadline = time.time() + 20
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        assert ready.exists()
+        assert cli._memory_mib()["children_rss_mib"] > 60
+    finally:
+        subprocess.run(["pkill", "-P", str(child.pid)], check=False)
+        child.kill()
+        child.wait()

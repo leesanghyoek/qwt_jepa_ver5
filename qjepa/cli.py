@@ -177,6 +177,14 @@ def _loader(
         "persistent_workers": False,
         "generator": generator,
     }
+    if common["num_workers"] > 0 and rank_and_world()[1] > 1:
+        # Mot rank DDP co san luong watchdog/heartbeat NCCL va TCPStore, them luong pin-memory
+        # cua loader train khi rank 0 mo loader validation. fork() tu tien trinh nhieu luong co
+        # the lam worker con deadlock (Python 3.12+ canh bao dung dieu nay): tren Kaggle (Python
+        # 3.13, torch 2.10) rank 0 treo o validation phase 1 update 3000, rank 1 cho broadcast
+        # 60 phut roi NCCL huy run. forkserver fork worker tu mot tien trinh phu mot luong. Du
+        # lieu khong doi: moi corruption seed theo tung mau, khong theo worker.
+        common["multiprocessing_context"] = "forkserver"
     if batch_sampler is not None:
         return DataLoader(batch_sampler=batch_sampler, **common)
     return DataLoader(
@@ -362,13 +370,25 @@ def _memory_mib() -> dict[str, float]:
             pass
         return 0.0
 
-    children = 0.0
-    try:
-        for task in os.listdir("/proc/self/task"):
-            with open(f"/proc/self/task/{task}/children", encoding="utf-8") as handle:
-                children += sum(resident(pid) for pid in handle.read().split())
-    except OSError:
-        pass
+    def child_pids(pid: str) -> list[str]:
+        found: list[str] = []
+        try:
+            for task in os.listdir(f"/proc/{pid}/task"):
+                with open(f"/proc/{pid}/task/{task}/children", encoding="utf-8") as handle:
+                    found += handle.read().split()
+        except OSError:
+            pass
+        return found
+
+    # Moi tien trinh con chau, khong chi con truc tiep: duoi DDP worker la con cua forkserver.
+    children, pending, seen = 0.0, child_pids("self"), set()
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        children += resident(pid)
+        pending += child_pids(pid)
     return {"rss_mib": resident("self"), "children_rss_mib": children}
 
 

@@ -49,6 +49,16 @@ Tăng tốc trên 2 × T4, không đổi recipe hay hash:
   phase 1 41,7 → 35,5 ms/mẫu, phase 2 38,8 → 30,3 ms/mẫu; dữ liệu giống hệt từng bit
   (`tests/test_training_speed.py`). Phase 1 cần ~25 mẫu/s trên 4 vCPU nên được lợi nhiều nhất.
 
+**DDP treo ở checkpoint (sửa).** Lần chạy p20 đầu tiên trên Kaggle (Python 3.13, torch 2.10), phase 1 chạy 2 GPU
+(0,32 s/update) tới update 3000 rồi treo: rank 0 kẹt lúc mở loader validation, không phát lệnh NCCL nào nữa; rank 1
+chờ broadcast trong `share_rank0_rng` 60 phút, NCCL huỷ cả run (SIGABRT). Một GPU báo 100% (kernel NCCL quay chờ),
+GPU kia 0%. Nguyên nhân: worker DataLoader được tạo bằng `fork()` từ rank, mà rank có sẵn luồng watchdog NCCL,
+TCPStore và luồng pin-memory của loader train; Python 3.12+ cảnh báo fork từ tiến trình nhiều luồng có thể làm con
+deadlock. Dưới DDP, loader giờ tạo worker từ `forkserver` (một tiến trình phụ một luồng); một tiến trình thì vẫn
+fork như cũ. Batch giống hệt (`test_ddp_loaders_start_workers_from_a_forkserver_and_load_the_same_batches`); RSS
+"worker" giờ cộng mọi tiến trình con cháu, vì worker là con của forkserver. Notebook: NCCL huỷ run (mã −6) sau một
+checkpoint mới thì resume từ đó; không có tiến triển thì lùi về 1 GPU như trước.
+
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
 nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent
