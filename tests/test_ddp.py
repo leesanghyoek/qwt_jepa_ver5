@@ -23,6 +23,7 @@ from qjepa.data import ImuNormalizer
 from qjepa.distributed import rank_and_world, share_rank0_rng, spawn
 from qjepa.models import RestorationSystem
 from qjepa.training.checkpoints import load_checkpoint
+from qjepa.training.phase1 import Phase1Trainer
 from qjepa.training.phase2 import Phase2Trainer
 from test_kaggle_workflow import _write_dataset
 
@@ -190,6 +191,46 @@ def test_every_parameter_gets_the_one_process_gradient(tmp_path):
     for name, gradient in single.items():
         scale = float(gradient.norm()) + 1e-12
         assert float((gradient - ddp[name]).norm()) / scale < 1e-4, name
+
+
+def _phase1_anchor_config():
+    # p16's phase 1: the anchor decoder is on, and phase 2 has an IMU refiner. build_decoders
+    # builds that refiner into the phase-1 anchor as well, where nothing ever calls it.
+    config = copy.deepcopy(load_config("configs/smoke.yaml"))
+    config["phase1"].update(decoder_enabled=True, coefficient_reconstruction_loss_weight=0.45)
+    config["phase2"].update(imu_refiner_blocks=1, imu_refiner_width=4)
+    return config
+
+
+def _phase1_gradients_of_two_updates(folder):
+    rank, world = rank_and_world()
+    config = _phase1_anchor_config()
+    seed_everything(3)
+    model = build_phase1_model(config, ImuNormalizer())
+    trainer = Phase1Trainer(model, config, torch.device("cpu"))
+    for update, batch in enumerate(_global_microbatches()):
+        trainer.step({key: value[rank::world] for key, value in batch.items()})
+        if update == 0 and rank == 0:
+            torch.save({name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None},
+                       folder / f"phase1_gradients_{world}.pt")
+            torch.save(sorted(name for name, p in model.named_parameters() if p.requires_grad and p.grad is None),
+                       folder / f"phase1_unused_{world}.pt")
+
+
+def test_phase1_with_the_anchor_decoder_runs_on_two_processes(tmp_path):
+    # DDP needs a gradient for every trainable parameter; one that never gets one
+    # stops the second update ("Expected to have finished reduction in the prior
+    # iteration"). Seen on Kaggle with p16 on 2 GPUs: the anchor's IMU refiner.
+    torch.set_num_threads(1)
+    _phase1_gradients_of_two_updates(tmp_path)
+    assert torch.load(tmp_path / "phase1_unused_1.pt") == []
+    spawn(_phase1_gradients_of_two_updates, tmp_path, world=2, cuda=False)
+    single, ddp = torch.load(tmp_path / "phase1_gradients_1.pt"), torch.load(tmp_path / "phase1_gradients_2.pt")
+    assert single.keys() == ddp.keys() and any(name.startswith("decoders.") for name in single)
+    for name, gradient in single.items():
+        scale = float(gradient.norm()) + 1e-12
+        # The probe gains are finite differences over a 1/255 step (see the test below).
+        assert float((gradient - ddp[name]).norm()) / scale < 1e-3, name
 
 
 def _phase1_logged(run, key):

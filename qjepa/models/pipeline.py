@@ -68,6 +68,12 @@ class LatentPretrainingModel(nn.Module):
             )
         self.teachers = EMATeachers(self.backbone)
         self.decoders = decoders
+        if decoders is not None and decoders.imu_refiner is not None:
+            # build_decoders reads phase2.imu_refiner_*, so the anchor carries the phase-2
+            # IMU refiner too; phase 1 never runs it. Frozen, DDP stops waiting for its
+            # gradients (no gradient ever came, so one-process training is unchanged), and
+            # the parameters stay in the state dict so older phase-1 checkpoints still load.
+            decoders.imu_refiner.requires_grad_(False)
         self.register_buffer("decoder_forward_calls", torch.zeros((), dtype=torch.long))
 
     @property
