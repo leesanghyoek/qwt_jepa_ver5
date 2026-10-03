@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 import yaml
 
 from .corruptions import (
@@ -19,10 +20,14 @@ from .corruptions import (
     LowLightImageCorruptor,
     TrajectoryImuCorruptor,
 )
+from .corruptions.image import DEGRADATION_FEATURES
 from .data.normalize import ImuNormalizer
 from .transforms import QWT_BACKENDS
 from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
+from .models.blocks import ENCODER_NORMS
+from .models.decoders import PIXEL_IMAGE_DECODERS
 from .models.predictors import PREDICTOR_TYPES
+from .training.phase1 import NOISE_DIRECTIONS
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -126,6 +131,7 @@ def validate_config(config: dict[str, Any]) -> None:
     if phase1.get("covariance_pooling", "per_position") not in ("per_position", "pooled"):
         raise ValueError("phase1.covariance_pooling must be per_position or pooled")
     _validate_phase1_predictor(phase1)
+    _validate_sharpness(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -348,6 +354,8 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
         gate_bias=model["gate_bias_init"],
         groups=model["groupnorm_groups"],
         image_transform=model["image_transform"],
+        # Absent before the sharpness plan: GroupNorm, the encoders every checkpoint holds.
+        encoder_norm=model.get("encoder_norm", "group"),
     )
 
 
@@ -448,6 +456,55 @@ def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
             raise ValueError("phase1.multiscale_coarse_pool must be an integer >= 2")
 
 
+def _nonnegative_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and np.isfinite(value) and value >= 0
+
+
+def _validate_sharpness(config: dict[str, Any]) -> None:
+    """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
+    phase1, phase2 = config["phase1"], config["phase2"]
+    if config["model"].get("encoder_norm", "group") not in ENCODER_NORMS:
+        raise ValueError(f"model.encoder_norm must be one of {ENCODER_NORMS}")
+    if config.get("encoder_sensitivity", {}).get("noise_direction", "corruption") not in NOISE_DIRECTIONS:
+        raise ValueError(f"encoder_sensitivity.noise_direction must be one of {NOISE_DIRECTIONS}")
+    for name, section in (("phase1", phase1), ("phase2", phase2)):
+        if not isinstance(section.get("augment_hflip", False), bool):
+            raise ValueError(f"{name}.augment_hflip must be true or false")
+    degradation = phase1.get("degradation_weight", 0.0)
+    if not _nonnegative_number(degradation):
+        raise ValueError("phase1.degradation_weight must be a nonnegative number")
+    condition = phase1.get("predictor_degradation_condition", False)
+    if not isinstance(condition, bool):
+        raise ValueError("phase1.predictor_degradation_condition must be true or false")
+    if condition and not degradation > 0:
+        raise ValueError("phase1.predictor_degradation_condition needs phase1.degradation_weight > 0 (its head)")
+    if condition and phase1.get("predictor_type", "token") != "spatial":
+        raise ValueError("phase1.predictor_degradation_condition needs phase1.predictor_type: spatial")
+    predictor_input = phase2.get("decoder_predictor_input", False)
+    if not isinstance(predictor_input, bool):
+        raise ValueError("phase2.decoder_predictor_input must be true or false")
+    if predictor_input and phase1.get("predictor_type", "token") != "spatial":
+        raise ValueError("phase2.decoder_predictor_input needs phase1.predictor_type: spatial")
+    if predictor_input and phase2.get("image_decoder", "qwt_coefficients") not in PIXEL_IMAGE_DECODERS:
+        raise ValueError(f"phase2.decoder_predictor_input needs a pixel image decoder {PIXEL_IMAGE_DECODERS}")
+    after = phase2.get("backbone_finetune_after_updates")
+    if after is not None:
+        if isinstance(after, bool) or not isinstance(after, int) or not 0 <= after < phase2["max_successful_updates"]:
+            raise ValueError("phase2.backbone_finetune_after_updates must be an integer in "
+                             "[0, phase2.max_successful_updates)")
+        scale = phase2.get("backbone_finetune_lr_scale")
+        if not _nonnegative_number(scale) or not 0 < scale <= 1:
+            raise ValueError("phase2.backbone_finetune_lr_scale must be in (0, 1]")
+    elif "backbone_finetune_lr_scale" in phase2:
+        raise ValueError("phase2.backbone_finetune_lr_scale needs phase2.backbone_finetune_after_updates")
+    if not _nonnegative_number(phase2.get("imu_increment_weight", 0.0)):
+        raise ValueError("phase2.imu_increment_weight must be a nonnegative number")
+    if phase2.get("imu_increment_weight", 0.0) > 0:
+        windows = phase2.get("imu_increment_windows", [8, 32])
+        if not _positive_ints(windows) or not windows or any(config["data"]["imu_window"] % w for w in windows):
+            raise ValueError("phase2.imu_increment_windows must list window lengths that divide data.imu_window")
+
+
 def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> LatentPretrainingModel:
     enabled = bool(config["phase1"].get("decoder_enabled", False))
     phase1 = config["phase1"]
@@ -462,19 +519,38 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         predictor_layers=int(phase1.get("predictor_mixing_layers", 2)),
         fine_scale=float(phase1.get("multiscale_fine_weight", 0.0)) > 0,
         finer_scale=float(phase1.get("multiscale_finer_weight", 0.0)) > 0,
+        # Absent before the sharpness plan: no degradation head, no condition.
+        degradation_outputs=len(DEGRADATION_FEATURES) if float(phase1.get("degradation_weight", 0.0)) > 0 else 0,
+        degradation_condition=bool(phase1.get("predictor_degradation_condition", False)),
         # Neo phase 1 khong bao gio nhan skip: neu no co duong vong tu encoder thi
         # no thoa man duoc neo ma khong ep gi vao latent — dung cai ma neo sinh ra
         # de ngan. Cung ly do voi viec no giu he so tuyet doi thay vi residual.
         # The phase-1 anchor predicts clean COEFFICIENTS from the latent alone;
         # phase2.image_decoder must never reach it, or the phase-1 model changes.
         decoders=build_decoders(config, residual=False, skips=False,
-                                image_decoder="qwt_coefficients") if enabled else None,
+                                image_decoder="qwt_coefficients", predictor_input=False) if enabled else None,
     )
+
+
+def phase2_latent_modules(
+    config: dict[str, Any], phase1_model: LatentPretrainingModel | None = None
+) -> tuple[nn.Module | None, nn.Module | None]:
+    """(image predictor, degradation head) that phase 2 keeps, or (None, None).
+
+    With ``phase1_model`` they are its trained modules (train-phase2); without, the
+    same architecture is built fresh for a phase-2 checkpoint's weights to fill.
+    """
+    if not bool(config["phase2"].get("decoder_predictor_input", False)):
+        return None, None
+    if phase1_model is None:
+        phase1_model = build_phase1_model(config, ImuNormalizer())
+    head = phase1_model.degradation_head if phase1_model.degradation_condition else None
+    return phase1_model.image_predictor, head
 
 
 def build_decoders(
     config: dict[str, Any], *, residual: bool | None = None, skips: bool | None = None,
-    image_decoder: str | None = None,
+    image_decoder: str | None = None, predictor_input: bool | None = None,
 ) -> LatentDecoders:
     image_size = config["data"]["image_size"]
     channels = tuple(config["model"]["encoder_channels"])
@@ -486,7 +562,11 @@ def build_decoders(
         residual = bool(config["phase2"].get("input_coefficient_residual", False))
     if skips is None:
         skips = bool(config["phase2"].get("encoder_skips", False))
+    if predictor_input is None:
+        # Absent before the sharpness plan: no merge, the decoders every checkpoint holds.
+        predictor_input = bool(config["phase2"].get("decoder_predictor_input", False))
     return LatentDecoders(
+        predictor_merge=predictor_input,
         image_coefficient_size=(image_size[0] // 2, image_size[1] // 2),
         imu_coefficient_length=config["data"]["imu_window"] // 2,
         channels=channels,

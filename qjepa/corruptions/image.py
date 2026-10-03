@@ -145,6 +145,54 @@ def _vignette(height: int, width: int, strength: float) -> np.ndarray:
     return np.clip(1.0 - strength * radius2, 0.05, 1.0)[..., None]
 
 
+def active_stages(params: dict[str, object]) -> tuple[bool, bool, bool]:
+    """Which stages (optical, low light, sensor) ran for these drawn parameters."""
+    mode = params["mode"]
+    optical = mode in ("full", "blur_only", "blur_low_light")
+    # The named scenarios keep their meaning; only "full" draws the per-frame variant.
+    low_light = mode in ("low_light_only", "blur_low_light") or (mode == "full" and bool(params.get("low_light", True)))
+    sensor_noise = mode == "sensor_noise_only" or (mode == "full" and bool(params.get("sensor_noise", True)))
+    return optical, low_light, sensor_noise
+
+
+# What the phase-1 degradation head regresses: the corruption of this frame, each
+# entry scaled to roughly [0, 1] over the configured ranges and 0 where the stage
+# did not run, so a clean frame is the zero vector.
+DEGRADATION_FEATURES = ("defocus_sigma", "motion_length", "downsample", "darkness", "gamma",
+                        "shot_noise", "read_noise", "jpeg")
+_DEFOCUS_SCALE_PX = 1.5
+_MOTION_SCALE_PX = 10.0
+_DOWNSAMPLE_SCALE = 0.3
+_SHOT_NOISE_SCALE = 30.0           # 1/sqrt(photons): 2500 photons -> 0.6
+_READ_NOISE_SCALE = 255.0 / 5.0    # 5/255 -> 1
+
+
+def degradation_vector(params: dict[str, object]) -> np.ndarray:
+    """The drawn corruption of one frame as DEGRADATION_FEATURES, float32."""
+    vector = np.zeros(len(DEGRADATION_FEATURES), dtype=np.float32)
+    if params.get("clean"):
+        return vector
+    optical, low_light, sensor_noise = active_stages(params)
+    if optical:
+        if params.get("defocus"):
+            vector[0] = float(params["defocus_sigma"]) / _DEFOCUS_SCALE_PX
+        if params.get("motion"):
+            # Coupled to the IMU, the blur is the gyro path, not a drawn length.
+            length = params.get("path_span_px", 0.0) if params.get("motion_from_imu") else params["motion_length"]
+            vector[1] = float(length) / _MOTION_SCALE_PX
+        if params.get("downsample"):
+            vector[2] = (1.0 - float(params["downsample_scale"])) / _DOWNSAMPLE_SCALE
+    if low_light:
+        vector[3] = 1.0 - float(params["exposure_gain"])
+        vector[4] = 1.0 - float(params["tone_gamma"])
+    if sensor_noise:
+        vector[5] = _SHOT_NOISE_SCALE / math.sqrt(float(params["photon_count"]))
+        vector[6] = float(params["read_noise_std"]) * _READ_NOISE_SCALE
+        if params.get("jpeg"):
+            vector[7] = (100.0 - float(params["jpeg_quality"])) / 100.0
+    return vector
+
+
 class LowLightImageCorruptor:
     def __init__(self, config: LowLightImageCorruptionConfig | None = None, master_seed: int = 73128):
         self.config = config or LowLightImageCorruptionConfig()
@@ -223,6 +271,52 @@ class LowLightImageCorruptor:
         gyro: np.ndarray | None = None,
         imu_times: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
+        noisy, _, params = self._render(
+            image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
+            frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=False,
+        )
+        return noisy, params
+
+    def render_with_sensor_reference(
+        self,
+        image_clean: np.ndarray,
+        *,
+        split: str,
+        realization: int,
+        trajectory: str,
+        timestamp: float,
+        frame_index: int,
+        mode: str = "full",
+        gyro: np.ndarray | None = None,
+        imu_times: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+        """(noisy, the same frame without sensor grain, parameters).
+
+        The reference goes through every stage the noisy frame did -- blur,
+        exposure, quantization, JPEG -- except the shot/read/row/hot-pixel noise,
+        so (noisy - reference) is the grain alone. The phase-1 Jacobian term uses
+        it as its noise direction; (noisy - clean) on a blurred frame is mostly the
+        missing detail, and penalising that taught the encoder to ignore edges.
+        """
+        return self._render(
+            image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
+            frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=True,
+        )
+
+    def _render(
+        self,
+        image_clean: np.ndarray,
+        *,
+        split: str,
+        realization: int,
+        trajectory: str,
+        timestamp: float,
+        frame_index: int,
+        mode: str,
+        gyro: np.ndarray | None,
+        imu_times: np.ndarray | None,
+        reference: bool,
+    ) -> tuple[np.ndarray, np.ndarray | None, dict[str, object]]:
         if image_clean.ndim != 3 or image_clean.shape[-1] != 3:
             raise ValueError(f"Expected image [H,W,3], got {image_clean.shape}")
         if not np.isfinite(image_clean).all() or image_clean.min() < 0 or image_clean.max() > 1:
@@ -236,12 +330,10 @@ class LowLightImageCorruptor:
             )
         params = self._parameters(split, realization, trajectory, timestamp, mode)
         if params["clean"]:
-            return image_clean.astype(np.float32, copy=True), params
+            clean = image_clean.astype(np.float32, copy=True)
+            return clean, (clean.copy() if reference else None), params
 
-        optical = mode in ("full", "blur_only", "blur_low_light")
-        # The named scenarios keep their meaning; only "full" draws the per-frame variant.
-        low_light = mode in ("low_light_only", "blur_low_light") or (mode == "full" and params["low_light"])
-        sensor_noise = mode == "sensor_noise_only" or (mode == "full" and params["sensor_noise"])
+        optical, low_light, sensor_noise = active_stages(params)
         image = image_clean.astype(np.float64, copy=True)
 
         if optical and params["defocus"]:
@@ -283,6 +375,7 @@ class LowLightImageCorruptor:
             image = np.power(image, float(params["tone_gamma"]))
             image += float(params["black_level"])
 
+        before_grain = image
         if sensor_noise:
             rng = generator(
                 self.master_seed, "image_sensor", split, realization, trajectory, frame_index
@@ -296,13 +389,24 @@ class LowLightImageCorruptor:
             if hot.any():
                 image[hot] = rng.integers(0, 2, size=(int(hot.sum()), 1))
 
+        noisy = self._readout(image, params, sensor_noise)
+        if not reference:
+            return noisy, None, params
+        # Without grain the reference is the noisy frame; with it, the same readout of the
+        # frame before the grain, so quantization and JPEG cancel out of the difference.
+        without_grain = self._readout(before_grain, params, sensor_noise) if sensor_noise else noisy.copy()
+        return noisy, without_grain, params
+
+    @staticmethod
+    def _readout(image: np.ndarray, params: dict[str, object], sensor_noise: bool) -> np.ndarray:
+        """Clip, then the sensor's quantization and JPEG when the sensor stage ran."""
         image = np.clip(image, 0.0, 1.0)
         if sensor_noise:
             levels = float(2 ** int(params["quantization_bits"]) - 1)
             image = np.round(image * levels) / levels
             if params["jpeg"]:
                 image = _jpeg(image, int(params["jpeg_quality"]))
-        return np.clip(image, 0.0, 1.0).astype(np.float32), params
+        return np.clip(image, 0.0, 1.0).astype(np.float32)
 
     def metadata(self) -> dict[str, object]:
         return {"type": type(self).__name__, "master_seed": self.master_seed, "config": asdict(self.config)}

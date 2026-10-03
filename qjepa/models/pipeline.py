@@ -6,11 +6,13 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..data.normalize import ImuNormalizer
 from .backbone import LatentBatch, MultimodalBackbone
 from .decoders import PIXEL_IMAGE_DECODERS, LatentDecoders
-from .predictors import PREDICTOR_TYPES, LatentPredictor, SpatialPredictor, image_tokens, imu_tokens
+from .predictors import (PREDICTOR_TYPES, DegradationHead, LatentPredictor, SpatialPredictor, image_tokens,
+                         imu_tokens)
 from .teachers import EMATeachers
 
 
@@ -35,6 +37,8 @@ class LatentPretrainingModel(nn.Module):
         predictor_layers: int = 2,
         fine_scale: bool = False,
         finer_scale: bool = False,
+        degradation_outputs: int = 0,
+        degradation_condition: bool = False,
     ) -> None:
         super().__init__()
         if predictor_type not in PREDICTOR_TYPES:
@@ -43,6 +47,8 @@ class LatentPretrainingModel(nn.Module):
             raise ValueError("The fine-scale JEPA target needs the spatial predictor")
         if finer_scale and not fine_scale:
             raise ValueError("The finer JEPA target grows from the fine one: enable fine_scale too")
+        if degradation_condition and (predictor_type != "spatial" or not degradation_outputs):
+            raise ValueError("The degradation condition needs the spatial predictor and the degradation head")
         self.backbone = backbone or MultimodalBackbone()
         self.normalizer = normalizer or ImuNormalizer()
         embedding_dim = self.backbone.image_encoder.out_channels
@@ -61,11 +67,15 @@ class LatentPretrainingModel(nn.Module):
             self.image_predictor = SpatialPredictor(
                 embedding_dim, predictor_hidden, spatial_dims=2, kernel=predictor_kernel,
                 layers=predictor_layers, fine_channels=fine_channels, finer_channels=finer_channels,
+                condition_dim=degradation_outputs if degradation_condition else 0,
             )
             self.imu_predictor = SpatialPredictor(
                 embedding_dim, predictor_hidden, spatial_dims=1, kernel=predictor_kernel,
                 layers=predictor_layers,
             )
+        # None: no parameters, so phase-1 checkpoints from before the head load as they are.
+        self.degradation_head = DegradationHead(embedding_dim, degradation_outputs) if degradation_outputs else None
+        self.degradation_condition = degradation_condition
         self.teachers = EMATeachers(self.backbone)
         self.decoders = decoders
         if decoders is not None and decoders.imu_refiner is not None:
@@ -84,6 +94,8 @@ class LatentPretrainingModel(nn.Module):
         parameters = list(self.backbone.parameters())
         parameters += list(self.image_predictor.parameters())
         parameters += list(self.imu_predictor.parameters())
+        if self.degradation_head is not None:
+            parameters += list(self.degradation_head.parameters())
         if self.decoders is not None:
             parameters += list(self.decoders.parameters())
         return parameters
@@ -106,18 +118,20 @@ class LatentPretrainingModel(nn.Module):
         latent: LatentBatch,
         image_mask: torch.Tensor | None = None,
         imu_mask: torch.Tensor | None = None,
+        condition: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Predicted tokens (image, IMU) and, with ``fine_scale``, the fine image map.
 
         Masks [B, N] hide tokens from the predictor; only the spatial predictor
         can take them, as a token-wise one would have nothing left to predict from.
+        ``condition`` is the degradation estimate the image predictor is conditioned on.
         """
         if self.predictor_type == "token":
             if image_mask is not None or imu_mask is not None:
                 raise ValueError("Token masking needs the spatial predictor")
             return (self.image_predictor(image_tokens(latent.ZI)),
                     self.imu_predictor(imu_tokens(latent.ZU)), None)
-        image, fine = self.image_predictor(latent.ZI, image_mask)
+        image, fine = self.image_predictor(latent.ZI, image_mask, condition)
         imu, _ = self.imu_predictor(latent.ZU, imu_mask)
         return image, imu, fine
 
@@ -143,28 +157,57 @@ class RestoredBatch:
 
 
 class RestorationSystem(nn.Module):
-    """Phase 2/inference: frozen backbone followed by latent-only decoders."""
+    """Phase 2/inference: frozen backbone followed by latent-only decoders.
+
+    With ``latent_predictor`` (phase2.decoder_predictor_input) the phase-1 image
+    predictor -- the part of JEPA trained to turn the noisy latent into the clean
+    teacher's -- stays, frozen, and its prediction joins ZI through the decoders'
+    zero-initialised ``predictor_merge``. ``degradation_head`` comes along when the
+    predictor is conditioned on its estimate.
+    """
 
     def __init__(
         self,
         backbone: MultimodalBackbone,
         normalizer: ImuNormalizer,
         decoders: LatentDecoders | None = None,
+        latent_predictor: SpatialPredictor | None = None,
+        degradation_head: DegradationHead | None = None,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.normalizer = normalizer
         self.decoders = decoders or LatentDecoders()
+        if (latent_predictor is None) != (self.decoders.predictor_merge is None):
+            raise ValueError("A latent predictor and the decoders' predictor_merge come together")
+        if latent_predictor is not None and (latent_predictor.condition is None) != (degradation_head is None):
+            raise ValueError("A conditioned predictor needs its degradation head, and only then")
+        self.latent_predictor = latent_predictor
+        self.degradation_head = degradation_head
+        self.backbone_trainable = False
         self.freeze_backbone()
 
     def freeze_backbone(self) -> None:
         self.backbone.requires_grad_(False).eval()
         self.normalizer.requires_grad_(False).eval()
+        for module in (self.latent_predictor, self.degradation_head):
+            if module is not None:
+                module.requires_grad_(False).eval()
+        self.backbone_trainable = False
+
+    def unfreeze_backbone(self) -> None:
+        """LP-FT's second stage: the encoder trains too. It stays in eval mode
+        (no batch statistics in it); the IMU normalizer and predictor stay frozen."""
+        self.backbone.requires_grad_(True)
+        self.backbone_trainable = True
 
     def train(self, mode: bool = True):
         self.training = mode
         self.backbone.eval()
         self.normalizer.eval()
+        for module in (self.latent_predictor, self.degradation_head):
+            if module is not None:
+                module.eval()
         self.decoders.train(mode)
         return self
 
@@ -172,7 +215,7 @@ class RestorationSystem(nn.Module):
         self, image_noisy: torch.Tensor, imu_noisy_phys: torch.Tensor, image_time: torch.Tensor, imu_times: torch.Tensor
     ) -> LatentBatch:
         self.backbone.eval()
-        with torch.no_grad():
+        with torch.set_grad_enabled(self.backbone_trainable and torch.is_grad_enabled()):
             return self.backbone.encode_online(
                 image_noisy,
                 self.normalizer.normalize(imu_noisy_phys),
@@ -181,6 +224,17 @@ class RestorationSystem(nn.Module):
                 with_skips=self.decoders.uses_skips,
             )
 
+    def image_latent(self, latent: LatentBatch) -> torch.Tensor:
+        """ZI, plus the frozen predictor's clean-latent prediction when there is one."""
+        if self.latent_predictor is None:
+            return latent.ZI
+        condition = self.degradation_head(latent.ZI) if self.degradation_head is not None else None
+        tokens, _ = self.latent_predictor(latent.ZI, None, condition)
+        # The JEPA loss compares LayerNorm'd tokens, so that is the scale the prediction means.
+        tokens = F.layer_norm(tokens, (tokens.shape[-1],))
+        predicted = tokens.transpose(1, 2).reshape(latent.ZI.shape)
+        return latent.ZI + self.decoders.predictor_merge(predicted)
+
     def decode(self, latent: LatentBatch) -> RestoredBatch:
         transform = self.backbone.image_transform
         parts = None
@@ -188,11 +242,12 @@ class RestorationSystem(nn.Module):
             # The QWT reconstructs perfectly, so this IS the blurry input image;
             # decode(latent) keeps its signature for the ZI-ablation tools.
             blurry = transform.synthesis(latent.image_coefficients, latent.image_layout)
+            zi = self.image_latent(latent)
             if getattr(self.decoders.image, "uses_stages", False):
                 # The JEPA encoder's finer stages (image_skips: 1/8, 1/4, 1/2 of the frame).
-                image = self.decoders.image(latent.ZI, blurry, stages=latent.image_skips)
+                image = self.decoders.image(zi, blurry, stages=latent.image_skips)
             else:
-                image = self.decoders.image(latent.ZI, blurry)
+                image = self.decoders.image(zi, blurry)
             if isinstance(image, tuple):
                 image, parts = image
             # Coefficients OF the image, so nothing downstream can score energy

@@ -23,14 +23,15 @@ class DenseCoefficientEncoder(nn.Module):
         *,
         dim: int,
         groups: int = 8,
+        norm: str = "group",
     ) -> None:
         super().__init__()
         c0, c1, c2, c3 = channels
         self.stages = nn.Sequential(
-            Stage(in_channels, c0, dim=dim, groups=groups),
-            Stage(c0, c1, dim=dim, stride=2, groups=groups),
-            Stage(c1, c2, dim=dim, stride=2, groups=groups),
-            Stage(c2, c3, dim=dim, stride=2, groups=groups),
+            Stage(in_channels, c0, dim=dim, groups=groups, norm=norm),
+            Stage(c0, c1, dim=dim, stride=2, groups=groups, norm=norm),
+            Stage(c1, c2, dim=dim, stride=2, groups=groups, norm=norm),
+            Stage(c2, c3, dim=dim, stride=2, groups=groups, norm=norm),
         )
         self.out_channels = c3
         # Do phan giai giam mot nua sau moi stage tru stage 0, nen day chinh la

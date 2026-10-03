@@ -1,0 +1,23 @@
+# p19_sharp_p2: p16_infomax + ke hoach "do net", CHI phase 2. Hash phase 1 bang p16_infomax nen dung lai
+# phase 1 cua run do (hoac run cung recipe phase 1). Moi thay doi mot khoa; thieu khoa = nhu cu.
+#  (d) train dai hon + lat ngang: phase 2 cua p16_infomax chi thay 24 nghin mau (3000 update x 4 x 2),
+#      NAFNet goc thay 6,4 trieu (200k x 32). Mang hoc tan so thap truoc (spectral bias, Rahaman 2019):
+#      dung som = sang hon ma khong net hon. Lat ngang anh kem IMU (gx, gz, ay doi dau) gap doi goc nhin.
+#  (e) predictor JEPA (dong bang) dua du doan latent sach vao decoder qua conv 1x1 zero-init (IWM, 2024).
+#  (f) LP-FT (Kumar 2022): tu update 15000 backbone train cung, lr x 0,1.
+#  IMU: loss gia so tich phan (Brossard 2020) — drift ton gap sqrt(cua so) so voi rung trang.
+extends: kaggle_infomax.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p19_sharp_p2
+  # 20 lan validation + checkpoint trong 20000 update.
+  checkpoint_every_updates: 1000
+
+phase2:
+  max_successful_updates: 20000
+  augment_hflip: true
+  decoder_predictor_input: true
+  backbone_finetune_after_updates: 15000
+  backbone_finetune_lr_scale: 0.1
+  imu_increment_weight: 0.5
+  imu_increment_windows: [8, 32]

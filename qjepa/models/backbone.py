@@ -47,6 +47,7 @@ class MultimodalBackbone(nn.Module):
         gate_bias: float = -2.0,
         groups: int = 8,
         image_transform: str = DEFAULT_QWT_BACKEND,
+        encoder_norm: str = "group",
     ) -> None:
         super().__init__()
         if channels[-1] != embedding_dim:
@@ -54,10 +55,10 @@ class MultimodalBackbone(nn.Module):
         self.image_transform = QuaternionWaveletTransform2D(backend=image_transform)
         self.imu_transform = HaarTransform1D(channels=6)
         self.image_encoder = DenseCoefficientEncoder(
-            self.image_transform.coeff_channels, channels, dim=2, groups=groups
+            self.image_transform.coeff_channels, channels, dim=2, groups=groups, norm=encoder_norm
         )
         self.imu_encoder = DenseCoefficientEncoder(
-            self.imu_transform.coeff_channels, channels, dim=1, groups=groups
+            self.imu_transform.coeff_channels, channels, dim=1, groups=groups, norm=encoder_norm
         )
         self.fusion = SharedGatedFusion(
             embedding_dim,

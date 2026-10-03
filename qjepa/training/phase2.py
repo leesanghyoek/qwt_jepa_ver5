@@ -20,6 +20,18 @@ from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
 
+def latent_predictor_hash(system: RestorationSystem) -> str | None:
+    """Hash of the frozen phase-1 predictor (and its degradation head), None without one.
+
+    load_state_dict(strict=True) checks names and shapes only; this ties the
+    predictor in a phase-2 checkpoint to the phase-1 parent it was copied from.
+    """
+    if system.latent_predictor is None:
+        return None
+    head = state_dict_hash(system.degradation_head) if system.degradation_head is not None else "none"
+    return f"{state_dict_hash(system.latent_predictor)}:{head}"
+
+
 def _grad_scaler(enabled: bool):
     """torch.amp.GradScaler where it exists (torch >= 2.3), else the cuda one."""
     if hasattr(torch.amp, "GradScaler"):
@@ -73,6 +85,35 @@ class Phase2Trainer:
         self.frozen_backbone_hash = state_dict_hash(self.system.backbone)
         self.frozen_normalizer_hash = state_dict_hash(self.system.normalizer)
         self.decoder_initialization_hash = state_dict_hash(self.system.decoders)
+        self.latent_predictor_hash = latent_predictor_hash(self.system)
+        # LP-FT (Kumar 2022): absent key, the backbone stays frozen for the whole run.
+        self.finetune_after = self.phase.get("backbone_finetune_after_updates")
+        self.backbone_finetuning = False
+
+    def prepare_backbone_finetune(self) -> bool:
+        """From update ``backbone_finetune_after_updates`` on, the backbone trains too.
+
+        Called at the end of every step -- so the checkpoint saved at update N
+        already holds the second parameter group -- and, on resume, before the
+        optimizer state loads, so that group is there to receive it.
+        """
+        if (self.backbone_finetuning or self.finetune_after is None
+                or self.successful_updates < int(self.finetune_after)):
+            return False
+        self.system.unfreeze_backbone()
+        backbone = list(self.system.backbone.parameters())
+        self.optimizer.add_param_group({"params": backbone, "lr": 0.0,
+                                        "lr_scale": float(self.phase["backbone_finetune_lr_scale"])})
+        self.parameters = self.parameters + backbone
+        if self.world > 1:
+            # DDP fixes its gradient buckets when built and leaves frozen parameters
+            # out; rebuilt now, it syncs the backbone too. Every rank switches here.
+            self.forward_model = nn.parallel.DistributedDataParallel(
+                self.forward_model.module,
+                device_ids=[torch.cuda.current_device()] if self.device.type == "cuda" else None,
+                broadcast_buffers=False)
+        self.backbone_finetuning = True
+        return True
 
     def _set_lr(self) -> float:
         lr = warmup_cosine_lr(
@@ -83,7 +124,8 @@ class Phase2Trainer:
             self.phase["minimum_lr"],
         )
         for group in self.optimizer.param_groups:
-            group["lr"] = lr
+            # The fine-tuned backbone's group runs at a fraction of the decoders' rate.
+            group["lr"] = lr * group.get("lr_scale", 1.0)
         return lr
 
     @property
@@ -92,16 +134,20 @@ class Phase2Trainer:
         return self.forward_model.module if self.world > 1 else self.forward_model
 
     def assert_backbone_frozen(self) -> None:
-        if state_dict_hash(self.system.backbone) != self.frozen_backbone_hash:
+        """The backbone is promised frozen until LP-FT unfreezes it; the normalizer always."""
+        if not self.backbone_finetuning and state_dict_hash(self.system.backbone) != self.frozen_backbone_hash:
             raise RuntimeError("Frozen backbone changed during phase 2")
         if state_dict_hash(self.system.normalizer) != self.frozen_normalizer_hash:
             raise RuntimeError("Frozen IMU normalizer changed during phase 2")
+        if latent_predictor_hash(self.system) != self.latent_predictor_hash:
+            raise RuntimeError("Frozen latent predictor changed during phase 2")
 
     def step(self, raw_batches: dict[str, Any] | list[dict[str, Any]]) -> dict[str, float | bool | str]:
         microbatches = raw_batches if isinstance(raw_batches, list) else [raw_batches]
         expected = int(self.phase["gradient_accumulation"])
         if len(microbatches) != expected:
             raise ValueError(f"Phase 2 expects {expected} microbatches per update, got {len(microbatches)}")
+        self.prepare_backbone_finetune()
         self.system.train(True)
         self.optimizer.zero_grad(set_to_none=True)
         lr = self._set_lr()
@@ -162,6 +208,8 @@ class Phase2Trainer:
                     # Absent from configs written before the term existed, which must
                     # keep meaning what they meant when they were trained.
                     image_detail_loss=str(self.phase.get("image_detail_loss", "coefficient")),
+                    increment_weight=float(self.phase.get("imu_increment_weight", 0.0)),
+                    increment_windows=tuple(self.phase.get("imu_increment_windows", (8, 32))),
                 )
                 if "image_detail" in restored:
                     split_loss, split_parts = color_edge_split_loss(
@@ -218,6 +266,7 @@ class Phase2Trainer:
                 return {"skipped": True, "reason": "non_finite_gradient", **totals}
             self.optimizer.step()
         self.successful_updates += 1
+        self.prepare_backbone_finetune()
         return {
             "skipped": False,
             **totals,
@@ -239,8 +288,12 @@ class Phase2Trainer:
                 "successful_updates": self.successful_updates,
                 "data_microbatches_consumed": self.successful_updates * self.phase["gradient_accumulation"],
                 "parent_phase1_checkpoint": self.parent_checkpoint,
+                # The phase-1 parent's backbone, even after LP-FT changed it: provenance.
                 "frozen_backbone_hash": self.frozen_backbone_hash,
+                "backbone_finetuned": self.backbone_finetuning,
+                "backbone_current_hash": state_dict_hash(self.system.backbone),
                 "frozen_normalizer_hash": self.frozen_normalizer_hash,
+                "latent_predictor_hash": self.latent_predictor_hash,
                 "decoder_initialization_hash": self.decoder_initialization_hash,
                 "decoder_current_hash": state_dict_hash(self.system.decoders),
                 "configuration_hash": configuration_hash(config, "phase2"),

@@ -11,9 +11,29 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
+from ..corruptions.image import degradation_vector
 from ..corruptions.rng import derive_seed
 from .manifest import PairedSample
 from .tartanair import Trajectory
+
+# A horizontal flip mirrors the world across the camera's forward-down plane.
+# lcam_front is the IMU body frame (x forward, y right, z down; see
+# corruptions/motion.py), so the polar accel flips y and the axial gyro flips
+# every component but y: [ax, -ay, az, -gx, gy, -gz].
+IMU_MIRROR_SIGNS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
+
+
+def mirror_imu(imu: np.ndarray) -> np.ndarray:
+    """The IMU window [L, 6] of the horizontally mirrored scene."""
+    return imu * np.asarray(IMU_MIRROR_SIGNS, dtype=imu.dtype)
+
+
+def mirror_draw(seed: int, sample_id: str, realization: int, probability: float) -> bool:
+    """Whether this sample is mirrored in this realization: reproducible, per sample."""
+    if probability <= 0.0:
+        return False
+    rng = np.random.default_rng(derive_seed(seed, "hflip", sample_id, realization))
+    return bool(rng.random() < probability)
 
 
 def load_rgb(path: str | Path, size: tuple[int, int] = (256, 256)) -> np.ndarray:
@@ -67,9 +87,16 @@ class PairedCameraImuDataset(Dataset):
         scenarios: list[dict[str, object]] | None = None,
         scenario_seed: int = 0,
         cache_size: int = 4,
+        sensor_reference: bool = False,
+        hflip_probability: float = 0.0,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
+        if not 0.0 <= hflip_probability <= 1.0:
+            raise ValueError("hflip_probability must be in [0, 1]")
+        # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
+        self.sensor_reference = sensor_reference
+        self.hflip_probability = hflip_probability
         self.samples = samples
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
         self.imu_corruptor = imu_corruptor or TrajectoryImuCorruptor(cache_size=cache_size)
@@ -105,8 +132,7 @@ class PairedCameraImuDataset(Dataset):
         clean_image = load_rgb(sample.image_path, self.image_size)
         clean_imu = np.asarray(imu_all[sample.imu_start : sample.imu_end], dtype=np.float32)
         imu_times = np.asarray(imu_times_all[sample.imu_start : sample.imu_end], dtype=np.float64)
-        noisy_image, image_parameters = self.image_corruptor(
-            clean_image,
+        corrupt = dict(
             split=sample.split,
             realization=self.realization,
             trajectory=sample.trajectory_key,
@@ -119,6 +145,12 @@ class PairedCameraImuDataset(Dataset):
             gyro=clean_imu[:, 3:6].astype(np.float64),
             imu_times=imu_times,
         )
+        noise_free = None
+        if self.sensor_reference:
+            noisy_image, noise_free, image_parameters = self.image_corruptor.render_with_sensor_reference(
+                clean_image, **corrupt)
+        else:
+            noisy_image, image_parameters = self.image_corruptor(clean_image, **corrupt)
         noisy_imu, imu_parameters = self.imu_corruptor.window(
             imu_all,
             imu_times_all,
@@ -129,25 +161,38 @@ class PairedCameraImuDataset(Dataset):
             trajectory=sample.trajectory_key,
             mode=imu_mode,
         )
+        if mirror_draw(self.scenario_seed, sample.sample_id, self.realization, self.hflip_probability):
+            # After corruption: every corruption draw is mirror-symmetric in distribution,
+            # and the seeds stay those of the unmirrored sample.
+            clean_image, noisy_image = clean_image[:, ::-1], noisy_image[:, ::-1]
+            noise_free = None if noise_free is None else noise_free[:, ::-1]
+            clean_imu, noisy_imu = mirror_imu(clean_imu), mirror_imu(noisy_imu)
         chw = lambda value: torch.from_numpy(np.ascontiguousarray(value.transpose(2, 0, 1))).float()
-        return {
+        item = {
             "image_clean": chw(clean_image),
             "image_noisy": chw(noisy_image),
-            "imu_clean_phys": torch.from_numpy(clean_imu).float(),
-            "imu_noisy_phys": torch.from_numpy(noisy_imu).float(),
+            "imu_clean_phys": torch.from_numpy(np.ascontiguousarray(clean_imu)).float(),
+            "imu_noisy_phys": torch.from_numpy(np.ascontiguousarray(noisy_imu)).float(),
             "image_time": torch.tensor(sample.image_time, dtype=torch.float64),
             "imu_times": torch.from_numpy(imu_times),
             "imu_start": torch.tensor(sample.imu_start),
+            "image_degradation": torch.from_numpy(degradation_vector(image_parameters)),
             "sample_id": sample.sample_id,
             "trajectory_key": sample.trajectory_key,
             "corruption": {"image": image_parameters, "imu": imu_parameters},
         }
+        if noise_free is not None:
+            item["image_noise_free"] = chw(noise_free)
+        return item
 
 
 def collate_paired(batch: list[dict[str, object]]) -> dict[str, object]:
     output: dict[str, object] = {}
     for key in ("image_clean", "image_noisy", "image_time", "imu_times", "imu_start"):
         output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
+    for key in ("image_degradation", "image_noise_free"):
+        if key in batch[0]:
+            output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
     for key in ("imu_clean_phys", "imu_noisy_phys"):
         stacked = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
         output[key] = stacked.transpose(1, 2).contiguous()

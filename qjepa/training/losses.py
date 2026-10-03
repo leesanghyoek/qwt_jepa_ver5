@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -428,6 +430,32 @@ def excess_jitter(predicted: torch.Tensor, reference: torch.Tensor) -> torch.Ten
     return F.relu(predicted.diff(dim=-1).abs() - reference.diff(dim=-1).abs()).mean()
 
 
+def imu_increment_loss(
+    restored: torch.Tensor, clean: torch.Tensor, windows: tuple[int, ...], beta: float = 0.05
+) -> torch.Tensor:
+    """Error of the IMU integrated over non-overlapping windows (Brossard 2020).
+
+    Per-sample terms charge a slow offset and white jitter of the same RMS alike,
+    but integrated -- an orientation from the gyro, a velocity from the accel --
+    the offset grows with the window and the jitter only with its square root.
+    Each window's summed error is divided by sqrt(window): white error then weighs
+    the same at every window length while drift weighs sqrt(window) more.
+    ``restored``/``clean`` are [B, C, L] in the normalized units the other IMU
+    terms use, so accel and gyro weigh alike; the window must divide L.
+    """
+    if not windows:
+        raise ValueError("imu_increment_loss needs at least one window")
+    length = restored.shape[-1]
+    error = restored - clean
+    terms = []
+    for window in windows:
+        if window < 1 or length % window:
+            raise ValueError(f"IMU increment window {window} must divide the window length {length}")
+        increments = F.avg_pool1d(error, window, stride=window) * math.sqrt(window)
+        terms.append(F.smooth_l1_loss(increments, torch.zeros_like(increments), beta=beta))
+    return torch.stack(terms).mean()
+
+
 def phase2_reconstruction_loss(
     image_restored: torch.Tensor,
     image_clean: torch.Tensor,
@@ -443,6 +471,8 @@ def phase2_reconstruction_loss(
     jitter_weight: float = 0.0,
     detail_energy_weight: float = 0.0,
     image_detail_loss: str = "coefficient",
+    increment_weight: float = 0.0,
+    increment_windows: tuple[int, ...] = (8, 32),
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if image_detail_loss not in IMAGE_DETAIL_LOSSES:
         raise ValueError(f"image_detail_loss must be one of {IMAGE_DETAIL_LOSSES}")
@@ -494,6 +524,15 @@ def phase2_reconstruction_loss(
         total = total + jitter_weight * (accel_jitter + gyro_jitter)
         parts["imu_accel_jitter"] = accel_jitter
         parts["imu_gyro_jitter"] = gyro_jitter
+    if increment_weight > 0:
+        windows = tuple(increment_windows)
+        accel_increment = imu_increment_loss(imu_restored_normalized[:, :3], imu_clean_normalized[:, :3],
+                                             windows, beta)
+        gyro_increment = imu_increment_loss(imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:],
+                                            windows, beta)
+        total = total + increment_weight * (accel_increment + gyro_increment)
+        parts["imu_accel_increment"] = accel_increment
+        parts["imu_gyro_increment"] = gyro_increment
     return total, parts
 
 

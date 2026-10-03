@@ -1,0 +1,24 @@
+# p19_sharp: p19_sharp_p2 + sua phase 1, nen PHAI train lai phase 1 (hash phase 1 doi).
+#  (a) Jacobian phat huong NHIEU CAM BIEN (noisy - cung frame khong hat), khong phai (noisy - sach): tren
+#      frame mo, huong cu chinh la duong net bi mat (cos -0,97 voi huong tin hieu), nen so hang day encoder
+#      bo qua duong net (contractive, Rifai 2011).
+#  (b) encoder dung norm chi tru trung binh: GroupNorm chia do lech nen encoder mu do lon (FU(3x) = FU(x));
+#      probe luc khoi tao: duong net 4-16 px 0% -> 25%, IMU 9% -> 53% (EDSR cung bo norm vi ly do nay).
+#  (c) dau du doan tham so hu hong (sigma defocus, motion, nhieu, JPEG...) tu ZI, trong so 0,1, va
+#      predictor doc uoc luong do nhu "action" (IWM): latent biet frame mo bao nhieu (DASR, IKC).
+#  + lat ngang anh kem IMU o phase 1.
+extends: kaggle_sharp_p2.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p19_sharp
+
+model:
+  encoder_norm: centre
+
+encoder_sensitivity:
+  noise_direction: sensor_noise
+
+phase1:
+  degradation_weight: 0.1
+  predictor_degradation_condition: true
+  augment_hflip: true

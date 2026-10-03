@@ -79,6 +79,24 @@ def jepa_report_terms(features: dict[str, torch.Tensor]) -> dict[str, float]:
     return report
 
 
+NOISE_DIRECTIONS = ("corruption", "sensor_noise")
+
+
+def image_noise_reference(batch: dict[str, Any], sensitivity: dict[str, Any]) -> torch.Tensor:
+    """The image the Jacobian's noise direction starts from: noise = noisy - this.
+
+    "corruption" (absent key): the clean frame, so the direction is everything the
+    corruption did -- on a blurred frame mostly the missing detail, which taught
+    the encoder to ignore edges. "sensor_noise": the same frame rendered without
+    sensor grain (the dataset's image_noise_free), so the direction is the grain.
+    """
+    if sensitivity.get("noise_direction", "corruption") == "corruption":
+        return batch["image_clean"]
+    if "image_noise_free" not in batch:
+        raise KeyError("image_noise_free: noise_direction sensor_noise needs the dataset's sensor_reference")
+    return batch["image_noise_free"]
+
+
 def _finite_gradients(parameters: list[torch.nn.Parameter]) -> bool:
     # One device sync for all gradients, not one per parameter tensor (hundreds).
     checks = [torch.isfinite(parameter.grad).all() for parameter in parameters if parameter.grad is not None]
@@ -121,6 +139,7 @@ class Phase1Trainer:
         "reconstruction_image_detail",
         "reconstruction_imu",
         "reconstruction_imu_detail",
+        "degradation",
     }
 
     def __init__(
@@ -214,9 +233,11 @@ class Phase1Trainer:
             if source == "image":
                 base_input = batch["image_clean"]
                 noisy_input = batch["image_noisy"]
+                noise_origin = image_noise_reference(batch, self.sensitivity)
             else:
                 base_input = self.model.normalizer.normalize(batch["imu_clean_phys"])
                 noisy_input = self.model.normalizer.normalize(batch["imu_noisy_phys"])
+                noise_origin = base_input
             # Both probes start from the CLEAN operating point, whose features the
             # variance term already computes, so the base costs nothing extra.
             probe_kwargs = dict(
@@ -225,7 +246,8 @@ class Phase1Trainer:
                 alpha=self.sensitivity["alpha"],
                 minimum_energy=self.sensitivity["minimum_energy"],
             )
-            noise_direction, noise_valid = corruption_direction(base_input, noisy_input)
+            # The probes still step from the clean point; only the direction changes.
+            noise_direction, noise_valid = corruption_direction(noise_origin, noisy_input)
             signal_direction, signal_valid = detail_direction(base_input)
             # A sample the corruptor left clean has no noise direction to measure.
             probe_valid = noise_valid & signal_valid
@@ -356,6 +378,15 @@ class Phase1Trainer:
             reconstruction_parts["reconstruction"] = float(reconstruction.detach())
             self.decoder_forward_calls += 1
 
+        # Absent before the sharpness plan: 0, no head, nothing below runs.
+        degradation_weight = float(self.phase.get("degradation_weight", 0.0))
+        degradation = jepa.new_zeros(())
+        if degradation_weight > 0:
+            target = batch["image_degradation"].to(features["degradation_estimate"].dtype)
+            if self.world > 1:
+                target = gather_shares(target, keep_graph=False)
+            degradation = F.smooth_l1_loss(features["degradation_estimate"], target, beta=0.05)
+
         encoder_term = jepa.new_zeros(())
         sensitivity_report: dict[str, float] = {}
         if encoder_weight > 0:
@@ -392,6 +423,7 @@ class Phase1Trainer:
             + reconstruction_weight * reconstruction
             + rate_weight * rate
             + nce_weight * nce
+            + degradation_weight * degradation
         )
         if not torch.isfinite(total):
             self.optimizer.zero_grad(set_to_none=True)
@@ -421,6 +453,7 @@ class Phase1Trainer:
             "variance": float(variance.detach()),
             "covariance": float(covariance.detach()),
             **({"coding_rate": float(rate.detach())} if rate_weight > 0 else {}),
+            **({"degradation": float(degradation.detach())} if degradation_weight > 0 else {}),
             **nce_report,
             "encoder_sensitivity": float(encoder_term.detach()),
             **reconstruction_parts,

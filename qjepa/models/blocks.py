@@ -13,19 +13,52 @@ def _conv(dim: int):
     raise ValueError(f"dim must be 1 or 2, got {dim}")
 
 
-def _group_norm(channels: int, groups: int) -> nn.GroupNorm:
+ENCODER_NORMS = ("group", "centre")
+
+
+class CentreNorm(nn.Module):
+    """GroupNorm without the division: subtract each group's mean, keep its spread.
+
+    GroupNorm divides by the group's standard deviation, so a block's output is
+    the same for x and 3x: the IMU encoder could not tell a quiet window from a
+    strong one, and a frame three times darker moved the image feature by 1%.
+    Restoration needs that magnitude (how strong an edge is against the grain).
+    Same affine parameters and names as nn.GroupNorm, so only the arithmetic differs.
+    """
+
+    def __init__(self, groups: int, channels: int) -> None:
+        super().__init__()
+        if channels % groups:
+            raise ValueError(f"{channels} channels are not divisible by {groups} groups")
+        self.num_groups = groups
+        self.weight = nn.Parameter(torch.ones(channels))
+        self.bias = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, channels = x.shape[:2]
+        grouped = x.reshape(batch, self.num_groups, -1)
+        centred = (grouped - grouped.mean(dim=-1, keepdim=True)).reshape(x.shape)
+        shape = (1, channels) + (1,) * (x.ndim - 2)
+        return centred * self.weight.reshape(shape) + self.bias.reshape(shape)
+
+
+def _group_norm(channels: int, groups: int, norm: str = "group") -> nn.Module:
     if channels % groups:
         raise ValueError(f"{channels} channels are not divisible by {groups} groups")
+    if norm == "centre":
+        return CentreNorm(groups, channels)
+    if norm != "group":
+        raise ValueError(f"norm must be one of {ENCODER_NORMS}, got {norm!r}")
     return nn.GroupNorm(groups, channels)
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, cin: int, cout: int, *, dim: int, stride: int = 1, groups: int = 8):
+    def __init__(self, cin: int, cout: int, *, dim: int, stride: int = 1, groups: int = 8, norm: str = "group"):
         super().__init__()
         conv = _conv(dim)
         self.net = nn.Sequential(
             conv(cin, cout, 3, stride=stride, padding=1, bias=False),
-            _group_norm(cout, groups),
+            _group_norm(cout, groups, norm),
             nn.SiLU(),
         )
 
@@ -34,13 +67,13 @@ class ConvBlock(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, channels: int, *, dim: int, groups: int = 8):
+    def __init__(self, channels: int, *, dim: int, groups: int = 8, norm: str = "group"):
         super().__init__()
         conv = _conv(dim)
         self.conv1 = conv(channels, channels, 3, padding=1, bias=False)
-        self.norm1 = _group_norm(channels, groups)
+        self.norm1 = _group_norm(channels, groups, norm)
         self.conv2 = conv(channels, channels, 3, padding=1, bias=False)
-        self.norm2 = _group_norm(channels, groups)
+        self.norm2 = _group_norm(channels, groups, norm)
         self.act = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -49,11 +82,11 @@ class ResBlock(nn.Module):
 
 
 class Stage(nn.Module):
-    def __init__(self, cin: int, cout: int, *, dim: int, stride: int = 1, groups: int = 8):
+    def __init__(self, cin: int, cout: int, *, dim: int, stride: int = 1, groups: int = 8, norm: str = "group"):
         super().__init__()
         self.net = nn.Sequential(
-            ConvBlock(cin, cout, dim=dim, stride=stride, groups=groups),
-            ResBlock(cout, dim=dim, groups=groups),
+            ConvBlock(cin, cout, dim=dim, stride=stride, groups=groups, norm=norm),
+            ResBlock(cout, dim=dim, groups=groups, norm=norm),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

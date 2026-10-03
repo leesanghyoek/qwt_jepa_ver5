@@ -12,6 +12,32 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p19 — kế hoạch "độ nét"** (config `configs/kaggle_sharp_p2.yaml` → OUT `outputs/p19_sharp_p2`, và
+`configs/kaggle_sharp.yaml` → OUT `outputs/p19_sharp`). Báo cáo p16_imu_smooth cho thấy frame **chỉ mờ**
+còn tệ hơn đầu vào (PSNR 28,59 → 28,10): model làm sáng chứ chưa làm nét. Mỗi sửa đổi là một khoá; thiếu
+khoá = như cũ.
+- **p19_sharp_p2 — chỉ phase 2** (hash phase 1 bằng p16_infomax nên dùng lại phase 1):
+  (d) `max_successful_updates: 20000` (p16_infomax 3000 update × 8 = 24 nghìn mẫu; NAFNet gốc 6,4 triệu) và
+  `augment_hflip` — lật ngang ảnh kèm IMU (ay, gx, gz đổi dấu; `tests/test_hflip_augmentation.py` kiểm hình học
+  gyro → ảnh). Mạng học tần số thấp trước (spectral bias), nên dừng sớm = sáng hơn mà chưa nét.
+  (e) `decoder_predictor_input` — predictor JEPA (đóng băng) đưa dự đoán latent sạch vào decoder qua conv 1×1
+  zero-init (IWM, 2024); lúc đầu ra đúng như cũ (`tests/test_predictor_decoder_input.py`).
+  (f) `backbone_finetune_after_updates: 15000`, `backbone_finetune_lr_scale: 0.1` — LP-FT: 5000 update cuối
+  backbone train cùng (`tests/test_backbone_finetune.py`, kể cả DDP và resume).
+  IMU: `imu_increment_weight` — loss trên gia số tích phân (Brossard 2020), drift tốn gấp √cửa sổ so với rung.
+- **p19_sharp — thêm sửa phase 1** (phải train lại phase 1):
+  (a) `encoder_sensitivity.noise_direction: sensor_noise` — Jacobian phạt hướng hạt nhiễu cảm biến (noisy − cùng
+  frame không hạt), không phải noisy − sạch: trên frame mờ hướng cũ chính là đường nét bị mất (cos −0,97), nên
+  số hạng cũ dạy encoder bỏ qua đường nét (`tests/test_sensor_noise_direction.py`).
+  (b) `model.encoder_norm: centre` — norm chỉ trừ trung bình thay GroupNorm, encoder thấy được độ lớn
+  (`tests/test_centre_norm.py`).
+  (c) `phase1.degradation_weight: 0.1` + `predictor_degradation_condition` — đầu dự đoán tham số hư hỏng từ ZI và
+  predictor đọc ước lượng đó (DASR, IKC, IWM) (`tests/test_degradation_head.py`).
+
+Chi phí (đo ở 256²): tham số lúc suy luận 5,30 M → 5,51 M (p2) / 5,53 M (đủ), +4,4%; phép tính
+20,08 → 20,13 GMAC/ảnh (+0,24%). Cái đắt là thời gian phase 2: 20000 update thay vì 3000 (×6,7). Toàn bộ
+chạy qua CLI cùng lúc, có resume sau mỗi checkpoint: `tests/test_sharp_cli.py`.
+
 **p16_imu_smooth** (OUT `outputs/p16_imu_smooth`; notebook riêng `qwt-jaco-jepa-imu.ipynb`, config
 riêng `configs/kaggle_imu.yaml`): ảnh giữ đúng recipe p16, IMU mượt hơn, train lại cả hai phase. p16 để
 lại sai số IMU chủ yếu là rung (sai số giữa 2 mẫu liền kề / sai số tổng 0,70 accel, 0,78 gyro): decoder

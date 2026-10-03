@@ -789,10 +789,13 @@ class LatentDecoders(nn.Module):
         resnet_blocks: int = 8,
         split: dict | None = None,
         imu_refiner: dict | None = None,
+        predictor_merge: bool = False,
     ) -> None:
         super().__init__()
         if image_decoder not in IMAGE_DECODERS:
             raise ValueError(f"image_decoder must be one of {IMAGE_DECODERS}")
+        if predictor_merge and image_decoder not in PIXEL_IMAGE_DECODERS:
+            raise ValueError("predictor_merge feeds a pixel image decoder (resnet_pixel or split_color_edge)")
         self.residual = residual
         self.uses_skips = skip_channels is not None
         self.image_decoder = image_decoder
@@ -813,6 +816,13 @@ class LatentDecoders(nn.Module):
         )
         # None: no parameters, so checkpoints from before the refiner load as they are.
         self.imu_refiner = ImuRefiner(6, **imu_refiner) if imu_refiner else None
+        # The frozen JEPA predictor's clean-latent prediction joins ZI here
+        # (RestorationSystem.image_latent). Zero-init: the decoder starts as without it.
+        self.predictor_merge = None
+        if predictor_merge:
+            self.predictor_merge = nn.Conv2d(channels[3], channels[3], 1)
+            nn.init.zeros_(self.predictor_merge.weight)
+            nn.init.zeros_(self.predictor_merge.bias)
 
     def forward(
         self,

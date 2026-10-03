@@ -81,7 +81,13 @@ class Phase1Forward(nn.Module):
         noisy = self.model.encode_online(image_noisy, imu_noisy_phys, image_time, imu_times)
         clean = self.model.encode_online(image_clean, imu_clean_phys, image_time, imu_times)
         image_mask, imu_mask = self._masks(mask_seeds, noisy)
-        prediction_i, prediction_u, prediction_i_fine = self.model.predictions(noisy, image_mask, imu_mask)
+        estimate = condition = None
+        if getattr(self.model, "degradation_head", None) is not None:
+            estimate = self.model.degradation_head(noisy.ZI)
+            # Detached: the predictor reads the estimate as an action, and the JEPA
+            # loss must not bend the estimate toward whatever helps it.
+            condition = estimate.detach() if self.model.degradation_condition else None
+        prediction_i, prediction_u, prediction_i_fine = self.model.predictions(noisy, image_mask, imu_mask, condition)
         targets = self.model.targets(image_clean, imu_clean_phys, fine=self.model.fine_scale,
                                      finer=getattr(self.model, "finer_scale", False))
         result = {"prediction_i": prediction_i, "prediction_u": prediction_u,
@@ -95,6 +101,8 @@ class Phase1Forward(nn.Module):
         for name, mask in (("image_mask", image_mask), ("imu_mask", imu_mask)):
             if mask is not None:
                 result[name] = mask
+        if estimate is not None:
+            result["degradation_estimate"] = estimate
         for name in ("FI", "FU", "ZI", "ZU"):
             result[name] = getattr(noisy, name)
             result[name + "_clean"] = getattr(clean, name)

@@ -27,7 +27,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qjepa.config import build_decoders, build_phase1_model, load_config  # noqa: E402
+from qjepa.config import build_decoders, build_phase1_model, load_config, phase2_latent_modules  # noqa: E402
 from qjepa.data import ImuNormalizer  # noqa: E402
 from qjepa.execution import RestorationForward  # noqa: E402
 from qjepa.models import RestorationSystem  # noqa: E402
@@ -58,7 +58,8 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
     config = load_config(config_path)
     torch.manual_seed(0)
     phase1 = build_phase1_model(config, ImuNormalizer())
-    system = RestorationSystem(phase1.backbone, phase1.normalizer, build_decoders(config)).to(device)
+    system = RestorationSystem(phase1.backbone, phase1.normalizer, build_decoders(config),
+                               *phase2_latent_modules(config, phase1)).to(device)
     system.freeze_backbone()
     decoder = system.decoders.image
     height, width = config["data"]["image_size"]

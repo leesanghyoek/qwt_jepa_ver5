@@ -25,6 +25,7 @@ from .config import (
     build_normalizer,
     build_phase1_model,
     load_config,
+    phase2_latent_modules,
     resolve_device,
     seed_everything,
     serializable_config,
@@ -39,6 +40,7 @@ from .data import (
     write_manifest,
 )
 from .data.dataset import load_rgb
+from .corruptions.image import degradation_vector
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
 from .evaluation.reporting import (
@@ -57,7 +59,7 @@ from .training.checkpoints import (
 )
 from .training.losses import jepa_fine_loss, jepa_latent_loss
 from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
-from .training.phase2 import Phase2Trainer
+from .training.phase2 import Phase2Trainer, latent_predictor_hash
 
 
 def _config_path(value: str | None) -> Path:
@@ -118,6 +120,8 @@ def _dataset(
     image_mode: str = "full",
     imu_mode: str = "full",
     scenarios: list[dict[str, object]] | None = None,
+    sensor_reference: bool = False,
+    hflip_probability: float = 0.0,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -136,7 +140,24 @@ def _dataset(
         imu_mode=imu_mode,
         scenarios=scenarios,
         scenario_seed=config["data"]["corruption_seed"],
+        sensor_reference=sensor_reference,
+        hflip_probability=hflip_probability,
     )
+
+
+# Mirror half the training pairs when a phase asks for it (phase{1,2}.augment_hflip).
+HFLIP_PROBABILITY = 0.5
+
+
+def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str, **kwargs) -> PairedCameraImuDataset:
+    """The training split of ``phase``, with that phase's augmentation and references."""
+    section = config[phase]
+    sensitivity = config["encoder_sensitivity"]
+    # Only phase 1's Jacobian reads the frame without grain; rendering it costs a readout.
+    sensor_reference = (phase == "phase1" and bool(sensitivity.get("enabled", False))
+                        and sensitivity.get("noise_direction", "corruption") == "sensor_noise")
+    return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
+                    hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0, **kwargs)
 
 
 def _loader(
@@ -734,7 +755,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         trainer.initialization_hash = resume_payload["metadata"]["initialization_hash"]
         restore_rng_state(resume_payload["rng"])
 
-    train_dataset = _dataset(config, manifest, "train", fixed_realization=False)
+    train_dataset = _train_dataset(config, manifest, "phase1")
     validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
     _fixed_validation_bank(validation_dataset, config["monitor"].get("validation_bank_size", 64))
     validation_loader = _loader(config, validation_dataset, config["phase1"]["batch_size"], train=False)
@@ -889,7 +910,9 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     phase1_model, parent_payload = _load_phase1_for_phase2(config, manifest, checkpoint, device)
     seed_everything(config["phase2"]["decoder_initialization_seed"])
     system = RestorationSystem(
-        phase1_model.backbone, phase1_model.normalizer, build_decoders(config)
+        phase1_model.backbone, phase1_model.normalizer, build_decoders(config),
+        # phase2.decoder_predictor_input: the trained phase-1 predictor stays, frozen.
+        *phase2_latent_modules(config, phase1_model),
     )
     del phase1_model, parent_payload
     if init_checkpoint:
@@ -909,6 +932,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Decoder initialization uses a different frozen backbone")
         if metadata.get("frozen_normalizer_hash") != state_dict_hash(system.normalizer):
             raise ValueError("Decoder initialization uses a different IMU normalizer")
+        if metadata.get("backbone_finetuned"):
+            # Its decoders learned on the fine-tuned backbone, which a new run does not load.
+            raise ValueError("Decoder initialization comes from a run whose backbone was fine-tuned (LP-FT); "
+                             "its decoders do not fit the phase-1 backbone")
         prefix = "decoders."
         decoder_state = {
             key[len(prefix):]: value for key, value in initialized["system"].items()
@@ -935,13 +962,17 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             raise ValueError("Phase-2 resume manifest differs from training data")
         if payload["metadata"].get("frozen_backbone_hash") != trainer.frozen_backbone_hash:
             raise ValueError("Phase-2 resume checkpoint has a different phase-1 parent")
+        # Before the optimizer state: past backbone_finetune_after_updates it has two groups.
+        if payload["metadata"].get("latent_predictor_hash") != trainer.latent_predictor_hash:
+            raise ValueError("Phase-2 resume checkpoint has a different phase-1 predictor")
+        trainer.successful_updates = int(payload["successful_updates"])
+        trainer.prepare_backbone_finetune()
         system.load_state_dict(payload["system"], strict=True)
-        trainer.assert_backbone_frozen()
+        trainer.assert_backbone_frozen()             # also the predictor it just loaded
         trainer.decoder_initialization_hash = payload["metadata"]["decoder_initialization_hash"]
         trainer.optimizer.load_state_dict(payload["optimizer"])
         if trainer.amp and payload.get("scaler"):
             trainer.scaler.load_state_dict(payload["scaler"])
-        trainer.successful_updates = int(payload["successful_updates"])
         expected_microbatches = trainer.successful_updates * config["phase2"]["gradient_accumulation"]
         if payload["metadata"].get("data_microbatches_consumed") != expected_microbatches:
             raise ValueError("Phase-2 resume checkpoint has inconsistent data progress")
@@ -954,8 +985,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         if "full_guard" in config["phase2"] and guard_reference is None:
             raise ValueError("Guarded phase-2 resume checkpoint lacks its initialization reference")
 
-    train_dataset = _dataset(config, manifest, "train", fixed_realization=False,
-                             scenarios=config["phase2"].get("train_scenarios"))
+    train_dataset = _train_dataset(config, manifest, "phase2", scenarios=config["phase2"].get("train_scenarios"))
     validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
     _fixed_validation_bank(validation_dataset, config["runtime"]["validation_batches"] * config["phase2"]["batch_size"])
     validation_loader = _loader(config, validation_dataset, config["phase2"]["batch_size"], train=False)
@@ -1160,13 +1190,19 @@ def _system_from_phase2(checkpoint: str, device: torch.device) -> tuple[Restorat
     if metadata.get("configuration_hash") != configuration_hash(config, "phase2"):
         raise ValueError("Phase-2 checkpoint config hash mismatch")
     backbone = build_backbone(config)
-    system = RestorationSystem(backbone, ImuNormalizer(), build_decoders(config)).to(device)
+    system = RestorationSystem(backbone, ImuNormalizer(), build_decoders(config),
+                               *phase2_latent_modules(config)).to(device)
     system.load_state_dict(payload["system"], strict=True)
     system.freeze_backbone()
-    if state_dict_hash(system.backbone) != metadata["frozen_backbone_hash"]:
+    # After LP-FT the backbone is the fine-tuned one; frozen_backbone_hash names its parent.
+    expected_backbone = (metadata["backbone_current_hash"] if metadata.get("backbone_finetuned")
+                         else metadata["frozen_backbone_hash"])
+    if state_dict_hash(system.backbone) != expected_backbone:
         raise ValueError("Phase-2 frozen backbone hash mismatch")
     if state_dict_hash(system.normalizer) != metadata["frozen_normalizer_hash"]:
         raise ValueError("Phase-2 frozen normalizer hash mismatch")
+    if latent_predictor_hash(system) != metadata.get("latent_predictor_hash"):
+        raise ValueError("Phase-2 latent predictor hash mismatch")
     if state_dict_hash(system.decoders) != metadata["decoder_current_hash"]:
         raise ValueError("Phase-2 decoder hash mismatch")
     system.eval()
@@ -1314,6 +1350,7 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
     yy, xx = np.mgrid[0:height, 0:width]
     image_corruptor, imu_corruptor = build_corruptors(config)
     clean_images, noisy_images, clean_imus, noisy_imus = [], [], [], []
+    noise_free_images, degradations = [], []
     timestamps = np.arange(length, dtype=np.float64) * 0.01
     for sample in range(batch_size):
         clean = np.stack(
@@ -1328,7 +1365,7 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
         imu_clean = np.stack(
             [np.sin(time * (axis + 1) + sample * 0.2) for axis in range(6)], axis=-1
         ).astype(np.float32)
-        noisy_image, _ = image_corruptor(
+        noisy_image, noise_free, image_parameters = image_corruptor.render_with_sensor_reference(
             clean,
             split="smoke",
             realization=0,
@@ -1339,6 +1376,8 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
             gyro=imu_clean[:, 3:6].astype(np.float64),
             imu_times=time,
         )
+        noise_free_images.append(torch.from_numpy(noise_free.transpose(2, 0, 1)))
+        degradations.append(torch.from_numpy(degradation_vector(image_parameters)))
         noisy_imu, _ = imu_corruptor.window(
             imu_clean,
             time,
@@ -1359,6 +1398,8 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
         "imu_noisy_phys": torch.stack(noisy_imus).float(),
         "image_time": torch.full((batch_size,), float(timestamps.mean())),
         "imu_times": torch.from_numpy(timestamps).float().repeat(batch_size, 1),
+        "image_noise_free": torch.stack(noise_free_images).float(),
+        "image_degradation": torch.stack(degradations).float(),
         "sample_id": [f"synthetic-{index}" for index in range(batch_size)],
     }
 
@@ -1376,7 +1417,8 @@ def command_smoke(args: argparse.Namespace) -> None:
     trainer1 = Phase1Trainer(model, config, device, "synthetic")
     phase1_metrics = trainer1.step(batch)
     seed_everything(config["phase2"]["decoder_initialization_seed"])
-    system = RestorationSystem(model.backbone, model.normalizer, build_decoders(config))
+    system = RestorationSystem(model.backbone, model.normalizer, build_decoders(config),
+                               *phase2_latent_modules(config, model))
     trainer2 = Phase2Trainer(system, config, device, "synthetic-phase1", "synthetic")
     phase2_batch = {key: value[:1] if isinstance(value, torch.Tensor) else value[:1] for key, value in batch.items()}
     phase2_metrics = trainer2.step([phase2_batch])
