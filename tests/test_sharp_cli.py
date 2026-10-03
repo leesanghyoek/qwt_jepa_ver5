@@ -63,6 +63,9 @@ def test_the_plan_trains_resumes_and_evaluates(tmp_path, capsys):
     phase1 = load_checkpoint(output / "phase1/last.pt")
     assert any(key.startswith("degradation_head.") for key in phase1["model"])
     assert any("degradation" in record for record in _records(output / "phase1/train.jsonl"))
+    # Every update says how long it waited for data (tests/test_training_speed.py).
+    assert all(record["data_wait_seconds"] >= 0 for record in _records(output / "phase1/train.jsonl")
+               if "loss" in record and "successful_updates" in record)
 
     last = output / "phase2/last.pt"
     assert _run_until_done(["train-phase2", *common, "--backbone-checkpoint",
@@ -74,6 +77,7 @@ def test_the_plan_trains_resumes_and_evaluates(tmp_path, capsys):
                  if k.startswith("latent_predictor.")}
     assert predictor and all(torch.equal(v, phase1["model"][f"image_predictor.{k}"]) for k, v in predictor.items())
     assert any("imu_gyro_increment" in record for record in _records(output / "phase2/train.jsonl"))
+    assert any("data_wait_seconds" in record for record in _records(output / "phase2/train.jsonl"))
 
     evaluation = output / "eval"
     main(["evaluate", "--checkpoint", str(last), "--manifest", str(manifest), "--device", "cpu",

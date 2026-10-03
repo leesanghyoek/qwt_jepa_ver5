@@ -323,9 +323,26 @@ def _progress(update: int, maximum: int) -> str:
     return f"{update:>{width}}/{maximum} {100.0 * update / max(1, maximum):>3.0f}%"
 
 
-def _pace(started: float, first_update: int, update: int) -> str:
-    """Giay moi update tu luc tien trinh nay bat dau, tinh ca validation."""
-    return f"{(time.perf_counter() - started) / max(1, update - first_update):.2f} s/update"
+def _pace(started: float, first_update: int, update: int, waited: float | None = None) -> str:
+    """Giay moi update tu luc tien trinh nay bat dau, tinh ca validation.
+
+    ``waited``: tong giay vong train dung cho batch tiep theo (GPU ranh vi thieu du lieu).
+    Gan bang s/update la CPU/DataLoader dang ghim toc do; gan 0 la GPU.
+    """
+    updates = max(1, update - first_update)
+    pace = f"{(time.perf_counter() - started) / updates:.2f} s/update"
+    return pace if waited is None else f"{pace} (cho du lieu {waited / updates:.2f})"
+
+
+def _next_timed(batches: Iterator[Any]) -> tuple[Any, float]:
+    """The next batch and the seconds spent blocked on it.
+
+    Each update already reads its metrics back to the CPU, so the GPU is idle here:
+    this is the time the DataLoader costs the run.
+    """
+    fetch = time.perf_counter()
+    batch = next(batches)
+    return batch, time.perf_counter() - fetch
 
 
 def _memory_mib() -> dict[str, float]:
@@ -790,9 +807,12 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     share_rank0_rng()                             # the reference drew on rank 0 only
     maximum = config["phase1"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
-    started, first_update = time.perf_counter(), trainer.successful_updates
+    started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
     while trainer.successful_updates < maximum:
-        metrics = trainer.step(next(batches))
+        batch, wait = _next_timed(batches)
+        waited += wait
+        metrics = trainer.step(batch)
+        metrics["data_wait_seconds"] = wait
         log.write(metrics)
         if metrics.get("skipped"):
             raise FloatingPointError(f"Phase-1 update skipped: {metrics}")
@@ -801,7 +821,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             anchor = f" recon={metrics['reconstruction']:.6f}" if "reconstruction" in metrics else ""
             print(
                 f"phase1 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" jepa={metrics['jepa']:.6f}{anchor} {_pace(started, first_update, update)}"
+                f" jepa={metrics['jepa']:.6f}{anchor} {_pace(started, first_update, update, waited)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             if not lead:
@@ -1059,10 +1079,13 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         import shutil
         shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
     share_rank0_rng()                             # the guard reference drew on rank 0 only
-    started, first_update = time.perf_counter(), trainer.successful_updates
+    started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
     while trainer.successful_updates < maximum:
-        group = [next(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
-        metrics = trainer.step(group)
+        timed = [_next_timed(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
+        wait = sum(seconds for _, seconds in timed)
+        waited += wait
+        metrics = trainer.step([batch for batch, _ in timed])
+        metrics["data_wait_seconds"] = wait
         log.write(metrics)
         if metrics.get("skipped"):
             raise FloatingPointError(f"Phase-2 update skipped: {metrics}")
@@ -1070,7 +1093,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
                 f"phase2 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" image_l1={metrics['image_l1']:.6f} {_pace(started, first_update, update)}"
+                f" image_l1={metrics['image_l1']:.6f} {_pace(started, first_update, update, waited)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             if not lead:

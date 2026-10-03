@@ -37,6 +37,18 @@ Chạy: notebook `qwt-jaco-jepa-sharp.ipynb`, `RUN = 'p20_gray'`, phase 1 5000 u
 1000 update cuối). Phase 2 của p19 trên 2 × T4: PSNR validation 23,02 dB ở update 4000 và 23,96 dB ở 11000, tức
 +0,9 dB sau 7000 update (2,6 giờ, 1,32 s/update); người dùng chọn dừng ở 4000.
 
+Tăng tốc trên 2 × T4, không đổi recipe hay hash:
+- **Precision phase 2 theo số đo**: notebook đặt lại `PRECISION = 'auto'` (đã có ở notebook infomax, notebook p19
+  bỏ đi và ghi cứng fp32). Cell 4 chạy `tools/decoder_speed_probe.py` với model của RUN, phần batch mỗi GPU, fp32 /
+  fp16 × có / không cuDNN benchmark, rồi chọn tổ hợp nhanh hơn fp32 ít nhất 5%. Lý do ghi cứng fp32 là p16 fp16
+  chậm gấp 5 lần, nhưng lần đó chạy DataParallel; DDP chưa từng được đo. cuDNN benchmark chỉ bật cho phase 2.
+- **Log chờ dữ liệu**: mỗi update ghi `data_wait_seconds` (giây vòng train đứng chờ batch, lúc GPU rảnh) vào
+  `train.jsonl`, và dòng tiến độ in `1.32 s/update (cho du lieu 0.03)`. Gần bằng s/update là CPU ghim tốc độ.
+- **Cache IMU đủ mọi quỹ đạo** (trần 2048): nhiễu IMU dựng cho cả quỹ đạo rồi mới cắt cửa sổ, mà cache cũ giữ 4–8
+  quỹ đạo trong khi batch rút ngẫu nhiên từ hàng trăm, nên gần như mẫu nào cũng dựng lại. Đo trên CPU máy này:
+  phase 1 41,7 → 35,5 ms/mẫu, phase 2 38,8 → 30,3 ms/mẫu; dữ liệu giống hệt từng bit
+  (`tests/test_training_speed.py`). Phase 1 cần ~25 mẫu/s trên 4 vCPU nên được lợi nhiều nhất.
+
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
 nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent

@@ -73,6 +73,11 @@ class _TrajectoryCache:
         return self.values[key]
 
 
+# Moi worker giu IMU sach va IMU da lam hong cua toi da bay nhieu quy dao. Quy dao ~4000
+# mau IMU ton ~0,4 MB cho ca hai ban, nen 2048 quy dao la tran ~0,8 GB moi worker.
+MAX_CACHED_TRAJECTORIES = 2048
+
+
 class PairedCameraImuDataset(Dataset):
     def __init__(
         self,
@@ -106,7 +111,14 @@ class PairedCameraImuDataset(Dataset):
         self.imu_mode = imu_mode
         self.scenarios = scenarios
         self.scenario_seed = scenario_seed
-        self.cache = _TrajectoryCache(cache_size)
+        # Ca hai cache giu MOI quy dao cua split (toi da MAX_CACHED_TRAJECTORIES). Nhieu IMU duoc
+        # dung cho ca quy dao, theo seed (split, realization, quy dao, mode), roi moi cat cua so;
+        # voi cache 4-8 quy dao ma batch lay ngau nhien tu hang tram quy dao, gan nhu mau nao cung
+        # dung lai tu dau (~10 ms/mau, 15-22% thoi gian CPU cua mot mau). Ket qua giong het tung bit.
+        keys = {getattr(sample, "trajectory_key", None) for sample in samples} - {None}
+        trajectories = min(len(keys), MAX_CACHED_TRAJECTORIES)
+        self.cache = _TrajectoryCache(max(cache_size, trajectories))
+        self.imu_corruptor.cache_size = max(self.imu_corruptor.cache_size, trajectories)
 
     def set_realization(self, realization: int) -> None:
         self.realization = int(realization)
