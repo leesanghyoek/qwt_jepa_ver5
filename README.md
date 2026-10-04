@@ -60,6 +60,12 @@ giữ nguyên. Gate FAIL dưới DDP giờ kết thúc trong vài giây (`tests/
 −6) sau một checkpoint mới thì resume từ đó. (Lần trước tôi đổ cho DataLoader fork từ tiến trình nhiều luồng và
 chuyển sang `forkserver`; sai, đã gỡ.)
 
+**Gate với centre norm (sửa).** Ba lần FAIL ở trên là báo động giả. Gate so RMS thô của đặc trưng với lúc khởi tạo
+(khoảng [0,1; 10]). GroupNorm khởi tạo ở cỡ 1 (FI 0,859 đo trên TartanAir), còn centre norm, norm chỉ trừ trung
+bình của p19 (b), khởi tạo ở FI 1,9e-4, FU 5,8e-4, ZI 0,016, ZU 0,018. Nên FI sau train ≈ 3,4 (cùng cỡ GroupNorm) bị
+đọc thành ×18 130. Với `model.encoder_norm: centre`, gate giờ kiểm chính RMS thô nằm trong khoảng đó; GroupNorm giữ
+quy tắc tỉ lệ cũ. Không có khoá mới, không đổi hash (`test_a_centre_norm_gate_bounds_the_raw_scale_itself`).
+
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
 nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent

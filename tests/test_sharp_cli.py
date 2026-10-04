@@ -33,6 +33,9 @@ def _sharp_smoke():
                             backbone_finetune_after_updates=1, backbone_finetune_lr_scale=0.1,
                             augment_hflip=True, imu_increment_weight=0.5, imu_increment_windows=[8, 32])
     config["runtime"]["restart_above_rss_gib"] = 1e-6          # restart after every checkpoint
+    # Two updates cannot bring a centre-norm encoder from ~1e-4 to O(1), and under centre norm
+    # the gate bounds the raw RMS itself (test_a_centre_norm_gate_bounds_the_raw_scale_itself).
+    config["monitor"]["raw_scale_ratio_warning"] = [1e-6, 1e6]
     return config
 
 

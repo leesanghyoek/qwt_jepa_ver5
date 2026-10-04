@@ -66,6 +66,21 @@ def test_latent_gate_detects_collapsed_diversity():
     assert not passed and reasons
 
 
+def test_a_centre_norm_gate_bounds_the_raw_scale_itself():
+    """p20 on Kaggle: centre-norm features start ~1e-4 and train to ~1-3, so the ratio to
+    init read x18000 and failed a healthy run. Under centre norm the band bounds the raw
+    RMS; GroupNorm keeps the ratio to init."""
+    monitor = load_config("configs/smoke.yaml")["monitor"]
+    reference = {"validation_noisy_FI_raw_rms": 1.87e-4, "validation_noisy_FI_same_position_std": 1e-4}
+    trained = {"validation_noisy_FI_raw_rms": 3.4, "validation_noisy_FI_same_position_std": 1.0}
+    assert not _latent_gate(reference, trained, monitor)[0]                       # GroupNorm rule
+    assert _latent_gate(reference, trained, monitor, absolute_scale=True) == (True, [])
+    for runaway in (1e-3, 50.0):                                                   # collapse, explosion
+        passed, reasons = _latent_gate(reference, dict(trained, validation_noisy_FI_raw_rms=runaway),
+                                       monitor, absolute_scale=True)
+        assert not passed and "outside" in reasons[0]
+
+
 def test_encoder_skips_requires_an_explicit_merge_kind():
     """Config cu khong co skip_gating phai bi chan o day, khong phai o load_state_dict.
 

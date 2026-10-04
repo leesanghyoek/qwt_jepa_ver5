@@ -556,8 +556,17 @@ def _validate_latent(
 
 
 def _latent_gate(
-    reference: dict[str, float], current: dict[str, float], monitor: dict[str, Any]
+    reference: dict[str, float], current: dict[str, float], monitor: dict[str, Any],
+    absolute_scale: bool = False,
 ) -> tuple[bool, list[str]]:
+    """PASS unless diversity fell or the raw feature scale left its band.
+
+    ``absolute_scale`` (model.encoder_norm: centre): the band bounds the raw RMS itself
+    instead of its ratio to the initialisation. A norm that only subtracts the mean
+    starts the encoders tiny -- FI RMS 1.9e-4 at init against 0.86 with GroupNorm,
+    measured on TartanAir -- so p20's trained FI of ~3.4 read as x18000 and failed
+    the gate three times while being as large as a GroupNorm feature.
+    """
     relative_floor = float(monitor["relative_rank_std_warning"])
     raw_low, raw_high = (float(value) for value in monitor["raw_scale_ratio_warning"])
     reasons: list[str] = []
@@ -574,7 +583,10 @@ def _latent_gate(
             continue
         denominator = max(abs(reference[key]), 1e-12)
         ratio = current[key] / denominator
-        if key.endswith("raw_rms"):
+        if key.endswith("raw_rms") and absolute_scale:
+            if current[key] < raw_low or current[key] > raw_high:
+                reasons.append(f"{key} scale {current[key]:.4g} outside [{raw_low},{raw_high}]")
+        elif key.endswith("raw_rms"):
             if ratio < raw_low or ratio > raw_high:
                 reasons.append(f"{key} scale ratio {ratio:.4g} outside [{raw_low},{raw_high}]")
         elif ratio < relative_floor:
@@ -848,7 +860,9 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 validation = _validate_latent(
                     model, validation_loader, device, len(validation_loader), trainer.evaluation_model
                 )
-                passed, gate_reasons = _latent_gate(reference, validation, config["monitor"])
+                passed, gate_reasons = _latent_gate(
+                    reference, validation, config["monitor"],
+                    absolute_scale=config["model"].get("encoder_norm", "group") == "centre")
                 warning_checks = 0 if passed else warning_checks + 1
                 gate_status = "PASS" if passed else (
                     "FAIL" if warning_checks >= config["monitor"]["consecutive_warning_checks"] else "WARN"
