@@ -68,3 +68,13 @@ def test_partial_explicit_splits_are_rejected(tmp_path):
                     Trajectory(tmp_path, "B", "Data_easy", "P000", None)]
     with pytest.raises(ValueError, match="Mixed explicit"):
         assign_splits(trajectories)
+
+
+def test_threads_build_the_very_manifest_one_thread_does(tmp_path):
+    """build_manifest reads trajectories on a thread pool (Kaggle's /kaggle/input waits on
+    network storage for every file); the manifest and its hash must not depend on it."""
+    from qjepa.data.manifest import build_manifest
+    from test_kaggle_workflow import _write_dataset
+    _write_dataset(tmp_path)
+    one, many = (build_manifest(tmp_path, workers=workers) for workers in (1, 8))
+    assert one["meta"] == many["meta"] and one["samples"] == many["samples"]

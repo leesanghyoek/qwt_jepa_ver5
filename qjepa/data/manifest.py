@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -165,6 +166,7 @@ def pair_trajectory(
         return [], counters
     centres = 0.5 * (imu_times[: len(imu_times) - window + 1] + imu_times[window - 1 :])
     median_dt = float(np.median(np.diff(imu_times)))
+    trajectory_path = str(trajectory.path.resolve())     # once, not once per image
     samples: list[PairedSample] = []
     for image_index, (image_path, image_time) in enumerate(zip(images, camera_times)):
         position = int(np.searchsorted(centres, image_time))
@@ -189,7 +191,7 @@ def pair_trajectory(
                 environment=trajectory.environment,
                 difficulty=trajectory.difficulty,
                 trajectory_id=trajectory.trajectory_id,
-                trajectory_path=str(trajectory.path.resolve()),
+                trajectory_path=trajectory_path,
                 image_path=str(image_path.resolve()),
                 image_index=image_index,
                 image_time=float(image_time),
@@ -205,17 +207,19 @@ def pair_trajectory(
 
 
 def compute_train_normalization(
-    trajectories: list[Trajectory], assignments: dict[str, str]
+    trajectories: list[Trajectory], assignments: dict[str, str], workers: int = 1
 ) -> dict[str, object]:
     total = np.zeros(6, dtype=np.float64)
     total_square = np.zeros(6, dtype=np.float64)
     count = 0
     used_stream_hashes: set[str] = set()
     used_trajectories: list[str] = []
-    for trajectory in trajectories:
-        if assignments[trajectory.key] != "train":
-            continue
-        imu, timestamps = trajectory.load_imu()
+    train = [trajectory for trajectory in trajectories if assignments[trajectory.key] == "train"]
+    # Read in parallel, sum in the original order: the same floats as one thread.
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        loaded = pool.map(lambda trajectory: trajectory.load_imu(), train)
+        streams = list(zip(train, loaded))
+    for trajectory, (imu, timestamps) in streams:
         identity = hashlib.sha256(imu.tobytes() + timestamps.tobytes()).hexdigest()
         if identity in used_stream_hashes:
             continue
@@ -255,13 +259,20 @@ def build_manifest(
     ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
     seed: int = 73128,
     split_rule: str = "hash",
+    workers: int = 16,
 ) -> dict[str, object]:
+    """``workers`` threads read the trajectories: on Kaggle's /kaggle/input every file read
+    and every symlink resolved waits on network storage, and one thread at a time took
+    28 to 60+ minutes for the 1122 trajectories of the 640 shards. Results are collected
+    in the original order, so the manifest and its hash do not depend on ``workers``."""
     trajectories = discover_trajectories(root)
     assignments = assign_splits(trajectories, ratios, seed, split_rule)
     samples: dict[str, list[PairedSample]] = {"train": [], "valid": [], "test": []}
     audit = []
-    for trajectory in trajectories:
-        paired, stats = pair_trajectory(trajectory, assignments[trajectory.key], window)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        paired_all = list(pool.map(
+            lambda trajectory: pair_trajectory(trajectory, assignments[trajectory.key], window), trajectories))
+    for trajectory, (paired, stats) in zip(trajectories, paired_all):
         samples[assignments[trajectory.key]].extend(paired)
         audit.append(stats)
     meta = {
@@ -276,7 +287,7 @@ def build_manifest(
             split: sorted(item.key for item in trajectories if assignments[item.key] == split)
             for split in samples
         },
-        "normalization": compute_train_normalization(trajectories, assignments),
+        "normalization": compute_train_normalization(trajectories, assignments, workers),
         "pairing_audit": audit,
     }
     meta["manifest_hash"] = manifest_hash(samples, meta["normalization"])

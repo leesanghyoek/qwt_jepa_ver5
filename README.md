@@ -79,6 +79,13 @@ sạch và TI 1,16, FU 0,93–0,98, đích JEPA sau LayerNorm 1,00. Hệ số gi
 đúng mục đích của (b). Chỉ run mới hiệu chỉnh; run resume lấy hệ số từ checkpoint
 (`tests/test_centre_norm_calibration.py`).
 
+**Manifest trên Kaggle.** Dựng manifest cho 1122 quỹ đạo của bộ 640 mất 28 phút ở một phiên và hơn 1 giờ ở phiên
+sau: mỗi file `.npy`, mỗi lần liệt kê thư mục ảnh và mỗi `resolve()` qua symlink đều chờ ổ mạng `/kaggle/input`,
+và trước đây chạy tuần tự. `build_manifest` giờ đọc quỹ đạo trên 16 luồng và resolve đường dẫn quỹ đạo một lần
+thay vì một lần mỗi ảnh. Manifest và hash không đổi (`test_threads_build_the_very_manifest_one_thread_does`), nhưng
+mức nhanh hơn trên Kaggle chưa đo được. Chắc chắn hơn: Cell 5 dùng lại `manifests/kaggle` của một run trước nếu
+archive đã giải nén của run đó được gắn làm Input, cùng dataset root và ảnh vẫn còn.
+
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
 nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent
