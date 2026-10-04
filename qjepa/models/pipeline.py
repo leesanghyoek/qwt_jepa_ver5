@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from ..data.normalize import ImuNormalizer
 from .backbone import LatentBatch, MultimodalBackbone
+from .blocks import calibrate_centre_norms
 from .decoders import PIXEL_IMAGE_DECODERS, LatentDecoders
 from .predictors import (PREDICTOR_TYPES, DegradationHead, LatentPredictor, SpatialPredictor, image_tokens,
                          imu_tokens)
@@ -99,6 +100,26 @@ class LatentPretrainingModel(nn.Module):
         if self.decoders is not None:
             parameters += list(self.decoders.parameters())
         return parameters
+
+    @torch.no_grad()
+    def calibrate_centre_norms(self, image_noisy: torch.Tensor, imu_noisy_phys: torch.Tensor,
+                               image_clean: torch.Tensor, imu_clean_phys: torch.Tensor) -> dict[str, list[float]]:
+        """model.encoder_norm_calibration: start both centre-norm encoders at O(1) on this batch
+        (see blocks.calibrate_centre_norms), then copy them into the EMA teachers.
+
+        Noisy and clean together: the online encoder reads the noisy pair and its EMA teacher,
+        with the same weights, the clean one -- clean frames are brighter, and the encoder
+        sees magnitude -- so both land around 1 instead of one of them."""
+        image_coeff, _ = self.backbone.image_transform.analysis(torch.cat((image_noisy, image_clean)))
+        imu_coeff, _ = self.backbone.imu_transform.analysis(
+            self.normalizer.normalize(torch.cat((imu_noisy_phys, imu_clean_phys))))
+        measured = {"image": calibrate_centre_norms(self.backbone.image_encoder, image_coeff),
+                    "imu": calibrate_centre_norms(self.backbone.imu_encoder, imu_coeff)}
+        if not measured["image"] or not measured["imu"]:
+            raise ValueError("encoder_norm_calibration needs centre-norm encoders")
+        self.teachers.image_encoder.load_state_dict(self.backbone.image_encoder.state_dict())
+        self.teachers.imu_encoder.load_state_dict(self.backbone.imu_encoder.state_dict())
+        return measured
 
     def reconstruct(self, latent: LatentBatch) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict clean coefficients from the noisy latent, as phase 2 will."""

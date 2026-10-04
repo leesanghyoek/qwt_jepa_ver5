@@ -467,6 +467,11 @@ def _validate_sharpness(config: dict[str, Any]) -> None:
     phase1, phase2 = config["phase1"], config["phase2"]
     if config["model"].get("encoder_norm", "group") not in ENCODER_NORMS:
         raise ValueError(f"model.encoder_norm must be one of {ENCODER_NORMS}")
+    calibration = config["model"].get("encoder_norm_calibration", False)
+    if not isinstance(calibration, bool):
+        raise ValueError("model.encoder_norm_calibration must be true or false")
+    if calibration and config["model"].get("encoder_norm", "group") != "centre":
+        raise ValueError("model.encoder_norm_calibration scales centre norms; set model.encoder_norm: centre")
     image_input = config["model"].get("image_input", "rgb")
     if image_input not in IMAGE_INPUTS:
         raise ValueError(f"model.image_input must be one of {IMAGE_INPUTS}")

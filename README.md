@@ -66,6 +66,19 @@ bình của p19 (b), khởi tạo ở FI 1,9e-4, FU 5,8e-4, ZI 0,016, ZU 0,018. 
 đọc thành ×18 130. Với `model.encoder_norm: centre`, gate giờ kiểm chính RMS thô nằm trong khoảng đó; GroupNorm giữ
 quy tắc tỉ lệ cũ. Không có khoá mới, không đổi hash (`test_a_centre_norm_gate_bounds_the_raw_scale_itself`).
 
+**Centre norm khởi tạo quá nhỏ (sửa, khoá mới).** Đường loss phase 1 của p20 đi xuống, lên rồi lại xuống: JEPA
+xuống 0,085 ở update ~500, lên ~0,22 quanh update 800–1000 rồi đứng đó. Nguyên nhân là centre norm (b) không đưa
+độ lớn về 1, mà mỗi conv (init mặc định) và mỗi SiLU lại thu nhỏ nó: encoder khởi tạo ở FI RMS 1,9e-4 (GroupNorm
+0,86). Loss JEPA so token sau LayerNorm với eps 1e-5, nên đích chỉ còn RMS 0,09 thay vì 1. JEPA thấp giả chừng nào
+đặc trưng còn nhỏ, và chỉ lộ mức khó thật (~0,22) khi đặc trưng lớn lên 10–30 lần (đích sau LayerNorm 0,61–0,88).
+Trong lúc đó số hạng variance ở mức tối đa (0,99, GroupNorm 0,44), và encoder mất hàng nghìn update để lớn ×10⁴.
+`model.encoder_norm_calibration: true` (đặt trong `kaggle_sharp.yaml`, p20 thừa hưởng; thiếu khoá thì như cũ):
+một lần lúc khởi tạo, trên bank validation cố định (ảnh nhiễu và ảnh sạch), mỗi lớp centre norm nhận một hệ số cố
+định để đầu ra có RMS 1, lần lượt từng lớp (LSUV). Teacher được chép lại theo. Đo trên TartanAir: FI nhiễu 0,46, FI
+sạch và TI 1,16, FU 0,93–0,98, đích JEPA sau LayerNorm 1,00. Hệ số giống nhau cho mọi mẫu nên x và 3x vẫn khác nhau,
+đúng mục đích của (b). Chỉ run mới hiệu chỉnh; run resume lấy hệ số từ checkpoint
+(`tests/test_centre_norm_calibration.py`).
+
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
 nhiễu: −19,1 điểm mịn), và các số âm "ảnh hỏng + ZI/tầng 1/8/tầng 1/4" của p19 không nói gì về latent

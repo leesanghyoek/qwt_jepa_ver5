@@ -14,6 +14,12 @@ runtime:
 
 model:
   encoder_norm: centre
+  # Centre norm giu do lon dau vao, ma moi conv (init mac dinh) va SiLU deu thu nho no: encoder khoi tao
+  # o FI RMS 1,9e-4 (GroupNorm: 0,86). JEPA so token sau LayerNorm (eps 1e-5) nen dich chi con RMS 0,09
+  # thay vi 1 (loss JEPA thap gia ~800 update dau roi tang), so hang variance o muc toi da, encoder mat
+  # hang nghin update de lon x10^4, va gate cu bao FAIL gia. Hieu chinh mot lan luc khoi tao (LSUV): moi
+  # lop centre norm mot he so co dinh de dau ra RMS 1 tren bank validation -> FI 0,89, FU 0,95.
+  encoder_norm_calibration: true
 
 encoder_sensitivity:
   noise_direction: sensor_noise

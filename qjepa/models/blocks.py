@@ -42,6 +42,37 @@ class CentreNorm(nn.Module):
         return centred * self.weight.reshape(shape) + self.bias.reshape(shape)
 
 
+@torch.no_grad()
+def calibrate_centre_norms(encoder: nn.Module, inputs: torch.Tensor) -> list[float]:
+    """Scale each CentreNorm of ``encoder``, in forward order, so its output has RMS 1 on ``inputs``.
+
+    A CentreNorm keeps its input's scale, and every conv of the default PyTorch init
+    and every SiLU shrinks it, so a centre-norm encoder starts tiny: FI RMS 1.9e-4 on
+    TartanAir (GroupNorm: 0.86). The JEPA loss then compares LayerNorm'd tokens below
+    LayerNorm's eps (targets of RMS 0.09 instead of 1: the early JEPA loss is low for
+    nothing), the variance term sits at its maximum, and the encoder spends thousands
+    of updates growing x10^4. One fixed gain per layer, the same for every sample,
+    starts it at O(1) and keeps what the centre norm is for: x and 3x still differ.
+    Returns the RMS each layer had before its gain was set (layer-sequential, LSUV).
+    """
+    measured: list[float] = []
+    for norm in [module for module in encoder.modules() if isinstance(module, CentreNorm)]:
+        seen: dict[str, torch.Tensor] = {}
+
+        def record(_module, _inputs, output):           # returns None: the output is left as it is
+            seen["rms"] = output.square().mean().sqrt()
+
+        hook = norm.register_forward_hook(record)
+        try:
+            encoder(inputs)
+        finally:
+            hook.remove()
+        rms = float(seen["rms"])
+        measured.append(rms)
+        norm.weight.div_(max(rms, 1e-12))
+    return measured
+
+
 def _group_norm(channels: int, groups: int, norm: str = "group") -> nn.Module:
     if channels % groups:
         raise ValueError(f"{channels} channels are not divisible by {groups} groups")

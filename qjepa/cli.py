@@ -777,6 +777,21 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     seed_everything(config["phase1"]["initialization_seed"])
     normalizer = build_normalizer(manifest["meta"])
     model = build_phase1_model(config, normalizer)
+    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    _fixed_validation_bank(validation_dataset, config["monitor"].get("validation_bank_size", 64))
+    validation_loader = _loader(config, validation_dataset, config["phase1"]["batch_size"], train=False)
+    if config["model"].get("encoder_norm_calibration", False) and not args.resume:
+        # Fresh runs only, on the whole fixed validation bank -- the same on every rank, and what
+        # the latent gate measures. Eight samples misjudge the IMU, whose scale varies by window.
+        # A resumed run loads its calibrated gains from the checkpoint.
+        bank = list(validation_loader)
+        measured = model.calibrate_centre_norms(
+            *(torch.cat([b[key] for b in bank]) for key in ("image_noisy", "imu_noisy_phys",
+                                                            "image_clean", "imu_clean_phys")))
+        if lead:
+            print("centre norm calibration | RMS before, first -> last layer:"
+                  f" image {measured['image'][0]:.2e} -> {measured['image'][-1]:.2e}"
+                  f" | IMU {measured['imu'][0]:.2e} -> {measured['imu'][-1]:.2e}")
     trainer = Phase1Trainer(model, config, device, manifest["meta"]["manifest_hash"])
     resume_payload = None
     if args.resume:
@@ -797,9 +812,6 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         restore_rng_state(resume_payload["rng"])
 
     train_dataset = _train_dataset(config, manifest, "phase1")
-    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
-    _fixed_validation_bank(validation_dataset, config["monitor"].get("validation_bank_size", 64))
-    validation_loader = _loader(config, validation_dataset, config["phase1"]["batch_size"], train=False)
     batches = _training_batch_stream(
         config,
         train_dataset,
