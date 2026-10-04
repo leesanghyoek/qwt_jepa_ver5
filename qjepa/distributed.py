@@ -18,7 +18,9 @@ import datetime
 import os
 import socket
 import sys
-from typing import Any, Callable
+import traceback
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 import torch
 import torch.distributed as dist
@@ -60,25 +62,49 @@ def any_rank(flag: bool) -> bool:
     return bool(value.item())
 
 
-def share_rank0_rng() -> None:
-    """Give every rank rank 0's CPU RNG states.
+def share_rank0_rng(abort: str | None = None) -> None:
+    """Give every rank rank 0's CPU RNG states -- or rank 0's reason to stop.
 
     Only rank 0 validates, and a validation DataLoader draws its worker seed from
     the global generator; without this the ranks would crop VGG's window in
     different places from the first validation on.
+
+    The other ranks wait here while rank 0 validates and saves alone. When rank 0
+    has to stop (a failed latent gate, an error while validating or saving), it
+    passes ``abort`` and every other rank raises it here. Rank 0 raising alone left
+    rank 1 in this broadcast until NCCL's 60-minute timeout: p20's phase 1 on
+    Kaggle lost three hours that way, once per failed gate check.
     """
-    if rank_and_world()[1] == 1:
+    rank, world = rank_and_world()
+    if world == 1:
         return
     import random
 
     import numpy as np
 
-    states = [(random.getstate(), np.random.get_state(), torch.random.get_rng_state())]
+    states = [(random.getstate(), np.random.get_state(), torch.random.get_rng_state(), abort)]
     dist.broadcast_object_list(states, src=0, device=_device())
-    python, numpy_state, torch_state = states[0]
+    python, numpy_state, torch_state, reason = states[0]
+    if reason is not None:
+        if rank:
+            raise RuntimeError(f"rank 0 stopped: {reason}")
+        return                                      # rank 0 raises its own error
     random.setstate(python)
     np.random.set_state(numpy_state)
     torch.random.set_rng_state(torch_state.cpu())
+
+
+@contextmanager
+def rank0_section() -> Iterator[None]:
+    """Wrap what rank 0 does alone before the next share_rank0_rng: if it fails, the
+    ranks waiting in that broadcast hear why and stop too. Passive on other ranks."""
+    try:
+        yield
+    except Exception as error:
+        rank, world = rank_and_world()
+        if world > 1 and rank == 0:
+            share_rank0_rng(abort=f"{type(error).__name__}: {error}")
+        raise
 
 
 def _free_port() -> int:
@@ -103,8 +129,17 @@ def _entry(rank: int, world: int, port: int, cuda: bool, target: Callable[[Any],
                             rank=rank, world_size=world, timeout=datetime.timedelta(minutes=60))
     try:
         target(args)
-    finally:
+    except SystemExit:
+        # Exit 75 and friends: every rank decided together (any_rank), so all are here.
         dist.destroy_process_group()
+        raise
+    except BaseException:
+        # Destroying the group can wait for a peer still inside a collective this rank
+        # will never join -- an hour, at NCCL's timeout. Leave now; spawn stops the rest.
+        traceback.print_exc()
+        sys.stderr.flush()
+        os._exit(1)
+    dist.destroy_process_group()
 
 
 def spawn(target: Callable[[Any], None], args: Any, world: int, cuda: bool) -> None:

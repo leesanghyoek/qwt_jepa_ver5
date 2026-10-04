@@ -47,7 +47,7 @@ from .evaluation.reporting import (
     evaluation_summary, image_panel, plot_training, save_imu_result, write_csv, write_json,
 )
 from .models import LatentPretrainingModel, RestorationSystem
-from .distributed import any_rank, rank_and_world, share_rank0_rng, spawn as spawn_ranks
+from .distributed import any_rank, rank0_section, rank_and_world, share_rank0_rng, spawn as spawn_ranks
 from .execution import Phase1Forward, RestorationForward, execution_metadata, parallel_forward, select_device_ids
 from .training.checkpoints import (
     atomic_torch_save,
@@ -177,14 +177,6 @@ def _loader(
         "persistent_workers": False,
         "generator": generator,
     }
-    if common["num_workers"] > 0 and rank_and_world()[1] > 1:
-        # Mot rank DDP co san luong watchdog/heartbeat NCCL va TCPStore, them luong pin-memory
-        # cua loader train khi rank 0 mo loader validation. fork() tu tien trinh nhieu luong co
-        # the lam worker con deadlock (Python 3.12+ canh bao dung dieu nay): tren Kaggle (Python
-        # 3.13, torch 2.10) rank 0 treo o validation phase 1 update 3000, rank 1 cho broadcast
-        # 60 phut roi NCCL huy run. forkserver fork worker tu mot tien trinh phu mot luong. Du
-        # lieu khong doi: moi corruption seed theo tung mau, khong theo worker.
-        common["multiprocessing_context"] = "forkserver"
     if batch_sampler is not None:
         return DataLoader(batch_sampler=batch_sampler, **common)
     return DataLoader(
@@ -380,7 +372,7 @@ def _memory_mib() -> dict[str, float]:
             pass
         return found
 
-    # Moi tien trinh con chau, khong chi con truc tiep: duoi DDP worker la con cua forkserver.
+    # Moi tien trinh con chau, khong chi con truc tiep (vd. worker cua mot forkserver).
     children, pending, seen = 0.0, child_pids("self"), set()
     while pending:
         pid = pending.pop()
@@ -806,24 +798,26 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         world=world,
     )
     output = Path(args.output or config["runtime"]["output_dir"]) / "phase1"
-    if lead:
-        _prepare_run(output, args.resume, trainer.successful_updates)
-        _write_resolved(config, output)
-        write_json(output / "execution.json", execution)
-        write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
-    log = _Jsonl(output / "train.jsonl" if lead else None)
-    if resume_payload is None:
-        reference = _validate_latent(
-            model, validation_loader, device, len(validation_loader), trainer.evaluation_model
-        ) if lead else {}
-        warning_checks = 0
-        log.write({"event": "initialization_reference", **reference})
-    else:
-        saved_metrics = resume_payload.get("latent_metrics", {})
-        if "reference" not in saved_metrics:
-            raise ValueError("Resume checkpoint lacks the initialization latent reference")
-        reference = saved_metrics["reference"]
-        warning_checks = int(saved_metrics.get("consecutive_warning_checks", 0))
+    # Chi rank 0: mot loi o day phai toi duoc rank dang cho share_rank0_rng ben duoi.
+    with rank0_section():
+        if lead:
+            _prepare_run(output, args.resume, trainer.successful_updates)
+            _write_resolved(config, output)
+            write_json(output / "execution.json", execution)
+            write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+        log = _Jsonl(output / "train.jsonl" if lead else None)
+        if resume_payload is None:
+            reference = _validate_latent(
+                model, validation_loader, device, len(validation_loader), trainer.evaluation_model
+            ) if lead else {}
+            warning_checks = 0
+            log.write({"event": "initialization_reference", **reference})
+        else:
+            saved_metrics = resume_payload.get("latent_metrics", {})
+            if "reference" not in saved_metrics:
+                raise ValueError("Resume checkpoint lacks the initialization latent reference")
+            reference = saved_metrics["reference"]
+            warning_checks = int(saved_metrics.get("consecutive_warning_checks", 0))
     share_rank0_rng()                             # the reference drew on rank 0 only
     maximum = config["phase1"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
@@ -849,47 +843,49 @@ def command_train_phase1(args: argparse.Namespace) -> None:
                 share_rank0_rng()
                 _restart_if_memory_high(config, _memory_mib(), update, maximum)
                 continue
-            validation = _validate_latent(
-                model, validation_loader, device, len(validation_loader), trainer.evaluation_model
-            )
-            passed, gate_reasons = _latent_gate(reference, validation, config["monitor"])
-            warning_checks = 0 if passed else warning_checks + 1
-            gate_status = "PASS" if passed else (
-                "FAIL" if warning_checks >= config["monitor"]["consecutive_warning_checks"] else "WARN"
-            )
-            memory = _memory_mib()
-            log.write(
-                {
-                    "successful_updates": update,
-                    "latent_gate_status": gate_status,
-                    "latent_gate_reasons": gate_reasons,
-                    **memory,
-                    **validation,
-                }
-            )
-            print(
-                f"  gate update={_progress(update, maximum)} {gate_status}"
-                f" | RSS {memory['rss_mib']:.0f} MiB"
-                f" + worker {memory['children_rss_mib']:.0f} MiB"
-            )
-            atomic_torch_save(
-                trainer.checkpoint_payload(
-                    serializable_config(config),
-                    latent_gate_status=gate_status,
-                    latent_metrics={
-                        "reference": reference,
-                        "current": validation,
-                        "gate_reasons": gate_reasons,
-                        "consecutive_warning_checks": warning_checks,
-                    },
-                ),
-                output / "last.pt",
-            )
-            if gate_status == "FAIL":
-                plot_training(output)
-                raise RuntimeError(
-                    "Latent diversity/scale gate failed on consecutive checks; inspect phase1/train.jsonl"
+            # Chi rank 0: gate FAIL hay loi validate/luu thi cac rank kia cung dung, khong cho 60 phut.
+            with rank0_section():
+                validation = _validate_latent(
+                    model, validation_loader, device, len(validation_loader), trainer.evaluation_model
                 )
+                passed, gate_reasons = _latent_gate(reference, validation, config["monitor"])
+                warning_checks = 0 if passed else warning_checks + 1
+                gate_status = "PASS" if passed else (
+                    "FAIL" if warning_checks >= config["monitor"]["consecutive_warning_checks"] else "WARN"
+                )
+                memory = _memory_mib()
+                log.write(
+                    {
+                        "successful_updates": update,
+                        "latent_gate_status": gate_status,
+                        "latent_gate_reasons": gate_reasons,
+                        **memory,
+                        **validation,
+                    }
+                )
+                print(
+                    f"  gate update={_progress(update, maximum)} {gate_status}"
+                    f" | RSS {memory['rss_mib']:.0f} MiB"
+                    f" + worker {memory['children_rss_mib']:.0f} MiB"
+                )
+                atomic_torch_save(
+                    trainer.checkpoint_payload(
+                        serializable_config(config),
+                        latent_gate_status=gate_status,
+                        latent_metrics={
+                            "reference": reference,
+                            "current": validation,
+                            "gate_reasons": gate_reasons,
+                            "consecutive_warning_checks": warning_checks,
+                        },
+                    ),
+                    output / "last.pt",
+                )
+                if gate_status == "FAIL":
+                    plot_training(output)
+                    raise RuntimeError(
+                        "Latent diversity/scale gate failed on consecutive checks; inspect phase1/train.jsonl"
+                    )
             share_rank0_rng()
             _restart_if_memory_high(config, memory, update, maximum)
     if lead:
@@ -1045,59 +1041,61 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         world=world,
     )
     output = Path(args.output or config["runtime"]["output_dir"]) / "phase2"
-    if lead:
-        _prepare_run(output, args.resume, trainer.successful_updates)
-    if lead and "full_guard" in config["phase2"] and guard_reference is None:
-        if blur_loader is None:
-            raise ValueError("Guarded phase 2 needs blur validation")
-        guard_reference = {
-            "full": _evaluate_with_overlap(
-                system, validation_loader, validation_dataset, device,
-                config["runtime"]["validation_batches"],
-                config["phase2"]["smooth_l1_beta"],
-                forward_model=trainer.evaluation_model,
-            ),
-            "blur": _validate_active_blur(system, blur_loader, device,
-                                            forward_model=trainer.evaluation_model),
-        }
-        print(
-            "  guarded init reference"
-            f" | full PSNR {guard_reference['full']['image_psnr_db']:.2f}"
-            f" | SSIM {guard_reference['full']['image_ssim']:.3f}"
-            f" | accel {guard_reference['full']['accel_rmse']:.3f}"
-            f" | gyro {guard_reference['full']['gyro_rmse']:.3f}"
-            f" | blur MAE {guard_reference['blur']['image_mae_restored']:.5f}"
-            f" | edge {guard_reference['blur']['strong_edge_gradient_mae_restored']:.5f}"
-        )
-    if lead:
-        _write_resolved(config, output)
-        write_json(output / "execution.json", execution)
-        write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
-        if blur_dataset is not None:
-            write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
-        if guard_reference is not None:
-            write_json(output / "guard_reference.json", guard_reference)
-    log = _Jsonl(output / "train.jsonl" if lead else None)
-    maximum = config["phase2"]["max_successful_updates"]
-    checkpoint_every = config["runtime"]["checkpoint_every_updates"]
-    if lead and args.resume and math.isfinite(best_validation) and not (output / "best_joint_validation.pt").exists():
-        prior_best = Path(args.resume).parent / "best_joint_validation.pt"
-        if not prior_best.exists():
-            raise ValueError("Resume needs best_joint_validation.pt beside last.pt; copy the complete phase2 folder")
-        import shutil
-        shutil.copy2(prior_best, output / "best_joint_validation.pt")
-    if lead and args.resume and math.isfinite(best_blur_score) and not (output / "best_blur_validation.pt").exists():
-        prior_best_blur = Path(args.resume).parent / "best_blur_validation.pt"
-        if not prior_best_blur.exists():
-            raise ValueError("Resume needs best_blur_validation.pt beside last.pt")
-        import shutil
-        shutil.copy2(prior_best_blur, output / "best_blur_validation.pt")
-    if lead and args.resume and math.isfinite(best_guarded_score) and not (output / "best_guarded_validation.pt").exists():
-        prior_best_guarded = Path(args.resume).parent / "best_guarded_validation.pt"
-        if not prior_best_guarded.exists():
-            raise ValueError("Resume needs best_guarded_validation.pt beside last.pt")
-        import shutil
-        shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
+    # Chi rank 0: mot loi o day phai toi duoc rank dang cho share_rank0_rng ben duoi.
+    with rank0_section():
+        if lead:
+            _prepare_run(output, args.resume, trainer.successful_updates)
+        if lead and "full_guard" in config["phase2"] and guard_reference is None:
+            if blur_loader is None:
+                raise ValueError("Guarded phase 2 needs blur validation")
+            guard_reference = {
+                "full": _evaluate_with_overlap(
+                    system, validation_loader, validation_dataset, device,
+                    config["runtime"]["validation_batches"],
+                    config["phase2"]["smooth_l1_beta"],
+                    forward_model=trainer.evaluation_model,
+                ),
+                "blur": _validate_active_blur(system, blur_loader, device,
+                                                forward_model=trainer.evaluation_model),
+            }
+            print(
+                "  guarded init reference"
+                f" | full PSNR {guard_reference['full']['image_psnr_db']:.2f}"
+                f" | SSIM {guard_reference['full']['image_ssim']:.3f}"
+                f" | accel {guard_reference['full']['accel_rmse']:.3f}"
+                f" | gyro {guard_reference['full']['gyro_rmse']:.3f}"
+                f" | blur MAE {guard_reference['blur']['image_mae_restored']:.5f}"
+                f" | edge {guard_reference['blur']['strong_edge_gradient_mae_restored']:.5f}"
+            )
+        if lead:
+            _write_resolved(config, output)
+            write_json(output / "execution.json", execution)
+            write_json(output / "validation_bank.json", [sample.sample_id for sample in validation_dataset.samples])
+            if blur_dataset is not None:
+                write_json(output / "blur_validation_bank.json", [sample.sample_id for sample in blur_dataset.samples])
+            if guard_reference is not None:
+                write_json(output / "guard_reference.json", guard_reference)
+        log = _Jsonl(output / "train.jsonl" if lead else None)
+        maximum = config["phase2"]["max_successful_updates"]
+        checkpoint_every = config["runtime"]["checkpoint_every_updates"]
+        if lead and args.resume and math.isfinite(best_validation) and not (output / "best_joint_validation.pt").exists():
+            prior_best = Path(args.resume).parent / "best_joint_validation.pt"
+            if not prior_best.exists():
+                raise ValueError("Resume needs best_joint_validation.pt beside last.pt; copy the complete phase2 folder")
+            import shutil
+            shutil.copy2(prior_best, output / "best_joint_validation.pt")
+        if lead and args.resume and math.isfinite(best_blur_score) and not (output / "best_blur_validation.pt").exists():
+            prior_best_blur = Path(args.resume).parent / "best_blur_validation.pt"
+            if not prior_best_blur.exists():
+                raise ValueError("Resume needs best_blur_validation.pt beside last.pt")
+            import shutil
+            shutil.copy2(prior_best_blur, output / "best_blur_validation.pt")
+        if lead and args.resume and math.isfinite(best_guarded_score) and not (output / "best_guarded_validation.pt").exists():
+            prior_best_guarded = Path(args.resume).parent / "best_guarded_validation.pt"
+            if not prior_best_guarded.exists():
+                raise ValueError("Resume needs best_guarded_validation.pt beside last.pt")
+            import shutil
+            shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
     share_rank0_rng()                             # the guard reference drew on rank 0 only
     started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
     while trainer.successful_updates < maximum:
@@ -1121,102 +1119,104 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 share_rank0_rng()
                 _restart_if_memory_high(config, _memory_mib(), update, maximum)
                 continue
-            trainer.assert_backbone_frozen()
-            evaluation = _evaluate_with_overlap(
-                system,
-                validation_loader,
-                validation_dataset,
-                device,
-                config["runtime"]["validation_batches"],
-                config["phase2"]["smooth_l1_beta"],
-                forward_model=trainer.evaluation_model,
-            )
-            validation = {f"validation_{key}": value for key, value in evaluation.items()}
-            blur_validation = {}
-            blur_score = math.inf
-            if blur_loader is not None:
-                blur = _validate_active_blur(system, blur_loader, device,
-                                              forward_model=trainer.evaluation_model)
-                blur_validation = {f"blur_validation_{key}": value for key, value in blur.items()}
-                blur_score = max(
-                    float(blur["image_mae_restored"]) / max(float(blur["image_mae_input"]), 1e-12),
-                    float(blur["strong_edge_gradient_mae_restored"]) /
-                    max(float(blur["strong_edge_gradient_mae_input"]), 1e-12),
+            # Chi rank 0: loi validate/luu thi cac rank kia cung dung, khong cho 60 phut.
+            with rank0_section():
+                trainer.assert_backbone_frozen()
+                evaluation = _evaluate_with_overlap(
+                    system,
+                    validation_loader,
+                    validation_dataset,
+                    device,
+                    config["runtime"]["validation_batches"],
+                    config["phase2"]["smooth_l1_beta"],
+                    forward_model=trainer.evaluation_model,
                 )
-            guard_pass = False
-            guard_failures: list[str] = []
-            if guard_reference is not None:
-                guard_pass, guard_failures = _phase2_full_blur_guard(
-                    evaluation, blur, guard_reference, config["phase2"]["full_guard"]
+                validation = {f"validation_{key}": value for key, value in evaluation.items()}
+                blur_validation = {}
+                blur_score = math.inf
+                if blur_loader is not None:
+                    blur = _validate_active_blur(system, blur_loader, device,
+                                                  forward_model=trainer.evaluation_model)
+                    blur_validation = {f"blur_validation_{key}": value for key, value in blur.items()}
+                    blur_score = max(
+                        float(blur["image_mae_restored"]) / max(float(blur["image_mae_input"]), 1e-12),
+                        float(blur["strong_edge_gradient_mae_restored"]) /
+                        max(float(blur["strong_edge_gradient_mae_input"]), 1e-12),
+                    )
+                guard_pass = False
+                guard_failures: list[str] = []
+                if guard_reference is not None:
+                    guard_pass, guard_failures = _phase2_full_blur_guard(
+                        evaluation, blur, guard_reference, config["phase2"]["full_guard"]
+                    )
+                memory = _memory_mib()
+                record = {"successful_updates": update, **memory, **validation, **blur_validation}
+                if blur_loader is not None:
+                    record["blur_validation_worst_ratio"] = blur_score
+                if guard_reference is not None:
+                    record["guard_pass"] = guard_pass
+                    record["guard_failures"] = guard_failures
+                log.write(record)
+                # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
+                # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
+                # trong train.jsonl ma kernel dang bi chan khong doc duoc.
+                beats = (
+                    validation["validation_image_psnr_db"] > validation["validation_baseline_image_psnr_db"]
+                    and validation["validation_image_ssim"] > validation["validation_baseline_image_ssim"]
+                    and validation["validation_accel_rmse"] < validation["validation_baseline_accel_rmse"]
                 )
-            memory = _memory_mib()
-            record = {"successful_updates": update, **memory, **validation, **blur_validation}
-            if blur_loader is not None:
-                record["blur_validation_worst_ratio"] = blur_score
-            if guard_reference is not None:
-                record["guard_pass"] = guard_pass
-                record["guard_failures"] = guard_failures
-            log.write(record)
-            # Validation la thu duy nhat tra loi "model co hoat dong khong"; no
-            # chay 48 lan trong mot run nen phai nhin thay duoc, khong chi nam
-            # trong train.jsonl ma kernel dang bi chan khong doc duoc.
-            beats = (
-                validation["validation_image_psnr_db"] > validation["validation_baseline_image_psnr_db"]
-                and validation["validation_image_ssim"] > validation["validation_baseline_image_ssim"]
-                and validation["validation_accel_rmse"] < validation["validation_baseline_accel_rmse"]
-            )
-            print(
-                f"  validation update={_progress(update, maximum)}"
-                f" | PSNR {validation['validation_image_psnr_db']:.2f}"
-                f" vs {validation['validation_baseline_image_psnr_db']:.2f}"
-                f" | SSIM {validation['validation_image_ssim']:.3f}"
-                f" vs {validation['validation_baseline_image_ssim']:.3f}"
-                f" | accel {validation['validation_accel_rmse']:.3f}"
-                f" vs {validation['validation_baseline_accel_rmse']:.3f}"
-                f" | {'VUOT baseline' if beats else 'chua vuot'}"
-                f" | RSS {memory['rss_mib']:.0f}+{memory['children_rss_mib']:.0f} MiB"
-            )
-            if blur_validation:
                 print(
-                    f"  blur actual={blur_validation['blur_validation_active_frames']}"
-                    f" | MAE {blur_validation['blur_validation_image_mae_input']:.5f}"
-                    f" -> {blur_validation['blur_validation_image_mae_restored']:.5f}"
-                    f" | edge {blur_validation['blur_validation_strong_edge_gradient_mae_input']:.5f}"
-                    f" -> {blur_validation['blur_validation_strong_edge_gradient_mae_restored']:.5f}"
-                    f" | worst ratio {blur_score:.3f}"
+                    f"  validation update={_progress(update, maximum)}"
+                    f" | PSNR {validation['validation_image_psnr_db']:.2f}"
+                    f" vs {validation['validation_baseline_image_psnr_db']:.2f}"
+                    f" | SSIM {validation['validation_image_ssim']:.3f}"
+                    f" vs {validation['validation_baseline_image_ssim']:.3f}"
+                    f" | accel {validation['validation_accel_rmse']:.3f}"
+                    f" vs {validation['validation_baseline_accel_rmse']:.3f}"
+                    f" | {'VUOT baseline' if beats else 'chua vuot'}"
+                    f" | RSS {memory['rss_mib']:.0f}+{memory['children_rss_mib']:.0f} MiB"
                 )
-            if guard_reference is not None:
-                print(f"  full+blur guard: {'PASS' if guard_pass else 'FAIL'}"
-                      f" | {', '.join(guard_failures) if guard_failures else 'all checks passed'}")
-            payload = trainer.checkpoint_payload(serializable_config(config))
-            improved = validation["validation_joint_validation_score"] < best_validation
-            if improved:
-                best_validation = float(validation["validation_joint_validation_score"])
-            improved_blur = blur_score < best_blur_score
-            if improved_blur:
-                best_blur_score = blur_score
-            improved_guarded = guard_pass and blur_score < best_guarded_score
-            if improved_guarded:
-                best_guarded_score = blur_score
-            payload["best_joint_validation_score"] = best_validation
-            if blur_loader is not None:
-                payload["best_blur_validation_score"] = best_blur_score
-                payload["blur_validation_metrics"] = blur_validation
-            if guard_reference is not None:
-                payload["guard_reference"] = guard_reference
-                payload["best_guarded_blur_score"] = best_guarded_score
-                payload["guard_pass"] = guard_pass
-                payload["guard_failures"] = guard_failures
-            if decoder_init_source is not None:
-                payload["decoder_init_checkpoint"] = decoder_init_source
-            payload["validation_metrics"] = validation
-            if improved:
-                atomic_torch_save(payload, output / "best_joint_validation.pt")
-            if improved_blur:
-                atomic_torch_save(payload, output / "best_blur_validation.pt")
-            if improved_guarded:
-                atomic_torch_save(payload, output / "best_guarded_validation.pt")
-            atomic_torch_save(payload, output / "last.pt")
+                if blur_validation:
+                    print(
+                        f"  blur actual={blur_validation['blur_validation_active_frames']}"
+                        f" | MAE {blur_validation['blur_validation_image_mae_input']:.5f}"
+                        f" -> {blur_validation['blur_validation_image_mae_restored']:.5f}"
+                        f" | edge {blur_validation['blur_validation_strong_edge_gradient_mae_input']:.5f}"
+                        f" -> {blur_validation['blur_validation_strong_edge_gradient_mae_restored']:.5f}"
+                        f" | worst ratio {blur_score:.3f}"
+                    )
+                if guard_reference is not None:
+                    print(f"  full+blur guard: {'PASS' if guard_pass else 'FAIL'}"
+                          f" | {', '.join(guard_failures) if guard_failures else 'all checks passed'}")
+                payload = trainer.checkpoint_payload(serializable_config(config))
+                improved = validation["validation_joint_validation_score"] < best_validation
+                if improved:
+                    best_validation = float(validation["validation_joint_validation_score"])
+                improved_blur = blur_score < best_blur_score
+                if improved_blur:
+                    best_blur_score = blur_score
+                improved_guarded = guard_pass and blur_score < best_guarded_score
+                if improved_guarded:
+                    best_guarded_score = blur_score
+                payload["best_joint_validation_score"] = best_validation
+                if blur_loader is not None:
+                    payload["best_blur_validation_score"] = best_blur_score
+                    payload["blur_validation_metrics"] = blur_validation
+                if guard_reference is not None:
+                    payload["guard_reference"] = guard_reference
+                    payload["best_guarded_blur_score"] = best_guarded_score
+                    payload["guard_pass"] = guard_pass
+                    payload["guard_failures"] = guard_failures
+                if decoder_init_source is not None:
+                    payload["decoder_init_checkpoint"] = decoder_init_source
+                payload["validation_metrics"] = validation
+                if improved:
+                    atomic_torch_save(payload, output / "best_joint_validation.pt")
+                if improved_blur:
+                    atomic_torch_save(payload, output / "best_blur_validation.pt")
+                if improved_guarded:
+                    atomic_torch_save(payload, output / "best_guarded_validation.pt")
+                atomic_torch_save(payload, output / "last.pt")
             share_rank0_rng()
             _restart_if_memory_high(config, memory, update, maximum)
     if lead:

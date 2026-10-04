@@ -49,15 +49,16 @@ Tăng tốc trên 2 × T4, không đổi recipe hay hash:
   phase 1 41,7 → 35,5 ms/mẫu, phase 2 38,8 → 30,3 ms/mẫu; dữ liệu giống hệt từng bit
   (`tests/test_training_speed.py`). Phase 1 cần ~25 mẫu/s trên 4 vCPU nên được lợi nhiều nhất.
 
-**DDP treo ở checkpoint (sửa).** Lần chạy p20 đầu tiên trên Kaggle (Python 3.13, torch 2.10), phase 1 chạy 2 GPU
-(0,32 s/update) tới update 3000 rồi treo: rank 0 kẹt lúc mở loader validation, không phát lệnh NCCL nào nữa; rank 1
-chờ broadcast trong `share_rank0_rng` 60 phút, NCCL huỷ cả run (SIGABRT). Một GPU báo 100% (kernel NCCL quay chờ),
-GPU kia 0%. Nguyên nhân: worker DataLoader được tạo bằng `fork()` từ rank, mà rank có sẵn luồng watchdog NCCL,
-TCPStore và luồng pin-memory của loader train; Python 3.12+ cảnh báo fork từ tiến trình nhiều luồng có thể làm con
-deadlock. Dưới DDP, loader giờ tạo worker từ `forkserver` (một tiến trình phụ một luồng); một tiến trình thì vẫn
-fork như cũ. Batch giống hệt (`test_ddp_loaders_start_workers_from_a_forkserver_and_load_the_same_batches`); RSS
-"worker" giờ cộng mọi tiến trình con cháu, vì worker là con của forkserver. Notebook: NCCL huỷ run (mã −6) sau một
-checkpoint mới thì resume từ đó; không có tiến triển thì lùi về 1 GPU như trước.
+**DDP treo ở checkpoint (sửa).** Run p20 trên Kaggle (2 × T4) train phase 1 ở 0,32–0,42 s/update nhưng mất
+214 phút, khoảng 3 giờ trong đó là treo: ở update 3000, 4000 và 5000, latent gate báo FAIL trên rank 0 (lần `WARN`
+thứ ba liên tiếp). Rank 0 lưu checkpoint rồi raise; rank 1 đang chờ broadcast trong `share_rank0_rng`, chờ đủ 60
+phút tới khi NCCL huỷ run. Rank 0 không thoát vì `destroy_process_group()` trong `finally` chờ chính rank 1 đó.
+Một GPU báo 100% (kernel NCCL quay chờ), GPU kia 0%. Sửa: (1) `share_rank0_rng(abort=...)` mang lý do dừng của rank 0
+và mọi rank khác raise ngay; `rank0_section()` bọc phần rank 0 làm một mình (chuẩn bị run, validate, gate, lưu) ở
+cả hai phase. (2) Rank gặp lỗi in traceback rồi thoát ngay với mã 1, không gọi `destroy_process_group()`; exit 75
+giữ nguyên. Gate FAIL dưới DDP giờ kết thúc trong vài giây (`tests/test_ddp_abort.py`). Notebook: NCCL huỷ run (mã
+−6) sau một checkpoint mới thì resume từ đó. (Lần trước tôi đổ cho DataLoader fork từ tiến trình nhiều luồng và
+chuyển sang `forkserver`; sai, đã gỡ.)
 
 D2 (`tools/edge_probe.py`) giờ phạt riêng từng khối đặc trưng và có thêm đích năng lượng đường nét (không dấu).
 Bản cũ dùng một mức phạt chung, nên ghép thêm khối nào cũng tụt điểm theo số chiều, kể cả nhiễu thuần (+1024 chiều
