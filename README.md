@@ -16,7 +16,8 @@ IMU là decoder hệ số Haar.
 p20_gray cộng các khoá `corruption.image.light_*`, nên A/B với p20_gray là sạch. Yêu cầu: nhiễu phức tạp hơn — vùng
 sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sáng ra, mọi giá trị ngẫu nhiên. Đã duyệt bằng mắt qua
 `tools/light_corruption_preview.py` (bấm Run là cửa sổ hình hiện ra; cột cuối là đúng ảnh train của run này).
-- `qjepa/corruptions/light.py`, chạy trên ánh sáng tuyến tính **trước** bước mờ, chỉ ở mode `full`, trên
+- `qjepa/corruptions/light.py`, chạy trên ánh sáng tuyến tính **trước** bước mờ, ở mọi mode có bước thiếu sáng (`full`, `low_light_only`,
+  `blur_low_light`; không ở `blur_only`, `sensor_noise_only`), trên
   `light_probability` = 80% frame: (1) **cảnh HDR** — đốm sáng nhỏ (đèn, ống đèn, cửa sổ xa) sáng gấp `light_gain`
   5–40 lần, lòng vùng sáng rộng (trời) chỉ thêm `light_wide_gain`; (2) **lóe sáng** từ mọi phần vượt `light_knee` — quầng Gauss
   ba tầng có màu (ấm như đèn sodium tới lạnh như LED), tia sao 4–10 tia, bóng ma đối xứng qua tâm. Sau đó chuỗi nhiễu
@@ -36,7 +37,7 @@ sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sán
   ~20 ms CPU mỗi ảnh có lóe (17 → 38 ms/ảnh cho cả bộ nhiễu); phase 1 cần ~25 mẫu/s, 4 worker vẫn dư.
 - Bằng chứng: `tests/test_light_corruption.py` (đèn sáng gấp nhiều lần mà vùng tối giữ nguyên; phần vượt ngưỡng lóe
   ra, lòng trời chỉ thêm `wide_gain`; train/valid/test đều lóe; đèn cháy trắng qua cả bộ nhiễu kể cả khi thu nhỏ ảnh; tất định, ổn
-  định trong segment, chỉ ở `full`; tỉ lệ frame có lóe; config và hash; train cả hai phase qua CLI).
+  định trong segment, chỉ ở các mode có ánh sáng; tỉ lệ frame có lóe; config và hash; train cả hai phase qua CLI).
 
 **p20_gray — backbone chỉ đọc ảnh xám** (config `configs/kaggle_gray.yaml` → OUT `outputs/p20_gray`). Bằng
 p19_sharp cộng đúng một khoá, nên A/B với p19_sharp là sạch. Đề xuất: tách màu ngay từ đầu, QWT và JEPA chỉ học

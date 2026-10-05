@@ -26,6 +26,9 @@ from .rng import generator
 # project is actually built for.
 IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_only",
                "blur_low_light")
+# Lamps and glare (light_*) are part of the lighting: every mode with the low-light
+# stage gets them, the blur-only and grain-only scenarios stay isolated.
+LIGHT_MODES = ("full", "low_light_only", "blur_low_light")
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,7 @@ class LowLightImageCorruptionConfig:
     low_light_only_probability: float = 0.0
     # Lamps and glare (light.py), before the optics: small bright spots become many
     # times brighter than the rest, with bloom, starburst and ghosts, so a lamp stays
-    # bright after the exposure drop and smears with the blur. Mode "full" only. Drawn from
+    # bright after the exposure drop and smears with the blur. LIGHT_MODES only. Drawn from
     # its own stream ("image_light"), and at 0 nothing is drawn at all: a config
     # without these keys renders, and reports, exactly what it did before them.
     light_probability: float = 0.0
@@ -314,7 +317,7 @@ class LowLightImageCorruptor:
         parameters.update(variant_draw=variant, low_light=not noise_only, sensor_noise=not low_light_only)
         if cfg.light_probability > 0:
             light_rng = generator(self.master_seed, "image_light", split, realization, trajectory, segment)
-            light = mode == "full" and float(light_rng.random()) < cfg.light_probability
+            light = mode in LIGHT_MODES and float(light_rng.random()) < cfg.light_probability
             drawn = draw_light_parameters(light_rng, cfg)
             parameters.update(light=bool(light), light_params=drawn if light else None)
         return parameters

@@ -12,7 +12,8 @@ the inside of a wide bright area (sky) gets only 1 + wide_gain; through the whol
 corruptor, at a typical exposure (x0.5), a lamp stays blown out where it would not without
 the stage, including on frames that go through the downsample (float round trip, not
 uint8); train, valid and test all glare; the stage is deterministic, segment-stable,
-"full"-only and JSON-serialisable, and fires on about light_probability of the frames;
+JSON-serialisable and runs in the modes with the low-light stage (full, low_light_only,
+blur_low_light) but not blur_only / sensor_noise_only, and fires on about light_probability of the frames;
 configs/kaggle_glare is p20_gray plus the light keys, changes both hashes, and must spell
 every key out; the recipe trains both phases through the CLI with the stage on every frame.
 """
@@ -146,7 +147,7 @@ def test_a_lamp_stays_blown_out_through_the_corruptor_even_after_the_downsample(
     assert _resize_roundtrip(hdr, 0.8).max() <= 1.0              # the uint8 path would cap every lamp
 
 
-def test_the_stage_is_deterministic_segment_stable_full_only_and_serialisable():
+def test_the_stage_is_deterministic_segment_stable_lighting_modes_only_and_serialisable():
     corruptor = _corruptor(light_probability=1.0)
     image = _frame()
     a, pa = _call(corruptor, image, 3)
@@ -158,10 +159,14 @@ def test_the_stage_is_deterministic_segment_stable_full_only_and_serialisable():
     assert same == corruptor._parameters("train", 0, "t", 0.302, "full")["light_params"]
     assert same != corruptor._parameters("train", 0, "u", 0.301, "full")["light_params"]
     plain = _corruptor(light_probability=0.0)
-    for mode in ("blur_only", "low_light_only", "sensor_noise_only", "blur_low_light"):
+    # Part of the lighting: every mode with the low-light stage glares; blur-only and grain-only stay isolated.
+    for mode in ("low_light_only", "blur_low_light"):
+        noisy, params = _call(corruptor, image, 3, mode=mode)
+        assert params["light"] and not np.array_equal(noisy, _call(plain, image, 3, mode=mode)[0]), mode
+    for mode in ("blur_only", "sensor_noise_only", "clean"):
         noisy, params = _call(corruptor, image, 3, mode=mode)
         assert params["light"] is False and params["light_params"] is None
-        assert np.array_equal(noisy, _call(plain, image, 3, mode=mode)[0])
+        assert np.array_equal(noisy, _call(plain, image, 3, mode=mode)[0]), mode
 
 
 def test_light_fires_on_about_light_probability_of_the_frames():
