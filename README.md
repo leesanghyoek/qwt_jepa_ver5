@@ -12,6 +12,33 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p22_light — nhánh ánh sáng + lóe nhẹ** (config `configs/kaggle_light.yaml` → OUT `outputs/p22_light`). Bằng
+p21_glare cộng (1) các khoá lóe nhẹ hơn và (2) `phase2.split_light_*`. Hình: `docs/kien_truc_light.svg`
+(`python3 tools/draw_architecture_imu.py docs/kien_truc_light.svg --light`).
+- **Vì sao** — p21 đo bằng `tools/glare_metrics.py` (Cell 14e, 64 frame có đèn, `blur_low_light`): lóe làm mất ~3 dB
+  (ra 17,99 dB có lóe, 20,97 dB không lóe, cùng frame); model **không gỡ quầng mà làm sáng thêm** (độ sáng/sạch ở
+  vùng quầng 1,20 → 1,24; vùng tối 6,38× → 4,86×, không lóe 1,39×); đường nét 0,60 so với 0,78; đèn bị làm tối đều
+  (pixel trắng 0,08%, ảnh sạch 1,89%). Phase 2 chưa bão hoà (+0,2 dB mỗi 1000 update). Nguyên nhân trong kiến trúc:
+  độ sáng tầm rộng chỉ do nhánh màu quyết (6 conv 3×3 ở 128², nhìn ~60 px; quầng 60–180 px), và mọi hiệu chỉnh là
+  phép cộng trên sRGB, trong khi lóe là ánh sáng cộng (tuyến tính) và tối là phép nhân.
+- **(1) Lóe nhẹ** (người dùng đề xuất): ngưỡng lóe 2–4 (trời tối đa ×1,5 nên không còn lóe), đèn ×4–20, quầng và bóng
+  ma yếu hơn. Đo bước lóe trên 190 frame: sương vùng tối p90 0,236 → 0,032; % pixel quầng trung vị 29% → 11%
+  (p90 98% → 67%); vùng sáng vẫn ×6 (p90 ×14).
+- **(2) Nhánh ánh sáng (H)** — `LightBranch` trong `qjepa/models/decoders.py`, chạy trước nhánh màu và nhánh đường
+  nét của `split_color_edge`: U-Net nhỏ ở 64² (`split_light_scale` 4), 3 tầng xuống 8², latent ZI ở lưới của nó và
+  ngữ cảnh trung bình toàn ảnh, nên mỗi giá trị nhìn cả khung. Ra hai bản đồ mượt: lớp sương V (3 kênh, trừ) và hệ
+  số sáng g (log, nhân), áp trong ánh sáng tuyến tính: J = max(I − V, 0) · e^g, rồi hai nhánh đọc J thay ảnh nhiễu.
+  Lớp cuối khởi tạo 0 nên J = I và decoder bắt đầu đúng như không có nhánh. Loss riêng: L1 giữa J và ảnh sạch ở
+  1/8 độ phân giải (32²), chỉ độ sáng và lóe; chi tiết vẫn do nhánh đường nét. 168 nghìn tham số (decoder 4,15 M),
+  tính bằng fp32 cả khi phase 2 chạy fp16.
+- Bằng chứng: `tests/test_light_branch.py` — khởi đầu đúng là phép đồng nhất (decoder có nhánh = không có nhánh);
+  công thức J; mỗi pixel ra có gradient từ góc xa nhất (mạng đối chứng cục bộ: đúng 0); train riêng trên ảnh tối và
+  phủ sương tuyến tính thì sai số tần số thấp giảm hơn nửa (đo thử: 0,155 → 0,053 sau 300 bước); config cũ không
+  có lớp nào của nhánh; `kaggle_light` = p21 + đúng các khoá này, đổi cả hai hash; train cả hai phase qua CLI và log
+  `image_light_l1`.
+- Đổi `corruption` và decoder phase 2: phải train lại phase 1. Phase 2 vẫn **4000** update (giới hạn Kaggle); tôi
+  chưa thấy cách tăng tốc nào chắc chắn giữ chất lượng mà chưa đo (phase 2 đã fp16 theo số đo trên T4).
+
 **p21_glare — nhiễu đèn và lóe sáng** (config `configs/kaggle_glare.yaml` → OUT `outputs/p21_glare`). Bằng
 p20_gray cộng các khoá `corruption.image.light_*`, nên A/B với p20_gray là sạch. Yêu cầu: nhiễu phức tạp hơn — vùng
 sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sáng ra, mọi giá trị ngẫu nhiên. Đã duyệt bằng mắt qua

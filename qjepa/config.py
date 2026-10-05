@@ -134,6 +134,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_phase1_predictor(phase1)
     _validate_sharpness(config)
     _validate_light(config)
+    _validate_light_branch(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -484,6 +485,40 @@ def _validate_light(config: dict[str, Any]) -> None:
                              f"(the hash records only what the config says); missing: {', '.join(missing)}")
 
 
+SPLIT_LIGHT_KEYS = ("split_light_width", "split_light_scale", "split_light_levels", "split_light_weight",
+                    "split_light_loss_scale")
+
+
+def _validate_light_branch(config: dict[str, Any]) -> None:
+    """phase2.split_light_*: LightBranch truoc nhanh mau va nhanh duong net (go loe, lam sang cho toi).
+
+    Bat thi PHAI ghi du moi khoa split_light_* (hash chi doc file config)."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_light_branch", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_light_branch must be true or false")
+    if not enabled:
+        return
+    if phase2.get("image_decoder") != "split_color_edge":
+        raise ValueError("phase2.split_light_branch works in the split_color_edge decoder")
+    missing = [key for key in SPLIT_LIGHT_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_light_branch needs every split_light_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    width, scale, levels = phase2["split_light_width"], phase2["split_light_scale"], phase2["split_light_levels"]
+    loss_scale = phase2["split_light_loss_scale"]
+    for name, value in (("split_light_width", width), ("split_light_scale", scale), ("split_light_levels", levels),
+                        ("split_light_loss_scale", loss_scale)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"phase2.{name} must be a positive integer")
+    if not _nonnegative_number(phase2["split_light_weight"]):
+        raise ValueError("phase2.split_light_weight must be a nonnegative number")
+    for side in config["data"]["image_size"]:
+        if side % scale or side % loss_scale or side // scale < 2 ** levels:
+            raise ValueError("data.image_size must divide by split_light_scale and split_light_loss_scale, "
+                             "and leave at least one pixel after split_light_levels halvings")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -652,6 +687,12 @@ def build_decoders(
                 "stage_channels": {int(level): int(channels[int(level) - 1]) for level in
                                    config["phase2"].get("split_edge_naf_stage_levels", ())},
             } if config["phase2"].get("split_branch_arch") == "nafnet_edge" else None,
+            # Absent before p22_light: no light branch.
+            "light": {
+                "width": int(config["phase2"]["split_light_width"]),
+                "scale": int(config["phase2"]["split_light_scale"]),
+                "levels": int(config["phase2"]["split_light_levels"]),
+            } if config["phase2"].get("split_light_branch", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

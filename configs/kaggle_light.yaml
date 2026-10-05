@@ -1,0 +1,38 @@
+# p22_light: p21_glare + (1) loe sang NHE hon + (2) nhanh anh sang (LightBranch) o phase 2.
+#
+# p21_glare do bang tools/glare_metrics.py (Cell 14e, 64 frame co den, blur_low_light, 05/10/2026):
+#  - loe lam mat ~3 dB: ra 17,99 dB co loe vs 20,97 dB khong loe tren cung frame;
+#  - model KHONG go quang ma lam sang them: vung quang do sang/sach 1,20 -> 1,24; vung toi 6,38x -> 4,86x
+#    (khong loe: 1,39x); duong net 0,60 vs 0,78 khong loe; den bi lam toi deu (trang 0,08% vs sach 1,89%).
+#  - Nguyen nhan: do sang tam rong chi do ColorBranch quyet (6 conv 3x3 o 128x128, nhin ~60 px; quang 60-180 px),
+#    hieu chinh la phep cong tren sRGB trong khi loe la anh sang cong (tuyen tinh) va toi la phep nhan.
+#
+# (1) Loe nhe (nguoi dung de xuat): troi khong loe nua (nguong 2-4 > troi toi da x1,5), quang va bong ma yeu hon.
+#     Do tren 190 frame (chi buoc loe): suong vung toi p90 0,236 -> 0,032; % pixel quang trung vi 29% -> 11%
+#     (p90 98% -> 67%); vung sang van sang x6 (p90 x14).
+# (2) LightBranch (qjepa/models/decoders.py): U-Net nho o 64x64 (scale 4), sau 3 tang toi 8x8 + latent + ngu
+#     canh toan anh -> 2 ban do muot: lop suong V (tru) va he so sang g (nhan), ap trong khong gian tuyen tinh
+#     J = max(I - V, 0) * exp(g); nhanh mau va nhanh duong net doc J thay anh nhieu. Dau ra khoi tao 0: J = I.
+#     Loss rieng L1 o 1/8 do phan giai (32x32) giua J va anh sach: chi do sang va loe, chi tiet de nhanh duong net.
+#
+# Doi corruption + model phase 2 -> doi hash ca hai phase: train lai phase 1. Phase 2 van 4000 update (Kaggle).
+extends: kaggle_glare.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p22_light
+
+corruption:
+  image:
+    light_knee: [2.0, 4.0]              # p21: [1.0, 2.5] -- troi (toi da x1,5) khong con loe
+    light_wide_gain: [0.0, 0.5]         # p21: [0.0, 1.5]
+    light_gain: [4.0, 20.0]             # p21: [5.0, 40.0]
+    light_bloom_strength: [0.05, 0.5]   # p21: [0.15, 1.5]
+    light_ghost_strength: [0.005, 0.03] # p21: [0.01, 0.08]
+
+phase2:
+  split_light_branch: true
+  split_light_width: 32
+  split_light_scale: 4                  # 256 -> 64x64
+  split_light_levels: 3                 # 64 -> 8x8: moi gia tri nhin ca khung (cong them ngu canh toan anh)
+  split_light_weight: 1.0
+  split_light_loss_scale: 8             # loss do sang/loe o 32x32

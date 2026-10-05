@@ -11,15 +11,22 @@ p19_sharp's changes (a, b, c, e, f) plus (G) the backbone reading luminance only
 colour reaching phase 2 through the blurry-image skip alone. B-F are no longer tagged
 there: they are part of the architecture, and only G is new.
 
+With --light, p22_light (configs/kaggle_light.yaml): p20_gray plus (H) the light branch in
+phase 2 -- a whole-frame U-Net at 64x64 that takes the glare veil off and lifts the dark in
+linear light before the colour and edge branches -- and its low-frequency loss. Only H is
+tagged there.
+
 Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
        python3 tools/draw_architecture_imu.py docs/kien_truc_infomax.svg --infomax   (D + E + F)
        python3 tools/draw_architecture_imu.py docs/kien_truc_fourier.svg --fourier
        python3 tools/draw_architecture_imu.py docs/kien_truc_gray.svg --gray         (p19 + G)
+       python3 tools/draw_architecture_imu.py docs/kien_truc_light.svg --light       (p20 + H)
 """
 import sys
 from xml.sax.saxutils import escape
 
-GRAY = '--gray' in sys.argv[2:]            # p20_gray: p19_sharp + QWT/JEPA on luminance only (G)
+LIGHT = '--light' in sys.argv[2:]          # p22_light: p20_gray + light branch in phase 2 (H)
+GRAY = '--gray' in sys.argv[2:] or LIGHT   # p20_gray: p19_sharp + QWT/JEPA on luminance only (G)
 INFOMAX = '--infomax' in sys.argv[2:] or GRAY  # p16_infomax: (E) phase-1 information terms, (F) stages
 FOURIER = '--fourier' in sys.argv[2:] or INFOMAX
 
@@ -70,7 +77,7 @@ def arrow(points, color='#455A64', width=2.2, dash=None, label=None, lx=None, ly
 
 def badge(x, y, label):
     """A small tag for what this run adds."""
-    if GRAY and label != 'mới · G':
+    if (LIGHT and label != 'mới · H') or (GRAY and not LIGHT and label != 'mới · G'):
         return
     width = 12 + 7 * len(label)
     el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#D81B60"/>')
@@ -87,7 +94,7 @@ region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục', right
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
-img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu B'])
+img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'đèn lóe nhẹ' if LIGHT else 'nhiễu B'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 # ---------------- backbone
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'] if GRAY
@@ -147,7 +154,12 @@ imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-if GRAY:
+if LIGHT:
+    text(W - 20, 26, 'p22_light — nhánh ÁNH SÁNG (H) trước 2 nhánh: trừ lớp sương lóe, làm sáng chỗ tối, trên cả khung',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 44, 'nền p20_gray: Y vào backbone (G) · p19_sharp (a–f) · nhiễu: đèn ×4–20, trời không lóe'
+         ' · phase 2: 4000 update', size=12, color='#AD1457', anchor='end')
+elif GRAY:
     text(W - 20, 26, 'p20_gray — QWT, encoder và teacher chỉ thấy kênh sáng Y (G) · màu đi đường skip, ghép lại ở phase 2',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 44, 'nền p19_sharp: Jacobian hạt nhiễu (a) · centre norm (b) · đầu hư hỏng (c) · đoán TI → decoder (e)'
@@ -202,10 +214,21 @@ arrow([(DX, 260), (DX, 232)], color='#8E24AA', width=2.4)
 arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
 text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA')
 # the blurry image into the funnel of both branches
-arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
-      label='skip: chính ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU, QWT chỉ thấy Y' if GRAY
-      else 'skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
-arrow([(885, 200), (FX, 200)], color='#2E7D32', width=3)
+if LIGHT:
+    # (H) the light branch on the blurry-image bus: both branches read its corrected frame J
+    light = node(592, 50, 250, 58, 'color', 'Nhánh ÁNH SÁNG · U-Net 64²',
+                 ['nhìn cả khung · đọc ZI', 'J = (ảnh − sương V) × sáng g'], rx=8, title_size=13)
+    badge(760, 31, 'mới · H')
+    arrow([(95, 200), (95, 79), (592, 79)], color='#2E7D32', width=3,
+          label='skip: ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU', lx=340, ly=70)
+    el.append('<path d="M 842 79 L 885 79 L 885 320 L 903 320" fill="none" stroke="#EF6C00" stroke-width="3" '
+              'marker-end="url(#ah-EF6C00)"/>')
+    text(892, 100, 'J (tuyến tính → sRGB)', size=11, weight='bold', color='#EF6C00', anchor='start')
+else:
+    arrow([(95, 200), (95, 72), (885, 72), (885, 320), (FX, 320)], color='#2E7D32', width=3,
+          label='skip: chính ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU, QWT chỉ thấy Y' if GRAY
+          else 'skip: chính ảnh mờ 256 × 256 → cho biết cạnh nằm ở đâu', lx=520, ly=63)
+arrow([(885, 200), (FX, 200)], color='#EF6C00' if LIGHT else '#2E7D32', width=3)
 arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
 arrow([mid_right(edgb), mid_left(refine)])
 arrow([mid_right(refine), (1286, 320), (1286, 269), (1292, 269)])
@@ -247,14 +270,14 @@ arrow([(490, loss1[1] if GRAY else 555), (490, 435)], color='#F9A825', dash='6 4
 text(498, 500, 'Jacobian: nhạy cạnh, điếc hạt nhiễu (a)' if GRAY else 'Jacobian: nhạy với cạnh, điếc với nhiễu',
      size=12, color='#B26A00', anchor='start', style='font-style="italic"')
 # ---------------- phase 2 losses (train only the two decoders)
-loss2 = node(1150, 528, 350, 132, 'loss', 'Loss phase 2', [
+loss2 = node(1150, 528, 350, 150 if LIGHT else 132, 'loss', 'Loss phase 2', [
     'ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)' if GRAY else 'ảnh: L1 · chi tiết QWT · VGG16 (perceptual)',
     'màu: L1 Cb/Cr + thống kê màu từng ảnh',
-    'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
-    ''])
+    'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt'] + (
+    ['ánh sáng (H): L1 giữa J và ảnh sạch ở 32²', ''] if LIGHT else ['']))
 # the IMU line, with this run's new term in its colour
 if GRAY:
-    text(1325, 636, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
+    text(1325, 654 if LIGHT else 636, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
 else:
     el.append('<text x="1325" y="636" font-size="13" fill="#37474F" text-anchor="middle">'
               'IMU: L1 · chi tiết Haar · độ rung · '

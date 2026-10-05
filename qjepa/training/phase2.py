@@ -7,12 +7,14 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from ..distributed import gather_shares, rank_and_world
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
+from ..models.color_edge import downsample
 from ..models.decoders import PIXEL_IMAGE_DECODERS
 from .losses import color_edge_split_loss, invisible_detail_fraction, phase2_reconstruction_loss
 from .perceptual import PerceptualLoss
@@ -231,6 +233,13 @@ class Phase2Trainer:
                     )
                     loss = loss + split_loss
                     parts.update(split_parts)
+                if "image_light" in restored:
+                    # The light branch alone, at 1/split_light_loss_scale: brightness and glare,
+                    # no edges, so the colour and edge branches keep the detail.
+                    light_l1 = F.l1_loss(downsample(restored["image_light"], int(self.phase["split_light_loss_scale"])),
+                                         downsample(batch["image_clean"], int(self.phase["split_light_loss_scale"])))
+                    loss = loss + float(self.phase["split_light_weight"]) * light_l1
+                    parts["image_light_l1"] = light_l1
                 if self.perceptual is not None:
                     with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
                         perceptual = self.perceptual(restored["image"], batch["image_clean"])

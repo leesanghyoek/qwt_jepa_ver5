@@ -299,6 +299,76 @@ class ColorBranch(nn.Module):
         return small + self.tail(self.trunk(self.fuse(torch.cat((x, z), dim=1))))
 
 
+def srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
+    # The clamps keep the branch not taken out of pow's infinite slope at 0.
+    return torch.where(x <= 0.04045, x / 12.92, ((x.clamp_min(0.04045) + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_srgb(x: torch.Tensor) -> torch.Tensor:
+    return torch.where(x <= 0.0031308, 12.92 * x, 1.055 * x.clamp_min(0.0031308) ** (1 / 2.4) - 0.055)
+
+
+class LightBranch(nn.Module):
+    """Take the glare off and lift the dark, on the whole frame, before colour and edges.
+
+    Glare is light added on top of the scene (additive in linear light); a dark frame
+    is the scene times a small exposure (multiplicative). The colour branch adds a
+    correction to sRGB values and sees about 60 px, yet it alone sets brightness at
+    periods above ``illumination_scale``; p21's halos span 60-180 px, and its restored
+    dark regions stayed 4.9x too bright where the input was veiled (1.4x without
+    glare). This branch reads the frame at 1/``scale`` resolution, in sRGB and in
+    linear light, through a U-Net ``levels`` deep with the JEPA latent at its grid and
+    a global-average context, so every output sees the whole frame. It returns two
+    smooth maps, upsampled bilinearly:
+
+        veil V (3 channels, linear light, |V| < 1)   J_lin = max(I_lin - V, 0) * exp(g)
+        gain g (1 channel, log, |g| < 3)
+
+    J in sRGB, clipped to [0, 1], replaces the noisy frame as the colour and edge
+    branches' input. The head is zero-initialised: V = 0, g = 0, J = I, and the
+    decoder starts as it would without the branch. Computed in fp32 under autocast:
+    exp and pow at 1/4 resolution cost nothing and fp16 would round the gain.
+    """
+
+    def __init__(self, latent_channels: int = 128, width: int = 32, scale: int = 4, levels: int = 3) -> None:
+        super().__init__()
+        self.scale = int(scale)
+        self.head = nn.Sequential(nn.Conv2d(6, width, 3, padding=1), nn.ReLU())
+        self.down = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(width, width, 4, stride=2, padding=1), nn.ReLU(), _ResidualBlock(width))
+            for _ in range(int(levels)))
+        self.latent = nn.Conv2d(latent_channels, width, 1)
+        self.context = nn.Linear(width, width)
+        self.up = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(2 * width, width, 3, padding=1), nn.ReLU()) for _ in range(int(levels)))
+        self.tail = nn.Conv2d(width, 4, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def maps(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(veil, log gain) at 1/scale resolution."""
+        small = downsample(image, self.scale)
+        x = self.head(torch.cat((small, srgb_to_linear(small)), dim=1))
+        skips = []
+        for down in self.down:
+            skips.append(x)
+            x = down(x)
+        x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
+        x = x + self.context(x.mean(dim=(2, 3)))[:, :, None, None]
+        for up, skip in zip(self.up, reversed(skips)):
+            x = up(torch.cat((F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False), skip),
+                             dim=1))
+        raw = self.tail(x)
+        return torch.tanh(raw[:, :3]), 3.0 * torch.tanh(raw[:, 3:] / 3.0)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            image, latent = image.float(), latent.float()
+            veil, gain = (upsample(value, image.shape[-2:]) for value in self.maps(latent, image))
+            corrected = (srgb_to_linear(image) - veil).clamp_min(0.0) * torch.exp(gain)
+            return linear_to_srgb(corrected).clamp(0.0, 1.0)
+
+
 class UNetBranch(nn.Module):
     """Funnel and loudspeaker: a U-Net whose bottom sits on the latent's grid.
 
@@ -641,6 +711,8 @@ class SplitColorEdgeDecoder(nn.Module):
       (detached), so it knows how bright the clean frame is and how strong its
       edges should be, without its loss steering the colour branch.
     * ``compose``: chroma from the base, luminance = illumination + detail.
+    * ``light`` (optional, LightBranch): first takes the glare off and lifts the dark
+      on the whole frame; both branches then read its result instead of the noisy frame.
 
     At initialisation both residuals are zero: the output has exactly the input's
     luminance and the input's colour at ``color_scale`` resolution.
@@ -653,8 +725,11 @@ class SplitColorEdgeDecoder(nn.Module):
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
+        light: dict | None = None,
     ) -> None:
         super().__init__()
+        # Only when asked: earlier checkpoints have no light layers.
+        self.light = LightBranch(latent_channels, **light) if light else None
         # Only when asked: earlier checkpoints have no refiner layers. Scale 1 -- p15/p16,
         # and every config without the key -- keeps EdgeRefiner and its layer names.
         self.refiner = None
@@ -706,6 +781,10 @@ class SplitColorEdgeDecoder(nn.Module):
         size = image.shape[-2:]
         if size[0] % self.illumination_scale or size[1] % self.illumination_scale:
             raise ValueError(f"Image sides {tuple(size)} must divide by {self.illumination_scale}")
+        parts = {}
+        if self.light is not None:
+            image = self.light(latent, image)
+            parts["image_light"] = image
         base = upsample(self.color(latent, downsample(image, self.color_scale)), size)
         light = illumination(base, self.illumination_scale)
         y = luminance(image)
@@ -720,7 +799,6 @@ class SplitColorEdgeDecoder(nn.Module):
             detail, aux = self.edge.forward_with_aux(latent, edge_in, base=detail_in, stages=by_level)
         else:
             detail = self.edge(latent, edge_in, base=detail_in)
-        parts = {}
         if self.refiner is not None:
             parts["image_detail_stage1"] = detail
             detail = self.refiner(detail, edge_in)
