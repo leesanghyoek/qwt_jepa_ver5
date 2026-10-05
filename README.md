@@ -33,6 +33,11 @@ sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sán
 - Thiếu khoá (hoặc `light_probability: 0`) thì ảnh nhiễu và tham số giống hệt từng bit (so với code trước trên 60
   frame có cả ảnh tham chiếu Jacobian); bật lóe cũng không xê dịch tham số cũ nào, vì lóe bốc từ luồng ngẫu nhiên
   riêng (`image_light`). Bật thì `validate_config` bắt ghi đủ mọi khoá `light_*`, để hash ghi đúng thứ đã train.
+- **Thử checkpoint cũ trên ảnh lóe sáng, không train lại**: `tools/random_pair_preview.py --glare-config
+  configs/kaggle_glare.yaml` (notebook Cell 14c, `PREVIEW_GLARE = True`) trộn các khoá `light_*` vào nhiễu của
+  panel, chỉ cho lần xem đó, và ưu tiên frame có đèn/cửa sổ sáng; checkpoint không đổi byte nào
+  (`test_the_glare_preview_tests_a_checkpoint_trained_without_glare`). Model chưa từng thấy lóe thì đây là phép
+  thử ngoài phân phối.
 - Đổi `corruption` nên hash cả hai phase đổi: phải train lại phase 1. Vector degradation của đầu dự đoán phase 1 giữ 8 mục cũ, chưa có mục lóe sáng. Chi phí:
   ~20 ms CPU mỗi ảnh có lóe (17 → 38 ms/ảnh cho cả bộ nhiễu); phase 1 cần ~25 mẫu/s, 4 worker vẫn dư.
 - Bằng chứng: `tests/test_light_corruption.py` (đèn sáng gấp nhiều lần mà vùng tối giữ nguyên; phần vượt ngưỡng lóe

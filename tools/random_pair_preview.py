@@ -2,11 +2,18 @@
 
 This is a qualitative preview. The fixed validation audit remains unchanged so
 its metrics can be compared across checkpoints and runs.
+
+``--glare-config configs/kaggle_glare.yaml`` tests any checkpoint -- one trained
+before the glare existed too -- on frames with lamps and glare: the light_* keys of
+that config go into the checkpoint's corruption for this preview only, and the
+panels favour frames that have bright areas (lamps, windows) for the glare to come
+from. A model that never saw glare in training is being tested out of distribution.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import secrets
 import sys
@@ -22,7 +29,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _system_from_phase2
+from qjepa.config import LIGHT_KEYS, load_config
 from qjepa.data import read_manifest
+from qjepa.data.dataset import load_rgb
 from qjepa.evaluation.metrics import image_metrics, imu_metrics
 
 
@@ -55,6 +64,37 @@ def _eligible_indices(dataset, image_mode: str) -> list[int]:
         if parameters["defocus"] or parameters["motion"] or parameters["downsample"]:
             eligible.append(index)
     return eligible
+
+
+def with_glare(config: dict, glare_config: str | Path, probability: float | None = 1.0) -> dict:
+    """The checkpoint's recipe plus the light_* corruption keys of ``glare_config`` (a copy)."""
+    light = {key: value for key, value in load_config(glare_config)["corruption"]["image"].items()
+             if key in LIGHT_KEYS}
+    if not light:
+        raise ValueError(f"{glare_config} has no corruption.image.light_* keys")
+    config = copy.deepcopy(config)
+    config["corruption"]["image"].update(light)
+    if probability is not None:
+        if not 0 < probability <= 1:
+            raise ValueError("glare probability must be in (0, 1]")
+        config["corruption"]["image"]["light_probability"] = float(probability)
+    return config
+
+
+def _bright_indices(dataset, eligible: list[int], rng: np.random.Generator, want: int,
+                    scan: int = 300, fraction: float = 0.002) -> list[int]:
+    """Up to ``want`` eligible frames with bright areas (>= ``fraction`` of pixels near white)."""
+    found = []
+    order = rng.permutation(len(eligible))[:scan]
+    weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    for position in order:
+        index = eligible[int(position)]
+        clean = load_rgb(dataset.samples[index].image_path, dataset.image_size)
+        if float(((clean @ weights) > 0.9).mean()) >= fraction:
+            found.append(index)
+            if len(found) >= want:
+                break
+    return found
 
 
 def _plot_pair(path: Path, sample: dict, restored, image_input: dict,
@@ -109,6 +149,7 @@ def preview(
     state: str | Path, count: int = 4, split: str = "valid",
     image_mode: str = "blur_only", imu_mode: str = "full",
     device: str = "cuda", seed: int | None = None, light_scale: float = 1.0,
+    glare_config: str | Path | None = None, glare_probability: float = 1.0,
 ) -> dict:
     if count < 1:
         raise ValueError("count must be positive")
@@ -132,8 +173,14 @@ def preview(
               f"{config['corruption']['image']['exposure_gain'][0]:.3f}.."
               f"{config['corruption']['image']['exposure_gain'][1]:.3f} "
               f"(chỉ ảnh hưởng panel này, không đổi checkpoint)")
+    if glare_config is not None:
+        config = with_glare(config, glare_config, glare_probability)
+        if image_mode == "blur_only":
+            print("[preview] blur_only không có lóe sáng (chỉ full / blur_low_light / low_light_only)")
+        print(f"[preview] thêm đèn và lóe sáng từ {glare_config} vào nhiễu, {glare_probability:.0%} ảnh "
+              f"(chỉ panel này, không đổi checkpoint)")
     previous = json.loads(state.read_text()) if state.is_file() else {}
-    identity = (manifest["meta"]["manifest_hash"], split, image_mode, imu_mode)
+    identity = (manifest["meta"]["manifest_hash"], split, image_mode, imu_mode, bool(glare_config))
     previous_ids = set(previous.get("sample_ids", [])) if tuple(previous.get("identity", ())) == identity else set()
     explicit_seed = seed is not None
     seed = int(seed) if explicit_seed else secrets.randbits(63)
@@ -145,6 +192,10 @@ def preview(
                        image_mode=image_mode, imu_mode=imu_mode)
     dataset.set_realization(realization)
     eligible = _eligible_indices(dataset, image_mode)
+    if glare_config is not None:
+        bright = _bright_indices(dataset, eligible, rng, want=4 * count)
+        print(f"[preview] {len(bright)} frame có vùng sáng (đèn, cửa sổ) để lóe")
+        eligible = bright if len(bright) >= count else eligible
     indices = choose_indices(
         [sample.sample_id for sample in dataset.samples], eligible, count,
         set() if explicit_seed else previous_ids, rng,
@@ -183,6 +234,8 @@ def preview(
         "checkpoint": str(checkpoint), "manifest_hash": identity[0],
         "split": split, "image_mode": image_mode, "imu_mode": imu_mode,
         "light_scale": light_scale,
+        "glare_config": None if glare_config is None else str(glare_config),
+        "glare_probability": glare_probability if glare_config is not None else None,
         "seed": seed, "realization": realization, "items": items,
     }
     (output / "preview.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -210,11 +263,17 @@ def main() -> None:
     parser.add_argument("--imu-mode", choices=("full", "clean"), default="full")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--glare-config",
+                        help="config có corruption.image.light_* (vd. configs/kaggle_glare.yaml): thêm đèn và "
+                             "lóe sáng vào nhiễu của panel, kể cả với checkpoint train trước khi có lóe")
+    parser.add_argument("--glare-probability", type=float, default=1.0,
+                        help="tỉ lệ ảnh có lóe khi dùng --glare-config (1.0 = mọi ảnh)")
     args = parser.parse_args()
     preview(args.checkpoint, args.manifest, output=args.output, state=args.state,
             count=args.count, split=args.split, image_mode=args.image_mode,
             imu_mode=args.imu_mode, device=args.device, seed=args.seed,
-            light_scale=args.light_scale)
+            light_scale=args.light_scale, glare_config=args.glare_config,
+            glare_probability=args.glare_probability)
 
 
 if __name__ == "__main__":

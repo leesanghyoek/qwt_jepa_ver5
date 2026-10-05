@@ -1,8 +1,16 @@
-"""Random previews rotate whole paired samples across consecutive runs."""
+"""Random previews rotate whole paired samples across consecutive runs; --glare-config tests any
+checkpoint, one trained before the glare existed too, on frames with lamps and glare."""
 
 import numpy as np
+import pytest
+import torch
+import yaml
 
-from tools.random_pair_preview import choose_indices
+from qjepa.cli import main
+from qjepa.config import LIGHT_KEYS, load_config, serializable_config
+from test_kaggle_workflow import _write_dataset
+from test_sharp_cli import _run_until_done, _sharp_smoke
+from tools.random_pair_preview import choose_indices, preview, with_glare
 
 
 def test_next_preview_avoids_previous_pair_ids_when_pool_allows():
@@ -21,3 +29,38 @@ def test_preview_seed_replays_same_selection():
     ids = [f"frame-{index}" for index in range(10)]
     draw = lambda: choose_indices(ids, list(range(10)), 4, set(), np.random.default_rng(91))
     assert draw() == draw()
+
+
+def test_with_glare_adds_the_light_keys_to_a_copy_and_forces_the_probability():
+    config = serializable_config(load_config("configs/kaggle_gray.yaml"))
+    glared = with_glare(config, "configs/kaggle_glare.yaml", 1.0)
+    assert "light_probability" not in config["corruption"]["image"]          # the checkpoint's recipe untouched
+    assert glared["corruption"]["image"]["light_probability"] == 1.0
+    assert set(LIGHT_KEYS) <= set(glared["corruption"]["image"])
+    with pytest.raises(ValueError, match="light_"):
+        with_glare(config, "configs/kaggle_gray.yaml")
+
+
+def test_the_glare_preview_tests_a_checkpoint_trained_without_glare(tmp_path):
+    torch.set_num_threads(1)
+    root, manifest, output = tmp_path / "dataset", tmp_path / "manifest", tmp_path / "run"
+    _write_dataset(root)
+    config = _sharp_smoke()
+    assert not any(key.startswith("light_") for key in config["corruption"]["image"])
+    path = tmp_path / "plain.yaml"
+    path.write_text(yaml.safe_dump(config))
+    common = ["--config", str(path), "--manifest", str(manifest), "--output", str(output)]
+    main(["build-manifest", "--config", str(path), "--data-root", str(root), "--output", str(manifest)])
+    _run_until_done(["train-phase1", *common], output / "phase1/last.pt")
+    last = output / "phase2/last.pt"
+    _run_until_done(["train-phase2", *common, "--backbone-checkpoint", str(output / "phase1/last.pt")], last)
+    before = last.read_bytes()
+    report = preview(last, manifest, output=tmp_path / "glare", state=tmp_path / "state.json", count=2,
+                     image_mode="full", device="cpu", seed=3, glare_config="configs/kaggle_glare.yaml")
+    assert report["items"] and all(item["image_corruption"]["light"] and item["image_corruption"]["light_params"]
+                                   for item in report["items"])
+    assert (tmp_path / "glare" / report["items"][0]["panel"]).is_file()
+    plain = preview(last, manifest, output=tmp_path / "plain", state=tmp_path / "state2.json", count=2,
+                    image_mode="full", device="cpu", seed=3)
+    assert all("light" not in item["image_corruption"] for item in plain["items"])
+    assert last.read_bytes() == before
