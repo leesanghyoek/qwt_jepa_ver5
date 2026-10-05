@@ -81,7 +81,6 @@ class LowLightImageCorruptionConfig:
     light_threshold: tuple[float, float] = (0.5, 0.8)         # linear luminance where a light source starts
     light_width: tuple[float, float] = (0.1, 0.2)
     light_gain: tuple[float, float] = (5.0, 40.0)             # small bright spots (lamps): log-uniform
-    light_lamp_area: float = 0.02                             # lamp budget (frame fraction); more = texture, gain scaled down
     light_wide_gain: tuple[float, float] = (0.0, 1.5)         # wide bright areas (sky)
     light_shape: tuple[float, float] = (1.0, 3.0)
     light_knee: tuple[float, float] = (1.0, 2.5)              # only light above this glares
@@ -105,8 +104,6 @@ class LowLightImageCorruptionConfig:
         for name in ("light_probability", "light_star_probability"):
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in [0,1]")
-        if not 0 < self.light_lamp_area <= 1:
-            raise ValueError("light_lamp_area must be in (0,1]")
         for name in ("light_threshold", "light_wide_gain", "light_ghost_count", "light_ghost_strength"):
             bounds(name, 0.0)
         for name in ("light_width", "light_gain", "light_shape", "light_knee", "light_bloom_strength",

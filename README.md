@@ -18,25 +18,24 @@ sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sán
 `tools/light_corruption_preview.py` (bấm Run là cửa sổ hình hiện ra; cột cuối là đúng ảnh train của run này).
 - `qjepa/corruptions/light.py`, chạy trên ánh sáng tuyến tính **trước** bước mờ, chỉ ở mode `full`, trên
   `light_probability` = 80% frame: (1) **cảnh HDR** — đốm sáng nhỏ (đèn, ống đèn, cửa sổ xa) sáng gấp `light_gain`
-  5–40 lần, vùng sáng rộng (trời, lòng cửa sổ) chỉ thêm `light_wide_gain`; (2) **lóe sáng** chỉ từ đèn — quầng Gauss
+  5–40 lần, lòng vùng sáng rộng (trời) chỉ thêm `light_wide_gain`; (2) **lóe sáng** từ mọi phần vượt `light_knee` — quầng Gauss
   ba tầng có màu (ấm như đèn sodium tới lạnh như LED), tia sao 4–10 tia, bóng ma đối xứng qua tâm. Sau đó chuỗi nhiễu
   cũ của repo: mờ kéo đèn thành vệt, thiếu sáng làm tối phần còn lại mà đèn vẫn sáng (ở phơi sáng ×0,5 thì cháy
   trắng), rồi hạt và JPEG. Bước thu nhỏ ảnh của repo đi đường số thực khi có lóe, vì đường uint8 cắt mọi đèn về 1.
   Ảnh sạch (đích của model) không có lóe: model phải gỡ quầng khỏi cảnh.
-- Lỗi bản đầu, sửa trước khi đưa vào train: mặt nạ "đèn" chuẩn hoá theo max nên mép cửa sổ và trời bị coi là đèn,
-  và lá cây có nắng thành hàng trăm đèn ×40; quầng phủ sương lên cả ảnh. Đo trên 190 frame có vùng tối (74 quỹ đạo):
-  vùng tối (tuyến tính) bị nâng trung vị 0,010, p90 **0,23**, max 2,2. Sửa: đèn = đốm có ít điểm sáng quanh nó
-  (ngưỡng cứng), chỉ đèn mới lóe, và **ngân sách diện tích đèn** `light_lamp_area` = 2% khung — vượt thì là vân sáng,
-  hệ số giảm theo tỉ lệ. Sau sửa: trung vị 0,006, p90 0,047 (phần lớn là vầng sáng ngay quanh đèn), vùng sáng nhất
-  vẫn sáng ×6,8 (p90 ×27). Ngân sách 0,5% thì hết sương nhưng đèn trạm xăng (2,6% khung) mất quầng.
+- Giữ đúng bản người dùng đã duyệt, kể cả "lớp sương": mép cửa sổ, trời rất sáng và lá cây có nắng cũng lóe, quầng
+  có thể phủ lên vùng tối. Đo trên 190 frame có vùng tối (74 quỹ đạo): vùng tối (tuyến tính) bị nâng trung vị 0,010,
+  p90 0,23, max 2,2. Tôi đã thử chỉ cho đốm nhỏ lóe kèm ngân sách diện tích đèn (p90 còn 0,047); người dùng chọn giữ
+  bản đã duyệt để model học gỡ cả lớp sương này.
+- **Áp lên mọi split.** Train để model học gỡ lóe và làm sáng chỗ tối; valid/test để PSNR validation, checkpoint
+  `best_*` (chọn theo validation) và báo cáo test đo đúng khả năng đó. Hệ quả: PSNR không so thẳng với p20.
 - Thiếu khoá (hoặc `light_probability: 0`) thì ảnh nhiễu và tham số giống hệt từng bit (so với code trước trên 60
   frame có cả ảnh tham chiếu Jacobian); bật lóe cũng không xê dịch tham số cũ nào, vì lóe bốc từ luồng ngẫu nhiên
   riêng (`image_light`). Bật thì `validate_config` bắt ghi đủ mọi khoá `light_*`, để hash ghi đúng thứ đã train.
-- Đổi `corruption` nên hash cả hai phase đổi: phải train lại phase 1. PSNR validation không so thẳng với p20 (bank
-  validation cũng bị lóe). Vector degradation của đầu dự đoán phase 1 giữ 8 mục cũ, chưa có mục lóe sáng. Chi phí:
+- Đổi `corruption` nên hash cả hai phase đổi: phải train lại phase 1. Vector degradation của đầu dự đoán phase 1 giữ 8 mục cũ, chưa có mục lóe sáng. Chi phí:
   ~20 ms CPU mỗi ảnh có lóe (17 → 38 ms/ảnh cho cả bộ nhiễu); phase 1 cần ~25 mẫu/s, 4 worker vẫn dư.
-- Bằng chứng: `tests/test_light_corruption.py` (đèn sáng gấp nhiều lần mà vùng tối giữ nguyên; chỉ đèn lóe, trời không
-  phủ sương; nhiều đốm sáng chia một ngân sách; đèn cháy trắng qua cả bộ nhiễu kể cả khi thu nhỏ ảnh; tất định, ổn
+- Bằng chứng: `tests/test_light_corruption.py` (đèn sáng gấp nhiều lần mà vùng tối giữ nguyên; phần vượt ngưỡng lóe
+  ra, lòng trời chỉ thêm `wide_gain`; train/valid/test đều lóe; đèn cháy trắng qua cả bộ nhiễu kể cả khi thu nhỏ ảnh; tất định, ổn
   định trong segment, chỉ ở `full`; tỉ lệ frame có lóe; config và hash; train cả hai phase qua CLI).
 
 **p20_gray — backbone chỉ đọc ảnh xám** (config `configs/kaggle_gray.yaml` → OUT `outputs/p20_gray`). Bằng

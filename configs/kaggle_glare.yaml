@@ -14,8 +14,9 @@
 # Buoc mo cua repo sau do keo den thanh vet; buoc thu nho anh cua repo lam bang so thuc de den
 # khong bi cat ve 1. Anh sach (dich cua model) KHONG co loe: model phai go quang ra khoi canh.
 #
-# Doi corruption -> doi hash ca hai phase: PHAI train lai phase 1. PSNR validation khong so thang
-# duoc voi p20 (bank validation cung bi loe). Vector degradation (dau du doan phase 1) giu 8 muc
+# Ap len MOI split: train de model hoc go loe va lam sang cho toi; valid/test de PSNR va checkpoint
+# "best" do dung kha nang do (nguoi dung chon, 05/10/2026). Vi vay PSNR khong so thang voi p20.
+# Doi corruption -> doi hash ca hai phase: PHAI train lai phase 1. Vector degradation (dau du doan phase 1) giu 8 muc
 # cu, chua co muc loe sang. Them ~20 ms CPU moi anh co loe (4 worker van du cho phase 1).
 # Moi khoa light_* phai ghi ra o day: validate_config bat buoc, de hash ghi dung thu da train.
 extends: kaggle_gray.yaml
@@ -29,10 +30,9 @@ corruption:
     light_threshold: [0.5, 0.8]            # do sang tuyen tinh bat dau la "nguon sang"
     light_width: [0.1, 0.2]
     light_gain: [5.0, 40.0]                # den: sang gap 5-40 lan (log-uniform)
-    light_lamp_area: 0.02                  # ngan sach dien tich den (2% khung); nhieu hon la van sang (la cay co nang): he so giam theo ti le
     light_wide_gain: [0.0, 1.5]            # troi: chi sang them chut it
     light_shape: [1.0, 3.0]
-    light_knee: [1.0, 2.5]                 # chi phan vuot muc nay moi loe (den, khong phai troi)
+    light_knee: [1.0, 2.5]                 # chi phan vuot muc nay moi loe (den, cua so, troi rat sang)
     light_bloom_strength: [0.15, 1.5]      # log-uniform
     light_bloom_sigma_px: [[1.5, 4.0], [6.0, 16.0], [20.0, 60.0]]   # ba tang quang, px o 256x256
     light_warmth: [-0.4, 1.0]              # mau quang: <0 lanh (LED), >0 am (sodium)

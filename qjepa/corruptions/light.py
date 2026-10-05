@@ -114,7 +114,7 @@ def draw_light_parameters(rng: np.random.Generator, cfg) -> dict[str, object]:
     So lan boc co dinh (khong phu thuoc cac lan boc truoc), nen doi mot khoang khong lam
     lech cac tham so khac."""
     sigmas = [float(rng.uniform(*bounds)) for bounds in cfg.light_bloom_sigma_px]
-    weights = rng.dirichlet(np.linspace(3.0, 1.0, len(sigmas))).tolist()   # quang hep manh hon quang rong
+    weights = rng.dirichlet(np.linspace(2.0, 1.0, len(sigmas))).tolist()
     star_draw = float(rng.random())
     ghost_count = int(rng.integers(cfg.light_ghost_count[0], cfg.light_ghost_count[1] + 1))
     ghosts = [{"scale": float(rng.uniform(-1.4, -0.3)),          # am: doi xung qua tam, nhu phan xa trong ong kinh
@@ -125,7 +125,6 @@ def draw_light_parameters(rng: np.random.Generator, cfg) -> dict[str, object]:
         "threshold": float(rng.uniform(*cfg.light_threshold)),
         "width": float(rng.uniform(*cfg.light_width)),
         "gain": _log_uniform(rng, cfg.light_gain),
-        "lamp_area": float(cfg.light_lamp_area),
         "wide_gain": float(rng.uniform(*cfg.light_wide_gain)),
         "shape": float(rng.uniform(*cfg.light_shape)),
         "knee": float(rng.uniform(*cfg.light_knee)),
@@ -156,22 +155,17 @@ def apply_light(image: np.ndarray, params: dict[str, object], stages: bool = Fal
     if not mask.any():
         out = np.asarray(image, dtype=np.float64).copy()
         return (out, out.copy()) if stages else out
-    # "Dom nho": it diem sang quanh no (Gauss sigma = canh/16). Den ban kinh <~10 px va dai sang
-    # mong (ong den) -> ~1; mep va long cua so, troi -> 0. Nguong cung, khong chuan hoa theo max:
-    # anh khong co den nao thi khong co gi bi coi la den.
-    nearby = _blur_at(mask, width / 16.0, _factor(width / 16.0))
-    compact = mask * _smoothstep(0.5, 0.85, 1.0 - nearby)
-    # Ngan sach dien tich den: vuot qua thi do la van sang (la cay co nang, mat bong), khong phai
-    # hang tram bong den -- he so giam theo ti le de tong anh sang den giu nguyen muc ngan sach.
-    area = float(compact.mean())
-    lamp_gain = float(params["gain"]) * min(1.0, float(params["lamp_area"]) / area) if area > 0 else 0.0
-    lamp_gain = max(lamp_gain, float(params["wide_gain"]))
-    gain = lamp_gain * compact + float(params["wide_gain"]) * (1.0 - compact)
+    # "Dom nho" = mat na tru ban lam mo cua no (Gauss sigma = canh/16), chuan hoa theo max: den
+    # va mep vung sang -> ~1, long vung sang rong (troi) -> ~0.
+    compact = np.clip(mask - _blur_at(mask, width / 16.0, _factor(width / 16.0)), 0.0, 1.0)
+    peak = float(compact.max())
+    compact = compact / peak if peak > 1e-6 else compact
+    gain = float(params["gain"]) * compact + float(params["wide_gain"]) * (1.0 - compact)
     scene = linear * (1.0 + gain * mask ** float(params["shape"]))[..., None]
 
-    # 2. Loe sang: chi DEN loe (phan vuot nguong cua dom nho). Cua so va troi chi sang them,
-    # khong phu suong len vung toi.
-    source = np.maximum(scene - float(params["knee"]), 0.0) * compact[..., None]
+    # 2. Loe sang tu MOI phan vuot nguong (den, cua so, troi rat sang): quang co the phu len ca
+    # vung toi -- nguoi dung chon giu (05/10/2026) de model hoc go.
+    source = np.maximum(scene - float(params["knee"]), 0.0)
     if not source.any():
         out = linear_to_srgb(scene).astype(np.float64)
         return (out, out.copy()) if stages else out
@@ -201,6 +195,8 @@ def apply_light(image: np.ndarray, params: dict[str, object], stages: bool = Fal
             sigma = float(ghost["sigma_px"]) / factor
             image_ghost = ndimage.gaussian_filter(image_ghost, (sigma, sigma, 0), mode="constant")
             ghosts += float(ghost["strength"]) * image_ghost * np.asarray(ghost["hue"], dtype=np.float64)
+    glare = glare * tint                                # quang va tia sao mang mau den; bong ma co mau rieng
+    if params["ghosts"]:
         glare += resize_channels(ghosts, (height, width), Image.Resampling.BILINEAR)
-    lit = linear_to_srgb(scene + np.maximum(glare, 0.0) * tint).astype(np.float64)
+    lit = linear_to_srgb(scene + np.maximum(glare, 0.0)).astype(np.float64)
     return (linear_to_srgb(scene).astype(np.float64), lit) if stages else lit
