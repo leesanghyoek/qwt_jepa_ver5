@@ -38,6 +38,9 @@ sáng bị sáng mạnh hơn, vùng tối thì tối, bóng đèn lóe ánh sán
   panel, chỉ cho lần xem đó, và ưu tiên frame có đèn/cửa sổ sáng; checkpoint không đổi byte nào
   (`test_the_glare_preview_tests_a_checkpoint_trained_without_glare`). Model chưa từng thấy lóe thì đây là phép
   thử ngoài phân phối.
+- **Đo bằng số**: `tools/glare_metrics.py` (notebook Cell 14e) làm nhiễu cùng 64 frame hai lần với cùng tham số
+  camera, có lóe và không lóe, rồi in PSNR/SSIM/màu/đường nét của đầu vào và ảnh khôi phục, kèm số theo vùng
+  của ảnh sạch: vùng tối (độ sáng/sạch), vùng sáng, vùng quầng (nơi lóe sáng thêm vào) và pixel cháy trắng.
 - Đổi `corruption` nên hash cả hai phase đổi: phải train lại phase 1. Vector degradation của đầu dự đoán phase 1 giữ 8 mục cũ, chưa có mục lóe sáng. Chi phí:
   ~20 ms CPU mỗi ảnh có lóe (17 → 38 ms/ảnh cho cả bộ nhiễu); phase 1 cần ~25 mẫu/s, 4 worker vẫn dư.
 - Bằng chứng: `tests/test_light_corruption.py` (đèn sáng gấp nhiều lần mà vùng tối giữ nguyên; phần vượt ngưỡng lóe

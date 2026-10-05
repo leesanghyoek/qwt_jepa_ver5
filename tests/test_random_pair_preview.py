@@ -10,6 +10,7 @@ from qjepa.cli import main
 from qjepa.config import LIGHT_KEYS, load_config, serializable_config
 from test_kaggle_workflow import _write_dataset
 from test_sharp_cli import _run_until_done, _sharp_smoke
+from tools.glare_metrics import format_report, measure, region_metrics
 from tools.random_pair_preview import choose_indices, preview, with_glare
 
 
@@ -63,4 +64,34 @@ def test_the_glare_preview_tests_a_checkpoint_trained_without_glare(tmp_path):
     plain = preview(last, manifest, output=tmp_path / "plain", state=tmp_path / "state2.json", count=2,
                     image_mode="full", device="cpu", seed=3)
     assert all("light" not in item["image_corruption"] for item in plain["items"])
+    # Cell 14e: the same checkpoint measured with and without glare on the same frames.
+    report = measure(last, manifest, glare_config="configs/kaggle_glare.yaml", count=2, frames="random",
+                     image_mode="full", device="cpu")
+    assert len(report["rows"]) == 2 and report["trained_light_probability"] == 0.0
+    for row in report["rows"]:
+        assert row["light"]
+        for column in ("glare_input", "glare_output", "plain_input", "plain_output"):
+            assert np.isfinite(row[column]["image_psnr_db"]) and 0 <= row[column]["dark_fraction"] <= 1
+    text = format_report(report)
+    assert "KHÔNG" in text and text.rstrip().endswith("=== hết ===")
     assert last.read_bytes() == before
+
+
+def test_region_metrics_measure_the_dark_the_bright_the_halo_and_blown_pixels():
+    clean = torch.zeros(1, 3, 8, 8)
+    clean[..., :4] = 0.05                                   # dark left half
+    clean[..., 4:] = 0.8                                    # bright right half
+    halo = torch.zeros(8, 8, dtype=torch.bool)
+    halo[:, 2:6] = True
+    perfect = region_metrics(clean, clean, halo)
+    assert perfect["dark_mae255"] == perfect["bright_mae255"] == perfect["halo_mae255"] == 0
+    assert perfect["dark_brightness"] == pytest.approx(1) and perfect["bright_brightness"] == pytest.approx(1)
+    assert perfect["dark_fraction"] == perfect["bright_fraction"] == perfect["halo_fraction"] == 0.5
+    glared = clean.clone()
+    glared[..., 2:6] += 0.3                                 # light spilled over the halo columns
+    glared[..., 7] = 1.0                                    # one blown-out column
+    measured = region_metrics(glared, clean, halo)
+    # Halo: +0.3 on the two dark columns, clipped to 1 (+0.2) on the two bright ones -> mean 0.25.
+    assert measured["dark_brightness"] > 1 and measured["halo_mae255"] == pytest.approx(0.25 * 255, rel=1e-3)
+    # Blown out: column 7, and the two bright halo columns clipped to 1.
+    assert measured["white_fraction"] == pytest.approx(3 / 8) and measured["white_fraction_clean"] == 0
