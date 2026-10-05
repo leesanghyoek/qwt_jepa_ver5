@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+from .light import apply_light, draw_light_parameters, resize_channels
 from .motion import imu_blur_kernel
 from .rng import generator
 
@@ -71,6 +72,55 @@ class LowLightImageCorruptionConfig:
     # these keys -- is bit-identical to before they existed.
     noise_only_probability: float = 0.0
     low_light_only_probability: float = 0.0
+    # Lamps and glare (light.py), before the optics: small bright spots become many
+    # times brighter than the rest, with bloom, starburst and ghosts, so a lamp stays
+    # bright after the exposure drop and smears with the blur. Mode "full" only. Drawn from
+    # its own stream ("image_light"), and at 0 nothing is drawn at all: a config
+    # without these keys renders, and reports, exactly what it did before them.
+    light_probability: float = 0.0
+    light_threshold: tuple[float, float] = (0.5, 0.8)         # linear luminance where a light source starts
+    light_width: tuple[float, float] = (0.1, 0.2)
+    light_gain: tuple[float, float] = (5.0, 40.0)             # small bright spots (lamps): log-uniform
+    light_lamp_area: float = 0.02                             # lamp budget (frame fraction); more = texture, gain scaled down
+    light_wide_gain: tuple[float, float] = (0.0, 1.5)         # wide bright areas (sky)
+    light_shape: tuple[float, float] = (1.0, 3.0)
+    light_knee: tuple[float, float] = (1.0, 2.5)              # only light above this glares
+    light_bloom_strength: tuple[float, float] = (0.15, 1.5)   # log-uniform
+    light_bloom_sigma_px: tuple[tuple[float, float], ...] = ((1.5, 4.0), (6.0, 16.0), (20.0, 60.0))
+    light_warmth: tuple[float, float] = (-0.4, 1.0)           # glare colour: <0 cold LED, >0 warm sodium
+    light_star_probability: float = 0.6
+    light_star_spikes: tuple[int, ...] = (4, 6, 8, 10)
+    light_star_length: tuple[float, float] = (0.04, 0.18)     # fraction of the frame width
+    light_star_strength: tuple[float, float] = (0.05, 0.6)    # log-uniform
+    light_ghost_count: tuple[int, int] = (0, 3)
+    light_ghost_strength: tuple[float, float] = (0.01, 0.08)
+
+    def _validate_light(self) -> None:
+        def bounds(name: str, low_limit: float, strict: bool = False) -> None:
+            value = getattr(self, name)
+            if len(value) != 2 or not value[0] <= value[1] or value[0] < low_limit or (strict and value[0] <= low_limit):
+                sign = ">" if strict else ">="
+                raise ValueError(f"{name} must be [low, high] with low <= high and low {sign} {low_limit:g}")
+
+        for name in ("light_probability", "light_star_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0,1]")
+        if not 0 < self.light_lamp_area <= 1:
+            raise ValueError("light_lamp_area must be in (0,1]")
+        for name in ("light_threshold", "light_wide_gain", "light_ghost_count", "light_ghost_strength"):
+            bounds(name, 0.0)
+        for name in ("light_width", "light_gain", "light_shape", "light_knee", "light_bloom_strength",
+                     "light_star_length", "light_star_strength"):
+            bounds(name, 0.0, strict=True)
+        bounds("light_warmth", -1.0)
+        if self.light_warmth[1] > 1:
+            raise ValueError("light_warmth must stay in [-1, 1]")
+        if not self.light_bloom_sigma_px or any(len(b) != 2 or not 0 < b[0] <= b[1] for b in self.light_bloom_sigma_px):
+            raise ValueError("light_bloom_sigma_px must be a list of [low, high] with 0 < low <= high")
+        if not self.light_star_spikes or any(int(n) < 2 for n in self.light_star_spikes):
+            raise ValueError("light_star_spikes must list spike counts >= 2")
+        if self.light_ghost_count[1] > 8:
+            raise ValueError("light_ghost_count must stay at most 8")
 
     def validate(self) -> None:
         if not 0 <= self.clean_probability <= 1:
@@ -98,6 +148,7 @@ class LowLightImageCorruptionConfig:
             raise ValueError("motion_max_radius_px must be positive")
         if self.motion_path_samples < 3:
             raise ValueError("motion_path_samples must be at least 3")
+        self._validate_light()
 
 
 def _motion_kernel(length: int, angle_radians: float) -> np.ndarray:
@@ -126,6 +177,14 @@ def _resize_roundtrip(image: np.ndarray, scale: float) -> np.ndarray:
     pil = pil.resize(small_size, Image.Resampling.BILINEAR)
     pil = pil.resize((width, height), Image.Resampling.BILINEAR)
     return np.asarray(pil, dtype=np.float64) / 255.0
+
+
+def _resize_roundtrip_hdr(image: np.ndarray, scale: float) -> np.ndarray:
+    """_resize_roundtrip in float: the uint8 round trip would clip every lamp to 1."""
+    height, width = image.shape[:2]
+    small = resize_channels(image, (max(1, round(height * scale)), max(1, round(width * scale))),
+                            Image.Resampling.BILINEAR)
+    return resize_channels(small, (height, width), Image.Resampling.BILINEAR)
 
 
 def _jpeg(image: np.ndarray, quality: int) -> np.ndarray:
@@ -256,6 +315,11 @@ class LowLightImageCorruptor:
         low_light_only = (cfg.noise_only_probability <= variant
                           < cfg.noise_only_probability + cfg.low_light_only_probability)
         parameters.update(variant_draw=variant, low_light=not noise_only, sensor_noise=not low_light_only)
+        if cfg.light_probability > 0:
+            light_rng = generator(self.master_seed, "image_light", split, realization, trajectory, segment)
+            light = mode == "full" and float(light_rng.random()) < cfg.light_probability
+            drawn = draw_light_parameters(light_rng, cfg)
+            parameters.update(light=bool(light), light_params=drawn if light else None)
         return parameters
 
     def __call__(
@@ -335,6 +399,11 @@ class LowLightImageCorruptor:
 
         optical, low_light, sensor_noise = active_stages(params)
         image = image_clean.astype(np.float64, copy=True)
+        # Lamps and glare first: the blur below smears them, the exposure drop below
+        # leaves them blown out. From here on values above 1 are real light.
+        hdr = bool(params.get("light"))
+        if hdr:
+            image = apply_light(image, params["light_params"])
 
         if optical and params["defocus"]:
             image = ndimage.gaussian_filter(
@@ -366,7 +435,7 @@ class LowLightImageCorruptor:
                 axis=-1,
             )
         if optical and params["downsample"]:
-            image = _resize_roundtrip(image, float(params["downsample_scale"]))
+            image = (_resize_roundtrip_hdr if hdr else _resize_roundtrip)(image, float(params["downsample_scale"]))
 
         if low_light:
             image *= np.asarray(params["white_balance"], dtype=np.float64)[None, None, :]

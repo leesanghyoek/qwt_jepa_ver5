@@ -1,0 +1,44 @@
+# p21_glare: p20_gray + DEN VA LOE SANG trong nhieu anh. Chi khac p20_gray o cac khoa
+# corruption.image.light_*, nen A/B voi p20_gray la sach.
+#
+# Yeu cau cua nguoi dung (05/10/2026): nhieu phuc tap hon -- vung sang bi sang manh hon, vung toi
+# thi toi, bong den loe anh sang ra, moi gia tri ngau nhien. Da duyet bang mat qua
+# tools/light_corruption_preview.py (cot "Canh HDR" va "+ loe sang"); buoc "nhieu moi" (toi,
+# duong cong S, hat) cua ban xem truoc bi bo, phan thieu sang / mo / hat van la cua repo.
+#
+# qjepa/corruptions/light.py, chay TRUOC buoc mo, tren anh sang tuyen tinh, chi o mode "full":
+#  1. Canh HDR: dom sang nho (den, cua so) sang gap light_gain lan, vung sang rong (troi) chi them
+#     light_wide_gain -- nen sau buoc giam phoi sang cua repo den van chay trang, phan con lai toi.
+#  2. Loe sang: phan vuot light_knee loe ra -- quang Gauss ba tang co mau (am nhu den sodium toi
+#     lanh nhu LED), tia sao (light_star_*), bong ma doi xung qua tam (light_ghost_*).
+# Buoc mo cua repo sau do keo den thanh vet; buoc thu nho anh cua repo lam bang so thuc de den
+# khong bi cat ve 1. Anh sach (dich cua model) KHONG co loe: model phai go quang ra khoi canh.
+#
+# Doi corruption -> doi hash ca hai phase: PHAI train lai phase 1. PSNR validation khong so thang
+# duoc voi p20 (bank validation cung bi loe). Vector degradation (dau du doan phase 1) giu 8 muc
+# cu, chua co muc loe sang. Them ~20 ms CPU moi anh co loe (4 worker van du cho phase 1).
+# Moi khoa light_* phai ghi ra o day: validate_config bat buoc, de hash ghi dung thu da train.
+extends: kaggle_gray.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p21_glare
+
+corruption:
+  image:
+    light_probability: 0.8                 # 20% frame giu nhieu cu: model van thay phan phoi quen
+    light_threshold: [0.5, 0.8]            # do sang tuyen tinh bat dau la "nguon sang"
+    light_width: [0.1, 0.2]
+    light_gain: [5.0, 40.0]                # den: sang gap 5-40 lan (log-uniform)
+    light_lamp_area: 0.02                  # ngan sach dien tich den (2% khung); nhieu hon la van sang (la cay co nang): he so giam theo ti le
+    light_wide_gain: [0.0, 1.5]            # troi: chi sang them chut it
+    light_shape: [1.0, 3.0]
+    light_knee: [1.0, 2.5]                 # chi phan vuot muc nay moi loe (den, khong phai troi)
+    light_bloom_strength: [0.15, 1.5]      # log-uniform
+    light_bloom_sigma_px: [[1.5, 4.0], [6.0, 16.0], [20.0, 60.0]]   # ba tang quang, px o 256x256
+    light_warmth: [-0.4, 1.0]              # mau quang: <0 lanh (LED), >0 am (sodium)
+    light_star_probability: 0.6
+    light_star_spikes: [4, 6, 8, 10]
+    light_star_length: [0.04, 0.18]        # phan cua canh anh
+    light_star_strength: [0.05, 0.6]       # log-uniform
+    light_ghost_count: [0, 3]
+    light_ghost_strength: [0.01, 0.08]

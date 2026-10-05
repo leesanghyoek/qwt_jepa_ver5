@@ -124,7 +124,7 @@ def test_the_phase1_anchor_decodes_luminance_coefficients():
 
 def test_old_configs_build_rgb_and_the_key_changes_both_hashes():
     for path in Path("configs").glob("*.yaml"):
-        if path.name != "kaggle_gray.yaml":
+        if path.name not in ("kaggle_gray.yaml", "kaggle_glare.yaml"):     # p21_glare extends p20_gray
             assert "image_input" not in load_config(path)["model"], path
     plain, grey = _config(), _config("luminance")
     assert build_backbone(plain).image_transform.coeff_channels == 48

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import random
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase1.covariance_pooling must be per_position or pooled")
     _validate_phase1_predictor(phase1)
     _validate_sharpness(config)
+    _validate_light(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -460,6 +462,26 @@ def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
 
 def _nonnegative_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and np.isfinite(value) and value >= 0
+
+
+LIGHT_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("light_"))
+
+
+def _validate_light(config: dict[str, Any]) -> None:
+    """corruption.image.light_*: den va loe sang (qjepa/corruptions/light.py).
+
+    Bat (light_probability > 0) thi PHAI ghi du moi khoa light_*: hash chi doc file config,
+    nen gia tri mac dinh trong dataclass ma doi ve sau se khong lo ra trong hash."""
+    image = config["corruption"]["image"]
+    try:
+        LowLightImageCorruptionConfig(**image).validate()
+    except TypeError as error:
+        raise ValueError(f"corruption.image: {error}") from error
+    if float(image.get("light_probability", 0.0)) > 0:
+        missing = [key for key in LIGHT_KEYS if key not in image]
+        if missing:
+            raise ValueError("corruption.image.light_probability > 0 needs every light_* key written out "
+                             f"(the hash records only what the config says); missing: {', '.join(missing)}")
 
 
 def _validate_sharpness(config: dict[str, Any]) -> None:
