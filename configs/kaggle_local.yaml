@@ -10,6 +10,12 @@
 #  - It mo tong hop: lech tieu cu 68% -> 30% (0,3-0,7 px), thu nho 32% -> 10%, chuyen dong 20% -> 10%; anh hong
 #    con 63% chi tiet canh (p24: 43%). Dung bo thong so ban xem truoc nguoi dung da duyet
 #    (outputs/light_corruption/p25_draft.png).
+#  - KHONG den / loe (light_probability 0): quang, tia sao, bong ma phu len anh nhung mang ma model khong the biet
+#    ben duoi co gi -- mat thong tin, khong phai nhieu de hoc go (nguoi dung, 06/10/2026); buoc tang sang den ma bo
+#    quang cung chi bien be mat gan trang thanh mang trang chay.
+#  - illum_highlight_rolloff: vung duoc chieu sang hon NEN MEM ve phia trang (nhu duong cong vung sang cua may
+#    anh) thay vi cat cut: van sang len ma giu chi tiet. Cat cut: trung binh 2,2% pixel chay (anh sach 0,6%),
+#    15% anh chay > 5% dien tich.
 # Doi corruption -> train lai ca hai phase.
 extends: kaggle_env.yaml
 
@@ -27,3 +33,5 @@ corruption:
     defocus_sigma_px: [0.3, 0.7]        # p24: [0.3, 0.95]
     downsample_probability: 0.1         # p24: 0.32
     motion_probability: 0.1             # p24: 0.2
+    light_probability: 0.0              # p24: 0.8 -- khong den, quang, sao, bong ma
+    illum_highlight_rolloff: true       # vung sang nen mem thay vi chay trang

@@ -93,7 +93,9 @@ def test_bad_source_sizes_are_refused_and_kaggle_local_is_p24_plus_local_light_a
         item.pop("_config_path", None)
         item["runtime"].pop("output_dir")
     changed = {"exposure_gain", "tone_gamma", "illum_strength", "illum_blobs", "illum_gradient",
-               "defocus_probability", "defocus_sigma_px", "downsample_probability", "motion_probability"}
+               "defocus_probability", "defocus_sigma_px", "downsample_probability", "motion_probability",
+               "light_probability"}
+    assert local["corruption"]["image"].pop("illum_highlight_rolloff") is True
     for key in changed:
         assert local["corruption"]["image"].pop(key) != env["corruption"]["image"].pop(key), key
     assert local == env

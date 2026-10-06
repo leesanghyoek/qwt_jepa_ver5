@@ -159,9 +159,12 @@ def draw_illumination_parameters(rng: np.random.Generator, cfg) -> dict[str, obj
                 "elongation": float(rng.uniform(*cfg.illum_smudge_elongation)),
                 "angle": float(rng.uniform(0.0, math.pi)),
                 "depth": float(rng.uniform(*cfg.illum_smudge_depth))} for _ in range(SMUDGES_MAX)][:smudge_count]
-    return {"gradient_stops": float(rng.uniform(*cfg.illum_gradient)),
-            "gradient_angle": float(rng.uniform(0.0, 2.0 * math.pi)),
-            "blobs": blobs, "smudges": smudges if smudge_draw < cfg.illum_smudge_probability else []}
+    drawn = {"gradient_stops": float(rng.uniform(*cfg.illum_gradient)),
+             "gradient_angle": float(rng.uniform(0.0, 2.0 * math.pi)),
+             "blobs": blobs, "smudges": smudges if smudge_draw < cfg.illum_smudge_probability else []}
+    if getattr(cfg, "illum_highlight_rolloff", False):    # chi khi bat: tham so cu giu nguyen
+        drawn["rolloff"] = True
+    return drawn
 
 
 def illumination_field(height: int, width: int, params: dict[str, object]) -> np.ndarray:
@@ -234,6 +237,17 @@ def apply_fog(linear: np.ndarray, params: dict[str, object]) -> np.ndarray:
     return linear * t + airlight * (1.0 - t)
 
 
+def highlight_rolloff(linear: np.ndarray, knee: float = 0.8) -> np.ndarray:
+    """Nen mem vung sang ve phia 1 thay vi cat: x duoi ``knee`` giu nguyen, tren do tien dan toi 1.
+
+    Vai dang phan thuc (Reinhard): knee + (1 - knee) * t / (1 + t), t = (x - knee) / (1 - knee). Lien tuc,
+    dao ham 1 tai ``knee``, tang ngat va tien ve 1 CHAM (x = 1,5 / 3 / 11 -> 0,956 / 0,983 / 0,996: van
+    phan biet duoc o 8 bit; vai mu exp da bang 1 tu x ~ 1,5) -- nhu duong cong vung sang cua may anh:
+    cho duoc chieu sang hon van sang len ma giu chi tiet."""
+    t = np.maximum(linear - knee, 0.0) / (1.0 - knee)
+    return np.where(linear > knee, knee + (1.0 - knee) * t / (1.0 + t), linear)
+
+
 def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: bool = False,
                 illumination: dict[str, object] | None = None, fog: dict[str, object] | None = None):
     """Canh HDR + anh sang khong deu + loe sang o sRGB mo rong (> 1 duoc giu), float64 [H,W,3].
@@ -246,6 +260,8 @@ def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: boo
     field = None if illumination is None else illumination_field(height, width, illumination)[..., None]
     if params is None:                                  # khong loe: chi anh sang khong deu va/hoac suong
         scene = linear * (1.0 if field is None else field)
+        if illumination is not None and illumination.get("rolloff"):
+            scene = highlight_rolloff(scene)
         if fog is not None:
             scene = apply_fog(scene, fog)
         out = linear_to_srgb(scene).astype(np.float64)
@@ -267,6 +283,8 @@ def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: boo
     if field is not None:
         # Anh sang khong deu chieu len ca canh (ca den): cho duoc chieu sang hon loe manh hon.
         scene = scene * field
+        if illumination.get("rolloff"):
+            scene = highlight_rolloff(scene)
     if fog is not None:
         # Suong truoc loe: den xa bi suong lam mo, va loe tinh tren canh da qua suong.
         scene = apply_fog(scene, fog)

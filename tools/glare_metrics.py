@@ -134,7 +134,9 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
             "trained_illum_probability": trained_illum,
             "image_input": config["model"].get("image_input", "rgb"), "split": split,
             "image_mode": image_mode, "frames": frames, "glare_config": str(glare_config),
-            "glare_probability": glare_probability, "seed": seed, "rows": rows}
+            "glare_probability": glare_probability, "seed": seed, "rows": rows,
+            # p25 has no lamps/glare: the "glare" frames carry only the uneven light.
+            "glare_has_light": float(glare["corruption"]["image"].get("light_probability", 0.0)) > 0}
 
 
 def _mean(rows: list[dict], column: str, key: str) -> float:
@@ -149,16 +151,22 @@ def _ratio(rows: list[dict], column: str, key: str) -> float:
 
 def format_report(report: dict) -> str:
     rows = report["rows"]
+    lit = report.get("glare_has_light", True)
+    tag, tag_off = ("lóe", "không lóe") if lit else ("a.sáng", "không a.sáng")     # a.sáng = nhiễu ánh sáng theo vùng
+    titles = dict(zip((column for column, _ in COLUMNS), (f"vào ({tag})", f"ra ({tag})", "vào (k.lóe)" if lit
+                                                         else "vào (k.a.s)", "ra (k.lóe)" if lit else "ra (k.a.s)")))
     lines = ["=== ĐO CHỈ SỐ ẢNH (Cell 14e) — dán nguyên khối này cho agent ===",
              f"checkpoint: {report['checkpoint']}",
              f"model train với lóe sáng: {'có' if report['trained_light_probability'] > 0 else 'KHÔNG'} "
              f"(light_probability {report['trained_light_probability']:g}) | ánh sáng không đều: "
              f"{'có' if report.get('trained_illum_probability', 0) > 0 else 'KHÔNG'} | backbone đọc: {report['image_input']}",
              f"{len(rows)} frame {report['split']} ({'×'.join(map(str, report.get('frame_size', ['?'])))}), "
-             f"mode {report['image_mode']}, chọn {report['frames']}, "
-             f"lóe {report['glare_probability']:.0%} từ {Path(report['glare_config']).name}, seed {report['seed']} "
-             f"| frame có lóe: {sum(row['light'] for row in rows)}/{len(rows)}",
-             "", f"{'chỉ số (trung bình)':<46}" + "".join(f"{title:>13}" for _, title in COLUMNS)]
+             f"mode {report['image_mode']}, chọn {report['frames']}, " +
+             (f"lóe {report['glare_probability']:.0%} từ {Path(report['glare_config']).name}, seed {report['seed']} "
+              f"| frame có lóe: {sum(row['light'] for row in rows)}/{len(rows)}" if lit else
+              f"nhiễu ánh sáng theo vùng {report['glare_probability']:.0%} từ {Path(report['glare_config']).name} "
+              f"(KHÔNG lóe), seed {report['seed']}"),
+             "", f"{'chỉ số (trung bình)':<46}" + "".join(f"{titles[column]:>13}" for column, _ in COLUMNS)]
 
     def line(label, values, fmt):
         lines.append(f"{label:<46}" + "".join(f"{format(v, fmt) if math.isfinite(v) else '—':>13}" for v in values))
@@ -188,10 +196,10 @@ def format_report(report: dict) -> str:
     psnr = {column: _mean(rows, column, "image_psnr_db") for column, _ in COLUMNS}
     lines += ["--- tóm tắt ---",
               f"nhiễu ánh sáng làm PSNR đầu vào đổi {psnr['glare_input'] - psnr['plain_input']:+.2f} dB",
-              f"model: {psnr['glare_input']:.2f} → {psnr['glare_output']:.2f} dB trên ảnh lóe "
+              f"model: {psnr['glare_input']:.2f} → {psnr['glare_output']:.2f} dB trên ảnh {tag} "
               f"({psnr['glare_output'] - psnr['glare_input']:+.2f}); {psnr['plain_input']:.2f} → "
-              f"{psnr['plain_output']:.2f} dB không lóe ({psnr['plain_output'] - psnr['plain_input']:+.2f})",
-              "5 frame model kém nhất trên ảnh lóe (PSNR vào → ra | % quầng):"]
+              f"{psnr['plain_output']:.2f} dB {tag_off} ({psnr['plain_output'] - psnr['plain_input']:+.2f})",
+              f"5 frame model kém nhất trên ảnh {tag} (PSNR vào → ra | % sáng thêm):"]
     worst = sorted(rows, key=lambda row: row["glare_output"]["image_psnr_db"] - row["glare_input"]["image_psnr_db"])
     for row in worst[:5]:
         lines.append(f"  {row['sample_id'][:46]:<46} {row['glare_input']['image_psnr_db']:6.2f} → "

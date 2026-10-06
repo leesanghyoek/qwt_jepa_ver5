@@ -149,7 +149,7 @@ def corruptor_from(config_name: str, light_probability: float | None = None) -> 
     config = _config_chain(REPO / "configs" / config_name)
     image = LowLightImageCorruptionConfig(**config["corruption"]["image"])
     if light_probability is not None:
-        image = replace(image, light_probability=light_probability,
+        image = replace(image, light_probability=light_probability if image.light_probability > 0 else 0.0,
                         illum_probability=light_probability if image.illum_probability > 0 else 0.0,
                         fog_probability=light_probability if image.fog_probability > 0 else 0.0,
                         env_clear_probability=0.0)
@@ -226,9 +226,12 @@ def main() -> int:
     live = has_window and not args.no_show
 
     # Mo cua so NGAY (truoc khi doc anh), roi dien dan tung hang khi tinh xong.
-    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nnhòe tối, đèn", "scene"),
-               ("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"), (f"Nhiễu train cũ\n({args.baseline})", "old"),
-               (f"Nhiễu train mới\n({args.config})", "new")]
+    # Config khong co den / loe (p25): bo cot "+ loe sang", cot canh khong nhac den.
+    glares = float(_config_chain(REPO / "configs" / args.config)["corruption"]["image"].get("light_probability", 0)) > 0
+    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nnhòe tối" + (", đèn" if glares else ""), "scene")]
+    if glares:
+        columns.append(("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"))
+    columns += [(f"Nhiễu train cũ\n({args.baseline})", "old"), (f"Nhiễu train mới\n({args.config})", "new")]
     cell = min(16.0 / len(columns), 9.0 / args.count)
     png_size = (cell * len(columns), cell * args.count + 1.2)
     # layout "constrained": tinh lai moi lan ve, nen cua so phong to / keo gian van khong de chu.

@@ -19,6 +19,12 @@ cần độ sáng **từng vùng** thay đổi theo môi trường, model làm r
   dải sáng 0,5–3 stop). Ảnh cuối: chênh giữa các vùng ×2,8 trung vị / ×5,7 p90 (p24 ×2,3 / ×3,9), độ sáng chung 0,76
   (p24 0,74). **Ít mờ tổng hợp**: lệch tiêu cự 68% → 30% (0,3–0,7 px), thu nhỏ 32% → 10%, chuyển động 20% → 10%; ảnh
   hỏng còn 63% chi tiết cạnh (p24 43%). Đúng bộ thông số bản xem trước người dùng đã duyệt.
+- **Không đèn / lóe** (`light_probability: 0`): quầng, tia sao, bóng ma phủ lên ảnh những mảng mà model không thể biết
+  bên dưới có gì — mất thông tin, không phải nhiễu (người dùng); bước tăng sáng đèn mà bỏ quầng cũng chỉ biến bề
+  mặt gần trắng thành mảng cháy. **`illum_highlight_rolloff: true`**: vùng được chiếu sáng nén mềm về trắng (vai
+  phân thức kiểu Reinhard, `light.highlight_rolloff`; 1,5 / 3 / 11 × trắng → 0,956 / 0,983 / 0,996) thay vì cắt:
+  pixel cháy trắng 2,2% → 0,1% (ảnh sạch 0,6%), ảnh cháy > 5% diện tích 15% → 2%. Thiếu khoá: cắt như cũ (công tắc
+  tuỳ chọn, không bắt ghi ra). Test: `test_highlight_rolloff_brightens_without_clipping_and_p25_drops_the_glare`.
 - **Train trên 256** như các run trước (ảnh đọc rồi thu về 256). Mọi run đều thế: config bắt buộc `image_size` 256,
   nên đổi dataset sang 640 không làm ảnh ra nét hơn. Có thử **`data.source_size`** (đọc ảnh ở 640 gốc, train trên mảnh
   256 cắt từ đó, chạy cả khung 640 — model toàn tích chập, forward 640 cho ZI 40×40; `evaluate --full-frame`, `infer`,

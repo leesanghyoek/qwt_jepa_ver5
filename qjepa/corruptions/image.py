@@ -112,6 +112,10 @@ class LowLightImageCorruptionConfig:
     illum_smudge_size: tuple[float, float] = (0.05, 0.2)    # fraction of the frame (short axis)
     illum_smudge_elongation: tuple[float, float] = (1.0, 4.0)
     illum_smudge_depth: tuple[float, float] = (0.3, 0.85)   # darkening at the centre
+    # Brightened regions roll off softly towards white (light.highlight_rolloff) instead
+    # of clipping, like a camera's highlight curve: lit areas get brighter but keep their
+    # detail. Off: hard clip at the sensor, as before.
+    illum_highlight_rolloff: bool = False
     # Fog / haze (light.apply_fog): I = J*t + A*(1 - t), t = exp(-density * depth) on a
     # synthetic depth (the dataset has none) that grows towards a random, tilted horizon,
     # with thicker and thinner patches; forward scattering softens J where the fog is
@@ -162,6 +166,8 @@ class LowLightImageCorruptionConfig:
         bounds("illum_smudge_depth", 0.0)
         if self.illum_smudge_depth[1] >= 1:
             raise ValueError("illum_smudge_depth must stay below 1")
+        if not isinstance(self.illum_highlight_rolloff, bool):
+            raise ValueError("illum_highlight_rolloff must be true or false")
         if self.illum_blobs[1] > 8 or self.illum_smudge_count[1] > 6:
             raise ValueError("illum_blobs must stay at most 8 and illum_smudge_count at most 6")
         for name in ("fog_probability", "env_clear_probability"):

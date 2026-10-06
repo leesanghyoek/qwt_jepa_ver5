@@ -256,14 +256,14 @@ def test_uneven_light_is_off_without_its_keys_and_moves_no_other_draw():
 
 
 def test_kaggle_illum_is_p22_plus_uneven_light_and_medium_glare_and_spells_its_keys_out():
-    from qjepa.config import ILLUM_KEYS
+    from qjepa.config import ILLUM_KEYS, OPTIONAL_KEYS
     light = serializable_config(load_config("configs/kaggle_light.yaml"))
     illum = serializable_config(load_config("configs/kaggle_illum.yaml"))
-    assert set(ILLUM) == set(ILLUM_KEYS) and ILLUM["illum_probability"] > 0
+    assert set(ILLUM) == set(ILLUM_KEYS) - set(OPTIONAL_KEYS) and ILLUM["illum_probability"] > 0
     for config in (light, illum):
         config.pop("_config_path", None)
         config["runtime"].pop("output_dir")
-    for key in ILLUM_KEYS:
+    for key in set(ILLUM_KEYS) - set(OPTIONAL_KEYS):
         illum["corruption"]["image"].pop(key)
     for key in ("light_knee", "light_wide_gain", "light_gain", "light_bloom_strength", "light_ghost_strength"):
         assert illum["corruption"]["image"].pop(key) != light["corruption"]["image"].pop(key), key
@@ -357,3 +357,25 @@ def test_kaggle_env_is_p23_plus_clear_frames_and_less_motion_blur_without_fog():
         bad["corruption"]["image"][key] = value
         with pytest.raises(ValueError):
             validate_config(bad)
+
+
+def test_highlight_rolloff_brightens_without_clipping_and_p25_drops_the_glare():
+    from qjepa.corruptions.light import highlight_rolloff, illumination_field
+    x = np.linspace(0.0, 20.0, 2001)
+    y = highlight_rolloff(x)
+    assert np.allclose(y[x <= 0.8], x[x <= 0.8]) and y.max() < 1.0 and np.all(np.diff(y) > 0)   # identity, no clip, monotonic
+    lit = {"gradient_stops": 0.0, "gradient_angle": 0.0, "smudges": [],
+           "blobs": [{"y": 0.5, "x": 0.5, "sigma": 0.3, "stops": 3.0}]}
+    flat = np.full((64, 64, 3), 0.7)
+    clipped = _luminance(apply_light(flat, None, illumination=lit))
+    rolled = _luminance(apply_light(flat, None, illumination=dict(lit, rolloff=True)))
+    assert (clipped > 0.99).mean() > 0.05 and (rolled > 0.99).mean() == 0.0     # brightened, but no blown pixels
+    assert rolled[32, 32] > _luminance(flat)[32, 32]                             # the lit region is still brighter
+    p25 = load_config("configs/kaggle_local.yaml")["corruption"]["image"]
+    assert p25["light_probability"] == 0.0 and p25["illum_highlight_rolloff"] is True
+    corruptor = LowLightImageCorruptor(LowLightImageCorruptionConfig(**{**p25, "clean_probability": 0.0}), 73128)
+    for index in range(20):
+        params = _call(corruptor, _frame(), index)[1]
+        assert not params.get("light") and not params.get("light_params")         # no halo, star or ghost
+        if params.get("illumination"):
+            assert params["illumination_params"]["rolloff"] is True

@@ -469,6 +469,8 @@ def _nonnegative_number(value: Any) -> bool:
 LIGHT_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("light_"))
 ILLUM_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("illum_"))
 FOG_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("fog_"))
+# Optional switches inside a group: absent means the old behaviour, so they need not be written out.
+OPTIONAL_KEYS = ("illum_highlight_rolloff",)
 
 
 def _validate_light(config: dict[str, Any]) -> None:
@@ -484,7 +486,7 @@ def _validate_light(config: dict[str, Any]) -> None:
     for switch, keys in (("light_probability", LIGHT_KEYS), ("illum_probability", ILLUM_KEYS),
                          ("fog_probability", FOG_KEYS)):
         if float(image.get(switch, 0.0)) > 0:
-            missing = [key for key in keys if key not in image]
+            missing = [key for key in keys if key not in image and key not in OPTIONAL_KEYS]
             if missing:
                 raise ValueError(f"corruption.image.{switch} > 0 needs every {switch.split('_')[0]}_* key written "
                                  f"out (the hash records only what the config says); missing: {', '.join(missing)}")

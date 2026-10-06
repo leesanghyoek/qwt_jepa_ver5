@@ -164,7 +164,7 @@ imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dila
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
 if LOCAL:
-    text(W - 20, 26, 'p25_local — tối THEO VÙNG thay cho một lớp tối đều · ít mờ tổng hợp · lóe · nhánh ÁNH SÁNG (H)',
+    text(W - 20, 26, 'p25_local — tối THEO VÙNG (sáng nén mềm) thay lớp tối đều · ít mờ · KHÔNG lóe · nhánh ÁNH SÁNG (H)',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 44, 'kiến trúc như p22_light · H cân sáng theo vị trí (trừ sương V, nhân sáng g) · 256 × 256'
          ' · 20% ảnh môi trường trong', size=12, color='#AD1457', anchor='end')

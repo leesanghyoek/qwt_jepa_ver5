@@ -69,15 +69,15 @@ def with_glare(config: dict, glare_config: str | Path, probability: float | None
     """The checkpoint's recipe plus the light_* (and illum_*, uneven light) keys of ``glare_config`` (a copy)."""
     image = load_config(glare_config)["corruption"]["image"]
     light = {key: value for key, value in image.items() if key in LIGHT_KEYS or key in ILLUM_KEYS or key in FOG_KEYS}
-    if not any(key in LIGHT_KEYS for key in light):
-        raise ValueError(f"{glare_config} has no corruption.image.light_* keys")
+    if not light:
+        raise ValueError(f"{glare_config} has no corruption.image.light_*/illum_*/fog_* keys")
     config = copy.deepcopy(config)
     config["corruption"]["image"].update(light)
     if probability is not None:
         if not 0 < probability <= 1:
             raise ValueError("glare probability must be in (0, 1]")
-        config["corruption"]["image"]["light_probability"] = float(probability)
-        for switch in ("illum_probability", "fog_probability"):
+        # Only the stages that config uses: a run without glare (p25) is not previewed with it.
+        for switch in ("light_probability", "illum_probability", "fog_probability"):
             if float(image.get(switch, 0.0)) > 0:
                 config["corruption"]["image"][switch] = float(probability)
     return config
