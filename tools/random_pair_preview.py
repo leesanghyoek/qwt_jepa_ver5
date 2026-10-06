@@ -31,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from qjepa.cli import _dataset, _system_from_phase2
 from qjepa.config import FOG_KEYS, ILLUM_KEYS, LIGHT_KEYS, load_config
 from qjepa.data import read_manifest
-from qjepa.data.dataset import load_rgb
 from qjepa.evaluation.metrics import image_metrics, imu_metrics
 
 
@@ -92,7 +91,7 @@ def _bright_indices(dataset, eligible: list[int], rng: np.random.Generator, want
     weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
     for position in order:
         index = eligible[int(position)]
-        clean = load_rgb(dataset.samples[index].image_path, dataset.image_size)
+        clean = dataset._clean_frame(dataset.samples[index])
         if float(((clean @ weights) > 0.9).mean()) >= fraction:
             found.append(index)
             if len(found) >= want:
@@ -191,8 +190,9 @@ def preview(
     realization = int(rng.integers(1, 2**31))
     if not explicit_seed and realization == previous.get("realization"):
         realization = 1 + realization % (2**31 - 1)
-    dataset = _dataset(config, manifest, split, fixed_realization=True,
-                       image_mode=image_mode, imu_mode=imu_mode)
+    # A run trained on crops of bigger frames (data.source_size) is shown on whole frames, e.g. 640x640.
+    dataset = _dataset(config, manifest, split, fixed_realization=True, image_mode=image_mode, imu_mode=imu_mode,
+                       full_frame=bool(config["data"].get("source_size")))
     dataset.set_realization(realization)
     eligible = _eligible_indices(dataset, image_mode)
     if glare_config is not None:

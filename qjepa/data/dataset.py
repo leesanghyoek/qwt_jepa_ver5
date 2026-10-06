@@ -94,6 +94,8 @@ class PairedCameraImuDataset(Dataset):
         cache_size: int = 4,
         sensor_reference: bool = False,
         hflip_probability: float = 0.0,
+        source_size: tuple[int, int] | None = None,
+        full_frame: bool = False,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -106,6 +108,16 @@ class PairedCameraImuDataset(Dataset):
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
         self.imu_corruptor = imu_corruptor or TrajectoryImuCorruptor(cache_size=cache_size)
         self.image_size = image_size
+        # data.source_size: the frame is read at this size (TartanAir 640: its own pixels, no
+        # downscale) and a crop of image_size goes through the corruption -- at a place drawn
+        # per (sample, realization), so every epoch sees another crop and the fixed validation
+        # realization always the same one. full_frame: the whole source frame (inference and
+        # full-resolution evaluation; the model is fully convolutional). None: read at
+        # image_size, as before the key existed.
+        if source_size is not None and (source_size[0] < image_size[0] or source_size[1] < image_size[1]):
+            raise ValueError("source_size must be at least image_size")
+        self.source_size = None if source_size is None else tuple(int(v) for v in source_size)
+        self.full_frame = bool(full_frame) and self.source_size is not None
         self.realization = realization
         self.image_mode = image_mode
         self.imu_mode = imu_mode
@@ -137,11 +149,26 @@ class PairedCameraImuDataset(Dataset):
             image_mode, imu_mode = str(choice["image_mode"]), str(choice["imu_mode"])
         return image_mode, imu_mode
 
+    def crop_origin(self, sample: PairedSample) -> tuple[int, int]:
+        """Top-left corner of this sample's crop in its source frame (deterministic)."""
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "source_crop", sample.sample_id, self.realization))
+        return (int(rng.integers(0, self.source_size[0] - self.image_size[0] + 1)),
+                int(rng.integers(0, self.source_size[1] - self.image_size[1] + 1)))
+
+    def _clean_frame(self, sample: PairedSample) -> np.ndarray:
+        if self.source_size is None:
+            return load_rgb(sample.image_path, self.image_size)
+        frame = load_rgb(sample.image_path, self.source_size)
+        if self.full_frame:
+            return frame
+        top, left = self.crop_origin(sample)
+        return np.ascontiguousarray(frame[top:top + self.image_size[0], left:left + self.image_size[1]])
+
     def __getitem__(self, index: int) -> dict[str, object]:
         sample = self.samples[index]
         image_mode, imu_mode = self._scenario_modes(sample)
         imu_all, imu_times_all = self.cache.get(sample)
-        clean_image = load_rgb(sample.image_path, self.image_size)
+        clean_image = self._clean_frame(sample)
         clean_imu = np.asarray(imu_all[sample.imu_start : sample.imu_end], dtype=np.float32)
         imu_times = np.asarray(imu_times_all[sample.imu_start : sample.imu_end], dtype=np.float64)
         corrupt = dict(

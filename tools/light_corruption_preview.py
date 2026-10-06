@@ -226,7 +226,7 @@ def main() -> int:
     live = has_window and not args.no_show
 
     # Mo cua so NGAY (truoc khi doc anh), roi dien dan tung hang khi tinh xong.
-    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nsương, nhòe tối, đèn", "scene"),
+    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nnhòe tối, đèn", "scene"),
                ("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"), (f"Nhiễu train cũ\n({args.baseline})", "old"),
                (f"Nhiễu train mới\n({args.config})", "new")]
     cell = min(16.0 / len(columns), 9.0 / args.count)

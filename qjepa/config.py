@@ -135,6 +135,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_sharpness(config)
     _validate_light(config)
     _validate_light_branch(config)
+    _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -487,6 +488,20 @@ def _validate_light(config: dict[str, Any]) -> None:
             if missing:
                 raise ValueError(f"corruption.image.{switch} > 0 needs every {switch.split('_')[0]}_* key written "
                                  f"out (the hash records only what the config says); missing: {', '.join(missing)}")
+
+
+def _validate_source_size(config: dict[str, Any]) -> None:
+    """data.source_size: read frames at this size and train on image_size crops of them (absent: as before)."""
+    source = config["data"].get("source_size")
+    if source is None:
+        return
+    if (not isinstance(source, (list, tuple)) or len(source) != 2
+            or any(isinstance(v, bool) or not isinstance(v, int) for v in source)):
+        raise ValueError("data.source_size must be two integers [height, width]")
+    if any(s < i for s, i in zip(source, config["data"]["image_size"])):
+        raise ValueError("data.source_size must be at least data.image_size (the training crop)")
+    if any(s % 16 for s in source):
+        raise ValueError("data.source_size must divide by 16: the image encoder halves it four times")
 
 
 SPLIT_LIGHT_KEYS = ("split_light_width", "split_light_scale", "split_light_levels", "split_light_weight",

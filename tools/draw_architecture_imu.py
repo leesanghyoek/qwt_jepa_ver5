@@ -23,11 +23,13 @@ Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
        python3 tools/draw_architecture_imu.py docs/kien_truc_light.svg --light       (p20 + H)
        python3 tools/draw_architecture_imu.py docs/kien_truc_illum.svg --illum       (p22, nhiễu ánh sáng không đều)
        python3 tools/draw_architecture_imu.py docs/kien_truc_env.svg --env           (p22, nhiễu môi trường)
+       python3 tools/draw_architecture_imu.py docs/kien_truc_local.svg --local       (p24, 640 gốc, tối theo vùng)
 """
 import sys
 from xml.sax.saxutils import escape
 
-ENV = '--env' in sys.argv[2:]              # p24_env: p23's architecture, poor environment (fog) in the corruption
+LOCAL = '--local' in sys.argv[2:]          # p25_local: p24's architecture, 640 frames (256 crops), local light
+ENV = '--env' in sys.argv[2:] or LOCAL     # p24_env: p23's architecture, poor environment in the corruption
 ILLUM = '--illum' in sys.argv[2:] or ENV   # p23_illum: p22_light's architecture, uneven light in the corruption
 LIGHT = '--light' in sys.argv[2:] or ILLUM # p22_light: p20_gray + light branch in phase 2 (H)
 GRAY = '--gray' in sys.argv[2:] or LIGHT   # p20_gray: p19_sharp + QWT/JEPA on luminance only (G)
@@ -98,7 +100,8 @@ region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục', right
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
-img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'sáng/tối bất ổn' if ENV
+img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['640² (train: mảnh 256²)' if LOCAL else '3 × 256 × 256',
+                                                         'tối theo vùng' if LOCAL else 'sáng/tối bất ổn' if ENV
                                                          else 'sáng/tối không đều' if ILLUM
                                                          else 'đèn lóe nhẹ' if LIGHT else 'nhiễu B'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
@@ -111,7 +114,7 @@ enc_i = node(370, 205, 135, 70, 'bb', 'Encoder ảnh', ['CNN 4 stage', 'centre n
 enc_u = node(370, 365, 135, 70, 'bb', 'Encoder IMU', ['CNN 4 stage'])
 fus = node(535, 280, 125, 80, 'bb', 'Fusion', ['có cổng'])
 # ---------------- latent
-zi = node(705, 205, 110, 70, 'lat', 'ZI', ['128 × 16 × 16'])
+zi = node(705, 205, 110, 70, 'lat', 'ZI', ['128 × 16²', '40² ở khung 640'] if LOCAL else ['128 × 16 × 16'])
 zu = node(705, 365, 110, 70, 'lat', 'ZU', ['128 × 8'])
 # ---------------- phase 2: image decoder = colour ResNet + edge U-Net (encoder / bottleneck / decoder)
 def unet_block(x, yc, kind, title, below=False):
@@ -153,14 +156,19 @@ if FOURIER:
 # p15: small full-resolution CNN on the edge map only (colour already split off)
 refine = node(1160, 296, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
 join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
-img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
+img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi', '640 × 640'] if LOCAL else ['phục hồi'])
 imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · skip có cổng từ encoder IMU'], title_size=14)
 imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 # (B) 1-D CNN after the IMU decoder: reads the restored and the noisy IMU, sees 65 samples
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-if ENV:
+if LOCAL:
+    text(W - 20, 26, 'p25_local — ảnh 640 gốc (train mảnh 256, chạy cả khung 640) · tối THEO VÙNG thay lớp tối đều · ít mờ',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 44, 'kiến trúc như p22_light (toàn tích chập: ZI 40 × 40 ở 640) · nhánh ÁNH SÁNG (H) cân sáng theo vị trí'
+         ' · 20% ảnh môi trường trong', size=12, color='#AD1457', anchor='end')
+elif ENV:
     text(W - 20, 26, 'p24_env — môi trường chụp kém: thiếu sáng, vùng sáng/tối bất ổn, nhòe tối, lóe · nhánh ÁNH SÁNG (H)',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 44, 'kiến trúc như p22_light: H trừ lớp sương V, nhân sáng g theo vị trí · 20% ảnh môi trường trong'
@@ -236,7 +244,8 @@ if LIGHT:
                  ['nhìn cả khung · đọc ZI', 'J = (ảnh − sương V) × sáng g'], rx=8, title_size=13)
     badge(760, 31, 'mới · H')
     arrow([(95, 200), (95, 79), (592, 79)], color='#2E7D32', width=3,
-          label='skip: ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU', lx=340, ly=70)
+          label=('skip: ảnh mờ RGB (mảnh 256², khung 640²) — đường duy nhất mang MÀU' if LOCAL
+                 else 'skip: ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU'), lx=340, ly=70)
     el.append('<path d="M 842 79 L 885 79 L 885 320 L 903 320" fill="none" stroke="#EF6C00" stroke-width="3" '
               'marker-end="url(#ah-EF6C00)"/>')
     text(892, 100, 'J (tuyến tính → sRGB)', size=11, weight='bold', color='#EF6C00', anchor='start')

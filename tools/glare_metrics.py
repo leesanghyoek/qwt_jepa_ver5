@@ -99,7 +99,9 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
     plain["corruption"]["image"]["illum_probability"] = 0.0
     plain["corruption"]["image"]["fog_probability"] = 0.0
     glare = with_glare(config, glare_config, glare_probability)
-    datasets = {name: _dataset(cfg, manifest, split, fixed_realization=True, image_mode=image_mode)
+    full_frame = bool(config["data"].get("source_size"))     # crops in training, whole frames here
+    datasets = {name: _dataset(cfg, manifest, split, fixed_realization=True, image_mode=image_mode,
+                               full_frame=full_frame)
                 for name, cfg in (("glare", glare), ("plain", plain))}
     rng = np.random.default_rng(seed)
     eligible = _eligible_indices(datasets["glare"], image_mode)
@@ -128,6 +130,7 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
         if (position + 1) % 16 == 0 or position + 1 == len(chosen):
             print(f"[đo] {position + 1}/{len(chosen)} frame ({time.perf_counter() - started:.0f} s)", flush=True)
     return {"checkpoint": str(checkpoint), "trained_light_probability": trained_light,
+            "frame_size": list(datasets["glare"][chosen[0]]["image_clean"].shape[-2:]),
             "trained_illum_probability": trained_illum,
             "image_input": config["model"].get("image_input", "rgb"), "split": split,
             "image_mode": image_mode, "frames": frames, "glare_config": str(glare_config),
@@ -151,7 +154,8 @@ def format_report(report: dict) -> str:
              f"model train với lóe sáng: {'có' if report['trained_light_probability'] > 0 else 'KHÔNG'} "
              f"(light_probability {report['trained_light_probability']:g}) | ánh sáng không đều: "
              f"{'có' if report.get('trained_illum_probability', 0) > 0 else 'KHÔNG'} | backbone đọc: {report['image_input']}",
-             f"{len(rows)} frame {report['split']}, mode {report['image_mode']}, chọn {report['frames']}, "
+             f"{len(rows)} frame {report['split']} ({'×'.join(map(str, report.get('frame_size', ['?'])))}), "
+             f"mode {report['image_mode']}, chọn {report['frames']}, "
              f"lóe {report['glare_probability']:.0%} từ {Path(report['glare_config']).name}, seed {report['seed']} "
              f"| frame có lóe: {sum(row['light'] for row in rows)}/{len(rows)}",
              "", f"{'chỉ số (trung bình)':<46}" + "".join(f"{title:>13}" for _, title in COLUMNS)]

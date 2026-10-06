@@ -122,6 +122,7 @@ def _dataset(
     scenarios: list[dict[str, object]] | None = None,
     sensor_reference: bool = False,
     hflip_probability: float = 0.0,
+    full_frame: bool = False,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -142,6 +143,8 @@ def _dataset(
         scenario_seed=config["data"]["corruption_seed"],
         sensor_reference=sensor_reference,
         hflip_probability=hflip_probability,
+        source_size=tuple(config["data"]["source_size"]) if config["data"].get("source_size") else None,
+        full_frame=full_frame,
     )
 
 
@@ -1323,6 +1326,7 @@ def command_evaluate(args: argparse.Namespace) -> None:
             fixed_realization=True,
             image_mode=image_mode,
             imu_mode=imu_mode,
+            full_frame=bool(getattr(args, "full_frame", False)),
         )
         loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
         results[name] = _evaluate_with_overlap(
@@ -1358,7 +1362,8 @@ def _read_imu_csv(path: str, length: int) -> tuple[np.ndarray, np.ndarray | None
 def command_infer(args: argparse.Namespace) -> None:
     device = resolve_device(args.device or "auto")
     system, config = _system_from_phase2(args.checkpoint, device)
-    image = load_rgb(args.image, tuple(config["data"]["image_size"]))
+    # data.source_size: the model trained on crops of frames this size and runs on whole ones.
+    image = load_rgb(args.image, tuple(config["data"].get("source_size") or config["data"]["image_size"]))
     imu, timestamps = _read_imu_csv(args.imu, config["data"]["imu_window"])
     if timestamps is None:
         timestamps = np.arange(len(imu), dtype=np.float64) * args.imu_dt
@@ -1547,6 +1552,8 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--output", help="Directory for metrics, image/IMU panels and merged arrays")
     evaluate.add_argument("--panels", type=int, default=6, help="Image panels and IMU trajectory plots per scenario")
     evaluate.add_argument("--protocol", action="store_true", help="Evaluate all clean/noise/blur groups")
+    evaluate.add_argument("--full-frame", action="store_true",
+                          help="With data.source_size: score whole source frames (e.g. 640x640), not training crops")
     evaluate.add_argument(
         "--image-mode",
         choices=("full", "clean", "low_light_only", "blur_only", "sensor_noise_only"),
