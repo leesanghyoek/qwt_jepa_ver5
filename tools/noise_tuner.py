@@ -149,7 +149,7 @@ class State:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default="kaggle_env.yaml", help="config trong configs/ (khoang cho 'Boc nhu luc train')")
+    parser.add_argument("--config", default="kaggle_local.yaml", help="config trong configs/ (khoang cho 'Boc nhu luc train')")
     parser.add_argument("--image", nargs="*", type=Path, help="anh cua ban (bat ky dinh dang PIL doc duoc)")
     parser.add_argument("--root", type=Path, default=Path.home() / "Datasets/tartanair-v2-jepa")
     parser.add_argument("--split", default="valid", choices=("train", "valid", "test"))

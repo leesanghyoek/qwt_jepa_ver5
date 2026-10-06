@@ -1,4 +1,4 @@
-"""Xem truoc nhieu ANH SANG cua train (mac dinh configs/kaggle_illum.yaml, run p23_illum).
+"""Xem truoc nhieu ANH SANG cua train (mac dinh configs/kaggle_local.yaml, run p25_local; so voi p24_env).
 
 Do sang thay doi ngau nhien theo vung, vet nhoe toi, den sang gap nhieu lan va loe ra (quang, tia
 sao, bong ma), moi gia tri ngau nhien. Cac buoc lay thang tu code train (qjepa/corruptions/light.py
@@ -205,8 +205,8 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=256, help="canh anh (256 nhu luc train)")
     parser.add_argument("--seed", type=int, default=None,
                         help="bo ngau nhien; mac dinh moi lan chay mot seed moi (in ra de chay lai dung hinh do)")
-    parser.add_argument("--config", default="kaggle_env.yaml", help="config co nhieu moi truong (trong configs/)")
-    parser.add_argument("--baseline", default="kaggle_illum.yaml", help="config nhieu cu de so sanh")
+    parser.add_argument("--config", default="kaggle_local.yaml", help="config nhieu dang train (trong configs/)")
+    parser.add_argument("--baseline", default="kaggle_env.yaml", help="config nhieu cu de so sanh")
     parser.add_argument("--output", type=Path, default=REPO / "outputs/light_corruption/preview.png")
     parser.add_argument("--no-show", action="store_true", help="chi luu PNG, khong mo cua so")
     # Trong Jupyter / cua so Interactive, sys.argv la cua kernel: dung mac dinh.
