@@ -33,6 +33,9 @@ model phải làm đẹp, làm nét lại.
   mềm thêm nơi sương dày (0–2 px). Mật độ 0,2–1,8 (phía xa còn 16–82%). Sương được chiếu bởi chính cảnh: A = 0,6–1,0 ×
   độ sáng phân vị 90 của cảnh (bản đầu với A cố định 0,5–1,0 phủ màn xám sáng lên cảnh đêm). Nhánh H có đúng dạng
   nghịch đảo: V ≈ A(1 − t), e^g ≈ 1/t.
+- **Chỉnh thông số bằng tay:** `python3 tools/noise_tuner.py` (hoặc bấm Run) mở cửa sổ có thanh trượt cho phơi sáng,
+  vùng sáng/tối, vết nhòe tối, sương, đèn và lóe, mờ, hạt, JPEG — dùng đúng code nhiễu lúc train; nút "Bốc như lúc
+  train" lấy một mẫu từ phân phối của config, "Lưu" ghi PNG và đoạn YAML để dán vào config; `--image` cho ảnh riêng.
 - **`env_clear_probability`** 0,2: 20% frame không sương, không lóe, không ánh sáng không đều, không thiếu sáng — chỉ
   mờ camera và hạt — để model thôi sửa độ sáng ảnh vốn đúng sáng.
 - Mờ chuyển động ngẫu nhiên giảm (55% → 20% frame, 2–6 → 2–4 px): không do môi trường và không gỡ được.
