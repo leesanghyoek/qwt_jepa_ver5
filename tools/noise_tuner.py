@@ -16,6 +16,8 @@ config); vi tri cac vung sang/toi, mang suong, huong mo, hat nhieu van ngau nhie
     python3 tools/noise_tuner.py --config kaggle_illum.yaml     # khoang "Boc nhu luc train" cua run khac
     python3 tools/noise_tuner.py --no-show                      # chi luu mot hinh mau (khong mo cua so)
 
+Suong mu da bo khoi recipe (nguoi dung, 06/10/2026) nen khong co thanh truot suong.
+
 Chay duoc bang python3 cua he thong (khong can torch) lan venv / Anaconda; bam Run trong VS Code
 cung duoc. Chi doc dataset; file luu o outputs/noise_tuner/ (gitignore).
 """
@@ -44,9 +46,6 @@ SLIDERS = [
     ("illum", "Vùng sáng/tối (± stop)", 0.0, 3.5, None),
     ("gradient", "Dải sáng dần (stop)", 0.0, 3.0, None),
     ("smudge", "Vết nhòe tối (độ tối)", 0.0, 0.95, None),
-    ("fog", "Sương: mật độ (0 = tắt)", 0.0, 2.5, None),
-    ("airlight", "Sương: độ sáng", 0.3, 1.0, None),
-    ("horizon", "Sương: đường chân trời", 0.1, 0.9, None),
     ("lamp", "Đèn sáng gấp (×, 1 = tắt)", 1.0, 40.0, None),
     ("bloom", "Lóe: quầng (0 = tắt)", 0.0, 1.5, None),
     ("knee", "Lóe: ngưỡng", 0.8, 4.0, None),
@@ -70,8 +69,6 @@ def initial_values(image: dict) -> dict[str, float]:
         "illum": _mid(image.get("illum_strength", (1.0, 3.0))) if image.get("illum_probability", 0) > 0 else 0.0,
         "gradient": _mid(image.get("illum_gradient", (0.0, 2.5))) if image.get("illum_probability", 0) > 0 else 0.0,
         "smudge": _mid(image.get("illum_smudge_depth", (0.5, 0.95))) if image.get("illum_probability", 0) > 0 else 0.0,
-        "fog": _mid(image.get("fog_density", (0.2, 1.8)), log=True) if image.get("fog_probability", 0) > 0 else 0.0,
-        "airlight": _mid(image.get("fog_airlight", (0.6, 1.0))), "horizon": _mid(image.get("fog_horizon", (0.2, 0.7))),
         "lamp": _mid(image.get("light_gain", (5.0, 30.0)), log=True) if image.get("light_probability", 0) > 0 else 1.0,
         "bloom": _mid(image.get("light_bloom_strength", (0.08, 0.8)), log=True) if image.get("light_probability", 0) > 0
         else 0.0,
@@ -97,8 +94,7 @@ def corruption_values(base: dict, v: dict[str, float]) -> dict:
         illum_probability=1.0 if v["illum"] > 0 or v["gradient"] > 0 or v["smudge"] > 0 else 0.0,
         illum_strength=pair(v["illum"]), illum_gradient=pair(v["gradient"]),
         illum_smudge_probability=1.0 if v["smudge"] > 0 else 0.0, illum_smudge_depth=pair(min(v["smudge"], 0.95)),
-        fog_probability=1.0 if v["fog"] > 0 else 0.0, fog_density=pair(max(v["fog"], 1e-3)),
-        fog_airlight=pair(v["airlight"]), fog_horizon=pair(v["horizon"]),
+        fog_probability=0.0,
         light_probability=1.0 if v["bloom"] > 0 or v["lamp"] > 1.0 else 0.0,
         light_gain=pair(v["lamp"]), light_bloom_strength=pair(max(v["bloom"], 1e-4)), light_knee=pair(v["knee"]),
     )
@@ -107,7 +103,7 @@ def corruption_values(base: dict, v: dict[str, float]) -> dict:
 
 def values_from_params(params: dict) -> dict[str, float]:
     """Thanh truot gan dung voi mot mau da boc luc train (de nguoi dung thay no la gi)."""
-    uneven, fog, light = (params.get(key) or {} for key in ("illumination_params", "fog_params", "light_params"))
+    uneven, light = (params.get(key) or {} for key in ("illumination_params", "light_params"))
     stops = [abs(blob["stops"]) for blob in uneven.get("blobs", [])]
     return {
         "exposure": params["exposure_gain"] if params.get("low_light", True) else 1.0,
@@ -115,7 +111,6 @@ def values_from_params(params: dict) -> dict[str, float]:
         "vignette": params["vignette_strength"] if params.get("low_light", True) else 0.0,
         "illum": float(np.mean(stops)) if stops else 0.0, "gradient": uneven.get("gradient_stops", 0.0),
         "smudge": max((smudge["depth"] for smudge in uneven.get("smudges", [])), default=0.0),
-        "fog": fog.get("density", 0.0), "airlight": fog.get("airlight", 0.8), "horizon": fog.get("horizon", 0.45),
         "lamp": light.get("gain", 1.0), "bloom": light.get("bloom_strength", 0.0), "knee": light.get("knee", 2.0),
         "defocus": params["defocus_sigma"] if params.get("defocus") else 0.0,
         "motion": float(params["motion_length"]) if params.get("motion") else 0.0,
@@ -135,10 +130,6 @@ def yaml_snippet(v: dict[str, float]) -> str:
         lines += ["    illum_probability: 0.8", f"    illum_strength: {around(v['illum'], 0.5, 0.0, 4.0)}",
                   f"    illum_gradient: {around(v['gradient'], 0.5, 0.0, 4.0)}",
                   f"    illum_smudge_depth: {around(v['smudge'], 0.3, 0.0, 0.95)}"]
-    if v["fog"] > 0:
-        lines += ["    fog_probability: 0.6", f"    fog_density: {around(v['fog'], 0.5, 0.05, 3.0)}",
-                  f"    fog_airlight: {around(v['airlight'], 0.2, 0.0, 1.0)}",
-                  f"    fog_horizon: {around(v['horizon'], 0.4, 0.0, 0.95)}"]
     if v["bloom"] > 0 or v["lamp"] > 1:
         lines += ["    light_probability: 0.8", f"    light_gain: {around(v['lamp'], 0.5, 1.0, 60.0)}",
                   f"    light_bloom_strength: {around(max(v['bloom'], 0.01), 0.6, 0.001, 2.0)}",
@@ -273,7 +264,7 @@ def main() -> int:
             low, high = sliders[key].valmin, sliders[key].valmax
             sliders[key].set_val(float(np.clip(value, low, high)))
         syncing["active"] = False
-        on = [name for name, flag in (("sương", params.get("fog")), ("sáng/tối lệch", params.get("illumination")),
+        on = [name for name, flag in (("sáng/tối lệch", params.get("illumination")),
                                        ("lóe", params.get("light")), ("tối", params.get("low_light", True)))
               if flag]
         redraw(image=image, title="Bốc như lúc train · " + (", ".join(on) if on else "môi trường trong"))

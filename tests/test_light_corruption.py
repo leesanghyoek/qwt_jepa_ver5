@@ -316,7 +316,7 @@ def test_fog_and_clear_frames_are_off_without_their_keys_and_move_no_other_draw(
     image = _frame()
     base = {key: value for key, value in ENV.items() if key.startswith(("light_", "illum_"))}
     plain = _corruptor(**base)
-    foggy = _corruptor(**{**base, **{k: v for k, v in ENV.items() if k.startswith("fog_")}, "fog_probability": 1.0})
+    foggy = _corruptor(**{**base, "fog_probability": 1.0})
     for index in range(10):
         (a, pa), (b, pb) = _call(plain, image, index), _call(foggy, image, index)
         assert "fog" not in pa and pb["fog"] and {key: pb[key] for key in pa} == pa
@@ -331,15 +331,15 @@ def test_fog_and_clear_frames_are_off_without_their_keys_and_move_no_other_draw(
             {key: pa[key] for key in ("defocus", "motion", "photon_count", "read_noise_std")}
 
 
-def test_kaggle_env_is_p23_plus_fog_clear_frames_and_less_motion_blur():
+def test_kaggle_env_is_p23_plus_clear_frames_and_less_motion_blur_without_fog():
     from qjepa.config import FOG_KEYS
     illum = serializable_config(load_config("configs/kaggle_illum.yaml"))
     env = serializable_config(load_config("configs/kaggle_env.yaml"))
+    assert not any(key in env["corruption"]["image"] for key in FOG_KEYS)      # the user dropped the fog
     for config in (illum, env):
         config.pop("_config_path", None)
         config["runtime"].pop("output_dir")
-    for key in (*FOG_KEYS, "env_clear_probability"):
-        env["corruption"]["image"].pop(key)
+    env["corruption"]["image"].pop("env_clear_probability")
     assert env["corruption"]["image"].pop("motion_probability") < illum["corruption"]["image"].pop("motion_probability")
     assert env["corruption"]["image"].pop("motion_length_px") != illum["corruption"]["image"].pop("motion_length_px")
     assert env == illum
@@ -347,10 +347,10 @@ def test_kaggle_env_is_p23_plus_fog_clear_frames_and_less_motion_blur():
     validate_config(full)
     for phase in ("phase1", "phase2"):
         assert configuration_hash(full, phase) != configuration_hash(load_config("configs/kaggle_illum.yaml"), phase)
-    missing = copy.deepcopy(full)
-    del missing["corruption"]["image"]["fog_horizon"]
+    turned_on = copy.deepcopy(full)
+    turned_on["corruption"]["image"]["fog_probability"] = 0.6       # fog on without its keys: refused
     with pytest.raises(ValueError, match="fog_horizon"):
-        validate_config(missing)
+        validate_config(turned_on)
     for key, value in (("fog_probability", 1.5), ("fog_density", [0.0, 1.0]), ("fog_airlight", [0.5, 1.5]),
                        ("env_clear_probability", -0.1)):
         bad = copy.deepcopy(full)

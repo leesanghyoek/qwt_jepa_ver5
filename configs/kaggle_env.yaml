@@ -1,16 +1,10 @@
-# p24_env: anh hong vi MOI TRUONG CHUP KEM -- thieu sang, anh sang khong deu, SUONG MU, loe sang --
-# moi yeu to ngau nhien; model phai lam dep va net lai. Kien truc giu nguyen p22/p23 (nhanh anh sang H).
+# p24_env: anh hong vi MOI TRUONG CHUP KEM -- thieu sang, anh sang khong deu (vung sang/toi bat on, vet nhoe
+# toi), loe sang -- moi yeu to ngau nhien; model phai lam dep va net lai. Kien truc giu nguyen p22/p23 (nhanh H).
 #
-# Nguoi dung (06/10/2026): "anh mo do moi truong chup anh kem, thieu sang co the la nhieu suong mu, cac yeu
-# to do ngau nhien". Thay doi so voi p23_illum:
-#  - fog_* (qjepa/corruptions/light.py: apply_fog), tren anh sang tuyen tinh truoc buoc mo, 60% frame:
-#    I = J*t + A*(1-t), t = exp(-mat do * do sau). Dataset KHONG co ban do do sau: do sau gia tang dan ve mot
-#    duong chan troi ngau nhien (20-70% chieu cao tu tren, nghieng +-0,3), mang suong day/mong (0-1 stop),
-#    tan xa thuan lam mem them o noi suong day (0-2 px). Mat do 0,2-1,8 (t o phia xa 0,16-0,82). Suong duoc
-#    chieu boi chinh canh: anh sang suong = 0,6-1,0 x do sang phan vi 90 cua canh (dem toi -> suong toi, ban
-#    mat do 0,5-1,0 co dinh phu man xam sang len canh dem), hoi xanh. Nhanh H co dung dang nghich dao: lop
-#    suong V ~ A(1-t), he so sang e^g ~ 1/t.
-#  - env_clear_probability 0,2: 20% frame "moi truong trong" (khong suong, loe, anh sang khong deu, thieu
+# Nguoi dung (06/10/2026): anh hong do moi truong chup kem, cac yeu to ngau nhien; sau do: "xoa suong mu di,
+# toi chi can anh co cac vung sang toi, bat on". Suong mu (fog_*, qjepa/corruptions/light.py) da viet va test
+# nhung TAT o day (khong co khoa fog_* nao). Thay doi so voi p23_illum:
+#  - env_clear_probability 0,2: 20% frame "moi truong trong" (khong loe, khong anh sang khong deu, khong thieu
 #    sang) -- chi mo camera va hat. p22 tren anh chi mo: 28,00 -> 23,66 dB (lam sang ca anh von du sang),
 #    vi ~88% anh train bi lam toi va gan nhu anh nao cung co anh sang can sua.
 #  - Mo chuyen dong ngau nhien giam (55% -> 20%, 2-6 -> 2-4 px): khong phai do moi truong, va khong go duoc khi
@@ -25,10 +19,4 @@ corruption:
   image:
     motion_probability: 0.2             # p23: 0.55
     motion_length_px: [2, 4]            # p23: [2, 6]
-    fog_probability: 0.6
-    fog_density: [0.2, 1.8]             # log-uniform; t phia xa = exp(-mat do)
-    fog_airlight: [0.6, 1.0]            # anh sang suong / do sang phan vi 90 cua canh
-    fog_horizon: [0.2, 0.7]             # duong xa nhat, phan chieu cao tu tren
-    fog_patchiness: [0.0, 1.0]          # stop thay doi mat do giua cac mang
-    fog_scatter_px: [0.0, 2.0]          # tan xa thuan o noi suong day
     env_clear_probability: 0.2

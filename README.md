@@ -12,7 +12,8 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p24_env — môi trường chụp kém: sương mù + ảnh môi trường trong** (config `configs/kaggle_env.yaml` → OUT
+**p24_env — môi trường chụp kém: vùng sáng/tối bất ổn + ảnh môi trường trong** (người dùng bỏ sương mù: "tôi chỉ cần
+ảnh có các vùng sáng tối, bất ổn"; code sương vẫn còn, config không bật) (config `configs/kaggle_env.yaml` → OUT
 `outputs/p24_env`). Kiến trúc giữ nguyên p22/p23 (nhánh ánh sáng H); chỉ nhiễu đổi. Hình: `docs/kien_truc_env.svg`
 (`--env`). Người dùng: ảnh hỏng vì môi trường chụp kém — thiếu sáng, có thể nhiều sương mù, các yếu tố ngẫu nhiên — và
 model phải làm đẹp, làm nét lại.
@@ -27,7 +28,7 @@ model phải làm đẹp, làm nét lại.
     động hướng ngẫu nhiên (31,3 → 23,6 dB; kernel đúng 43,5). Mờ theo IMU (`motion_from_imu`) gỡ được bằng kernel từ
     gyro nhiễu (26,0 → 33,7 dB khi biết thời gian phơi sáng, 32,2 với 5 mức ứng viên) nhưng chỉ ~26% ảnh có vệt ≥ 2 px
     và không áp cho mờ do môi trường — người dùng chọn hướng môi trường.
-- **`corruption.image.fog_*`** (`light.apply_fog`), trên ánh sáng tuyến tính trước bước mờ, 60% frame:
+- **`corruption.image.fog_*`** (`light.apply_fog`; **tắt trong p24**, chỉ còn là tuỳ chọn), trên ánh sáng tuyến tính trước bước mờ:
   I = J·t + A·(1 − t), t = e^(−mật độ · độ sâu). Dataset không có bản đồ độ sâu, nên độ sâu giả lập tăng dần về một
   đường chân trời ngẫu nhiên (20–70% chiều cao, nghiêng ±0,3), có mảng sương dày/mỏng (0–1 stop) và tán xạ thuận làm
   mềm thêm nơi sương dày (0–2 px). Mật độ 0,2–1,8 (phía xa còn 16–82%). Sương được chiếu bởi chính cảnh: A = 0,6–1,0 ×
