@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 
 import numpy as np
 import pytest
@@ -278,6 +279,81 @@ def test_kaggle_illum_is_p22_plus_uneven_light_and_medium_glare_and_spells_its_k
     for key, value in (("illum_probability", 2.0), ("illum_smudge_depth", [0.5, 1.0]), ("illum_blob_size", [0.0, 0.2]),
                        ("illum_smudge_elongation", [0.5, 2.0]), ("illum_blobs", [2, 12])):
         bad = copy.deepcopy(full_illum)
+        bad["corruption"]["image"][key] = value
+        with pytest.raises(ValueError):
+            validate_config(bad)
+
+
+# ---------------------------------------------------------------- fog (fog_*) and clear environments
+ENV = load_config("configs/kaggle_env.yaml")["corruption"]["image"]
+
+
+def _fog(**overrides):
+    params = {"density": 1.2, "airlight": 1.0, "coolness": 0.0, "horizon": 0.4, "tilt": 0.0, "patchiness": 0.0,
+              "patch_seed": 3, "scatter_px": 0.0}
+    params.update(overrides)
+    return params
+
+
+def test_fog_thickens_towards_the_far_line_and_is_lit_by_the_scene():
+    from qjepa.corruptions.light import fog_transmission
+    t = fog_transmission(64, 64, _fog())
+    assert t[:20].mean() < t[40:].mean() < 1.0 and t.min() == pytest.approx(math.exp(-1.2), abs=1e-3)
+    # A day frame: contrast drops most where the fog is thick (top), and the fog is bright.
+    day = _frame(size=64, lamp=None)
+    day[::2] = 0.8                                                   # striped bright scene
+    foggy = apply_light(day, None, fog=_fog())
+    contrast = lambda image, rows: float(np.ptp(_luminance(image[rows])))
+    assert contrast(foggy, slice(0, 16)) < 0.5 * contrast(day, slice(0, 16))
+    assert contrast(foggy, slice(0, 16)) < contrast(foggy, slice(48, 64))
+    # A night frame gets a dark fog: the fog light follows the scene's own brightness.
+    night = np.full((64, 64, 3), 0.03)
+    assert _luminance(apply_light(night, None, fog=_fog())).max() < 0.05
+    assert _luminance(apply_light(day, None, fog=_fog())).mean() > 0.3
+
+
+def test_fog_and_clear_frames_are_off_without_their_keys_and_move_no_other_draw():
+    image = _frame()
+    base = {key: value for key, value in ENV.items() if key.startswith(("light_", "illum_"))}
+    plain = _corruptor(**base)
+    foggy = _corruptor(**{**base, **{k: v for k, v in ENV.items() if k.startswith("fog_")}, "fog_probability": 1.0})
+    for index in range(10):
+        (a, pa), (b, pb) = _call(plain, image, index), _call(foggy, image, index)
+        assert "fog" not in pa and pb["fog"] and {key: pb[key] for key in pa} == pa
+        assert not np.array_equal(a, b)
+    assert _call(foggy, image, 3, mode="blur_only")[1]["fog"] is False
+    cleared = _corruptor(**dict(base, env_clear_probability=1.0))
+    for index in range(10):
+        (_, pa), (c, pc) = _call(plain, image, index), _call(cleared, image, index)
+        assert pc["env_clear"] and pc["light"] is False and pc["illumination"] is False and pc["low_light"] is False
+        # Everything else -- the camera blur and the sensor noise -- is drawn as before.
+        assert {key: pc[key] for key in ("defocus", "motion", "photon_count", "read_noise_std")} == \
+            {key: pa[key] for key in ("defocus", "motion", "photon_count", "read_noise_std")}
+
+
+def test_kaggle_env_is_p23_plus_fog_clear_frames_and_less_motion_blur():
+    from qjepa.config import FOG_KEYS
+    illum = serializable_config(load_config("configs/kaggle_illum.yaml"))
+    env = serializable_config(load_config("configs/kaggle_env.yaml"))
+    for config in (illum, env):
+        config.pop("_config_path", None)
+        config["runtime"].pop("output_dir")
+    for key in (*FOG_KEYS, "env_clear_probability"):
+        env["corruption"]["image"].pop(key)
+    assert env["corruption"]["image"].pop("motion_probability") < illum["corruption"]["image"].pop("motion_probability")
+    assert env["corruption"]["image"].pop("motion_length_px") != illum["corruption"]["image"].pop("motion_length_px")
+    assert env == illum
+    full = load_config("configs/kaggle_env.yaml")
+    validate_config(full)
+    for phase in ("phase1", "phase2"):
+        assert configuration_hash(full, phase) != configuration_hash(load_config("configs/kaggle_illum.yaml"), phase)
+    missing = copy.deepcopy(full)
+    del missing["corruption"]["image"]["fog_horizon"]
+    with pytest.raises(ValueError, match="fog_horizon"):
+        validate_config(missing)
+    for key, value in (("fog_probability", 1.5), ("fog_density", [0.0, 1.0]), ("fog_airlight", [0.5, 1.5]),
+                       ("env_clear_probability", -0.1)):
+        bad = copy.deepcopy(full)
         bad["corruption"]["image"][key] = value
         with pytest.raises(ValueError):
             validate_config(bad)

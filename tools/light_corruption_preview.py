@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -149,14 +150,19 @@ def corruptor_from(config_name: str, light_probability: float | None = None) -> 
     image = LowLightImageCorruptionConfig(**config["corruption"]["image"])
     if light_probability is not None:
         image = replace(image, light_probability=light_probability,
-                        illum_probability=light_probability if image.illum_probability > 0 else 0.0)
+                        illum_probability=light_probability if image.illum_probability > 0 else 0.0,
+                        fog_probability=light_probability if image.fog_probability > 0 else 0.0,
+                        env_clear_probability=0.0)
     return LowLightImageCorruptor(image, config["data"]["corruption_seed"])
 
 
 def describe(params: dict[str, object]) -> str:
     light = params.get("light_params") or {}
     uneven = params.get("illumination_params") or {}
+    fog = params.get("fog_params") or {}
     lines = []
+    if fog:
+        lines.append(f"sương: mật độ {fog['density']:.1f} (xa còn {100 * math.exp(-fog['density']):.0f}%)")
     if uneven:
         stops = [blob["stops"] for blob in uneven["blobs"]]
         lines.append(f"{len(stops)} vùng sáng/tối ({min(stops, default=0):+.1f}…{max(stops, default=0):+.1f} stop)"
@@ -199,8 +205,8 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=256, help="canh anh (256 nhu luc train)")
     parser.add_argument("--seed", type=int, default=None,
                         help="bo ngau nhien; mac dinh moi lan chay mot seed moi (in ra de chay lai dung hinh do)")
-    parser.add_argument("--config", default="kaggle_illum.yaml", help="config co nhieu anh sang (trong configs/)")
-    parser.add_argument("--baseline", default="kaggle_light.yaml", help="config nhieu cu de so sanh")
+    parser.add_argument("--config", default="kaggle_env.yaml", help="config co nhieu moi truong (trong configs/)")
+    parser.add_argument("--baseline", default="kaggle_illum.yaml", help="config nhieu cu de so sanh")
     parser.add_argument("--output", type=Path, default=REPO / "outputs/light_corruption/preview.png")
     parser.add_argument("--no-show", action="store_true", help="chi luu PNG, khong mo cua so")
     # Trong Jupyter / cua so Interactive, sys.argv la cua kernel: dung mac dinh.
@@ -220,7 +226,7 @@ def main() -> int:
     live = has_window and not args.no_show
 
     # Mo cua so NGAY (truoc khi doc anh), roi dien dan tung hang khi tinh xong.
-    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nnhòe tối, đèn sáng", "scene"),
+    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nsương, nhòe tối, đèn", "scene"),
                ("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"), (f"Nhiễu train cũ\n({args.baseline})", "old"),
                (f"Nhiễu train mới\n({args.config})", "new")]
     cell = min(16.0 / len(columns), 9.0 / args.count)
@@ -263,9 +269,10 @@ def main() -> int:
                        timestamp=0.1 * row, frame_index=row, mode="full")
         stages = {"old": baseline(clean, **corrupt)[0]}
         stages["new"], params = glare(clean, **corrupt)
-        if params.get("light_params") or params.get("illumination_params"):
+        if params.get("light_params") or params.get("illumination_params") or params.get("fog_params"):
             stages["scene"], stages["lit"] = apply_light(clean, params.get("light_params"), stages=True,
-                                                         illumination=params.get("illumination_params"))
+                                                         illumination=params.get("illumination_params"),
+                                                         fog=params.get("fog_params"))
         else:                                                       # frame "sach" (clean_probability)
             stages["scene"] = stages["lit"] = clean
         print(f"[{row}] {path.relative_to(args.root.parent) if args.root.parent in path.parents else path}")

@@ -16,7 +16,8 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from .light import apply_light, draw_illumination_parameters, draw_light_parameters, resize_channels
+from .light import (apply_light, draw_fog_parameters, draw_illumination_parameters, draw_light_parameters,
+                    resize_channels)
 from .motion import imu_blur_kernel
 from .rng import generator
 
@@ -111,6 +112,20 @@ class LowLightImageCorruptionConfig:
     illum_smudge_size: tuple[float, float] = (0.05, 0.2)    # fraction of the frame (short axis)
     illum_smudge_elongation: tuple[float, float] = (1.0, 4.0)
     illum_smudge_depth: tuple[float, float] = (0.3, 0.85)   # darkening at the centre
+    # Fog / haze (light.apply_fog): I = J*t + A*(1 - t), t = exp(-density * depth) on a
+    # synthetic depth (the dataset has none) that grows towards a random, tilted horizon,
+    # with thicker and thinner patches; forward scattering softens J where the fog is
+    # thick. LIGHT_MODES only, own stream ("image_fog"); at 0 nothing changes.
+    fog_probability: float = 0.0
+    fog_density: tuple[float, float] = (0.2, 1.8)           # log-uniform; t = exp(-density) at the far end
+    fog_airlight: tuple[float, float] = (0.6, 1.0)          # fog light vs the scene's 90th-percentile brightness
+    fog_horizon: tuple[float, float] = (0.2, 0.7)           # height of the far line, fraction from the top
+    fog_patchiness: tuple[float, float] = (0.0, 1.0)        # stops of density variation
+    fog_scatter_px: tuple[float, float] = (0.0, 2.0)        # softening where the fog is thick
+    # Clear-environment frames: no lamps/glare, uneven light, fog nor low-light stage on
+    # this fraction (blur and sensor noise only), so the model sees frames whose light
+    # needs no fixing. Own stream ("image_clear"); at 0 nothing changes.
+    env_clear_probability: float = 0.0
 
     def _validate_light(self) -> None:
         def bounds(name: str, low_limit: float, strict: bool = False) -> None:
@@ -149,6 +164,14 @@ class LowLightImageCorruptionConfig:
             raise ValueError("illum_smudge_depth must stay below 1")
         if self.illum_blobs[1] > 8 or self.illum_smudge_count[1] > 6:
             raise ValueError("illum_blobs must stay at most 8 and illum_smudge_count at most 6")
+        for name in ("fog_probability", "env_clear_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0,1]")
+        bounds("fog_density", 0.0, strict=True)
+        for name in ("fog_airlight", "fog_horizon", "fog_patchiness", "fog_scatter_px"):
+            bounds(name, 0.0)
+        if self.fog_airlight[1] > 1 or self.fog_horizon[1] >= 1:
+            raise ValueError("fog_airlight must stay in [0,1] and fog_horizon below 1")
 
     def validate(self) -> None:
         if not 0 <= self.clean_probability <= 1:
@@ -353,6 +376,21 @@ class LowLightImageCorruptor:
             uneven = mode in LIGHT_MODES and float(illum_rng.random()) < cfg.illum_probability
             drawn = draw_illumination_parameters(illum_rng, cfg)
             parameters.update(illumination=bool(uneven), illumination_params=drawn if uneven else None)
+        if cfg.fog_probability > 0:
+            fog_rng = generator(self.master_seed, "image_fog", split, realization, trajectory, segment)
+            foggy = mode in LIGHT_MODES and float(fog_rng.random()) < cfg.fog_probability
+            drawn = draw_fog_parameters(fog_rng, cfg)
+            parameters.update(fog=bool(foggy), fog_params=drawn if foggy else None)
+        if cfg.env_clear_probability > 0:
+            clear_rng = generator(self.master_seed, "image_clear", split, realization, trajectory, segment)
+            clear = mode == "full" and float(clear_rng.random()) < cfg.env_clear_probability
+            parameters["env_clear"] = bool(clear)
+            if clear:
+                # Only the environment goes: camera blur and sensor noise stay as drawn.
+                parameters.update(low_light=False)
+                for key in ("light", "illumination", "fog"):
+                    if key in parameters:
+                        parameters[key], parameters[f"{key}_params"] = False, None
         return parameters
 
     def __call__(
@@ -434,9 +472,10 @@ class LowLightImageCorruptor:
         image = image_clean.astype(np.float64, copy=True)
         # Lamps and glare first: the blur below smears them, the exposure drop below
         # leaves them blown out. From here on values above 1 are real light.
-        hdr = bool(params.get("light")) or bool(params.get("illumination"))
+        hdr = bool(params.get("light")) or bool(params.get("illumination")) or bool(params.get("fog"))
         if hdr:
-            image = apply_light(image, params.get("light_params"), illumination=params.get("illumination_params"))
+            image = apply_light(image, params.get("light_params"), illumination=params.get("illumination_params"),
+                                fog=params.get("fog_params"))
 
         if optical and params["defocus"]:
             image = ndimage.gaussian_filter(

@@ -467,6 +467,7 @@ def _nonnegative_number(value: Any) -> bool:
 
 LIGHT_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("light_"))
 ILLUM_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("illum_"))
+FOG_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("fog_"))
 
 
 def _validate_light(config: dict[str, Any]) -> None:
@@ -479,7 +480,8 @@ def _validate_light(config: dict[str, Any]) -> None:
         LowLightImageCorruptionConfig(**image).validate()
     except TypeError as error:
         raise ValueError(f"corruption.image: {error}") from error
-    for switch, keys in (("light_probability", LIGHT_KEYS), ("illum_probability", ILLUM_KEYS)):
+    for switch, keys in (("light_probability", LIGHT_KEYS), ("illum_probability", ILLUM_KEYS),
+                         ("fog_probability", FOG_KEYS)):
         if float(image.get(switch, 0.0)) > 0:
             missing = [key for key in keys if key not in image]
             if missing:

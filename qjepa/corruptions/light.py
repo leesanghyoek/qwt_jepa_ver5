@@ -188,8 +188,54 @@ def illumination_field(height: int, width: int, params: dict[str, object]) -> np
     return field.astype(np.float32)
 
 
+def draw_fog_parameters(rng: np.random.Generator, cfg) -> dict[str, object]:
+    """Suong mu / mu khoi cua mot frame tu cac khoa ``fog_*``. So lan boc co dinh."""
+    return {"density": _log_uniform(rng, cfg.fog_density),
+            "airlight": float(rng.uniform(*cfg.fog_airlight)),
+            "coolness": float(rng.uniform(0.0, 1.0)),              # 0 trang xam, 1 hoi xanh
+            "horizon": float(rng.uniform(*cfg.fog_horizon)),
+            "tilt": float(rng.uniform(-0.3, 0.3)),
+            "patchiness": float(rng.uniform(*cfg.fog_patchiness)),
+            "patch_seed": int(rng.integers(0, 2 ** 31)),
+            "scatter_px": float(rng.uniform(*cfg.fog_scatter_px))}
+
+
+def fog_transmission(height: int, width: int, params: dict[str, object]) -> np.ndarray:
+    """t [H,W] = exp(-density * do sau gia), do sau gia trong [0,1]: xa dan ve duong chan troi.
+
+    Dataset khong co ban do do sau. Tren duong chan troi (o do cao ``horizon``, nghieng ``tilt``)
+    xa nhat (1); duoi no gan dan ve day anh. Mang suong day/mong: nhan mat do voi 2^(nhieu muot)
+    bien do ``patchiness`` stop."""
+    yy, xx = np.meshgrid((np.arange(height, dtype=np.float32) + 0.5) / height,
+                         (np.arange(width, dtype=np.float32) + 0.5) / width, indexing="ij")
+    horizon = float(params["horizon"]) + float(params["tilt"]) * (xx - 0.5)
+    depth = np.where(yy <= horizon, 1.0, 1.0 - (yy - horizon) / np.maximum(1.0 - horizon, 1e-3))
+    depth = 0.15 + 0.85 * np.clip(depth, 0.0, 1.0)                 # khong co gi sat ong kinh
+    noise = np.random.default_rng(int(params["patch_seed"])).standard_normal((6, 6)).astype(np.float32)
+    patches = ndimage.zoom(noise, (height / 6.0, width / 6.0), order=3)[:height, :width]
+    patches = patches / max(float(np.abs(patches).max()), 1e-6)
+    density = float(params["density"]) * np.exp2(float(params["patchiness"]) * patches)
+    return np.exp(-density * depth).astype(np.float32)
+
+
+def apply_fog(linear: np.ndarray, params: dict[str, object]) -> np.ndarray:
+    """Anh sang tuyen tinh qua suong: I = J*t + A*(1 - t), J duoc tan xa thuan lam mem them o noi suong day.
+
+    Suong duoc chieu boi chinh anh sang cua canh: A = ``airlight`` x do sang o phan vi 90 cua canh
+    (den nho khong keo duoc phan vi nay), nen dem toi thi suong toi, chi quanh den sang."""
+    height, width = linear.shape[:2]
+    reference = float(np.clip(np.percentile(linear @ LUMA_709.astype(np.float32), 90) * 1.2, 0.02, 1.0))
+    t = fog_transmission(height, width, params)[..., None]
+    sigma = float(params["scatter_px"])
+    if sigma > 0:
+        linear = t * linear + (1.0 - t) * _blur_at(linear, sigma, _factor(sigma))
+    tint = np.array([1.0 - 0.06 * float(params["coolness"]), 1.0, 1.0 + 0.06 * float(params["coolness"])])
+    airlight = float(params["airlight"]) * reference * tint / tint.max()
+    return linear * t + airlight * (1.0 - t)
+
+
 def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: bool = False,
-                illumination: dict[str, object] | None = None):
+                illumination: dict[str, object] | None = None, fog: dict[str, object] | None = None):
     """Canh HDR + anh sang khong deu + loe sang o sRGB mo rong (> 1 duoc giu), float64 [H,W,3].
 
     ``image`` sRGB [H,W,3] trong [0,1]. ``params`` (loe sang) hoac ``illumination`` co the None.
@@ -198,14 +244,17 @@ def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: boo
     height, width = image.shape[:2]
     linear = srgb_to_linear(image)
     field = None if illumination is None else illumination_field(height, width, illumination)[..., None]
-    if params is None:                                  # chi anh sang khong deu, khong loe
-        out = linear_to_srgb(linear * (1.0 if field is None else field)).astype(np.float64)
+    if params is None:                                  # khong loe: chi anh sang khong deu va/hoac suong
+        scene = linear * (1.0 if field is None else field)
+        if fog is not None:
+            scene = apply_fog(scene, fog)
+        out = linear_to_srgb(scene).astype(np.float64)
         return (out, out.copy()) if stages else out
 
     # 1. Canh HDR: vung sang that ra sang hon nhieu, dom nho (den) hon vung rong (troi).
     mask = _smoothstep(float(params["threshold"]), float(params["threshold"]) + float(params["width"]),
                        linear @ LUMA_709.astype(np.float32))
-    if not mask.any() and field is None:
+    if not mask.any() and field is None and fog is None:
         out = np.asarray(image, dtype=np.float64).copy()
         return (out, out.copy()) if stages else out
     # "Dom nho" = mat na tru ban lam mo cua no (Gauss sigma = canh/16), chuan hoa theo max: den
@@ -218,6 +267,9 @@ def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: boo
     if field is not None:
         # Anh sang khong deu chieu len ca canh (ca den): cho duoc chieu sang hon loe manh hon.
         scene = scene * field
+    if fog is not None:
+        # Suong truoc loe: den xa bi suong lam mo, va loe tinh tren canh da qua suong.
+        scene = apply_fog(scene, fog)
 
     # 2. Loe sang tu MOI phan vuot nguong (den, cua so, troi rat sang): quang co the phu len ca
     # vung toi -- nguoi dung chon giu (05/10/2026) de model hoc go.

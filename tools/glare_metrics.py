@@ -97,6 +97,7 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
     plain = copy.deepcopy(config)
     plain["corruption"]["image"]["light_probability"] = 0.0
     plain["corruption"]["image"]["illum_probability"] = 0.0
+    plain["corruption"]["image"]["fog_probability"] = 0.0
     glare = with_glare(config, glare_config, glare_probability)
     datasets = {name: _dataset(cfg, manifest, split, fixed_realization=True, image_mode=image_mode)
                 for name, cfg in (("glare", glare), ("plain", plain))}

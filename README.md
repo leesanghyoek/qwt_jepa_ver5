@@ -12,6 +12,35 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p24_env — môi trường chụp kém: sương mù + ảnh môi trường trong** (config `configs/kaggle_env.yaml` → OUT
+`outputs/p24_env`). Kiến trúc giữ nguyên p22/p23 (nhánh ánh sáng H); chỉ nhiễu đổi. Hình: `docs/kien_truc_env.svg`
+(`--env`). Người dùng: ảnh hỏng vì môi trường chụp kém — thiếu sáng, có thể nhiều sương mù, các yếu tố ngẫu nhiên — và
+model phải làm đẹp, làm nét lại.
+- **Chẩn đoán trên log p22** (D1, D2, delta report) và oracle Wiener ở máy, trước khi đổi:
+  - Latent JEPA **không** mang hình dạng đường nét: D2 — thêm ZI (kể cả ZI của ảnh sạch) vào ảnh hỏng giải thích thêm
+    0,0% đường nét 2–4 px và 4–16 px, chỉ 15–21% năng lượng chi tiết. D1 — latent sạch hoàn hảo: +0,00 dB với nhiễu
+    đầy đủ, +0,43 dB với ảnh chỉ mờ; đặt ZI = 0 mất 1,2 dB (thông tin toàn cục: độ sáng). Delta: băng LL sai số
+    0,335 → 0,142, các băng chi tiết chỉ 0,0321 → 0,0281.
+  - Model làm sáng cả ảnh vốn đủ sáng: ảnh chỉ mờ 28,00 → 23,66 dB, sai số LL gấp đôi (~88% ảnh train bị làm tối).
+  - Mờ ngẫu nhiên không gỡ được khi không biết vệt của từng ảnh: Wiener với **một kernel cố định** cho mọi ảnh gỡ
+    được mờ kiểu camera (Gauss σ 1–1,4 px: 26,8 → 31,8 dB; kernel đúng từng ảnh 32,5) nhưng làm hỏng mờ chuyển
+    động hướng ngẫu nhiên (31,3 → 23,6 dB; kernel đúng 43,5). Mờ theo IMU (`motion_from_imu`) gỡ được bằng kernel từ
+    gyro nhiễu (26,0 → 33,7 dB khi biết thời gian phơi sáng, 32,2 với 5 mức ứng viên) nhưng chỉ ~26% ảnh có vệt ≥ 2 px
+    và không áp cho mờ do môi trường — người dùng chọn hướng môi trường.
+- **`corruption.image.fog_*`** (`light.apply_fog`), trên ánh sáng tuyến tính trước bước mờ, 60% frame:
+  I = J·t + A·(1 − t), t = e^(−mật độ · độ sâu). Dataset không có bản đồ độ sâu, nên độ sâu giả lập tăng dần về một
+  đường chân trời ngẫu nhiên (20–70% chiều cao, nghiêng ±0,3), có mảng sương dày/mỏng (0–1 stop) và tán xạ thuận làm
+  mềm thêm nơi sương dày (0–2 px). Mật độ 0,2–1,8 (phía xa còn 16–82%). Sương được chiếu bởi chính cảnh: A = 0,6–1,0 ×
+  độ sáng phân vị 90 của cảnh (bản đầu với A cố định 0,5–1,0 phủ màn xám sáng lên cảnh đêm). Nhánh H có đúng dạng
+  nghịch đảo: V ≈ A(1 − t), e^g ≈ 1/t.
+- **`env_clear_probability`** 0,2: 20% frame không sương, không lóe, không ánh sáng không đều, không thiếu sáng — chỉ
+  mờ camera và hạt — để model thôi sửa độ sáng ảnh vốn đúng sáng.
+- Mờ chuyển động ngẫu nhiên giảm (55% → 20% frame, 2–6 → 2–4 px): không do môi trường và không gỡ được.
+- Mỗi tầng có luồng ngẫu nhiên riêng (`image_fog`, `image_clear`); thiếu khoá thì ảnh nhiễu giống hệt từng bit (p20–p23
+  kiểm lại so với code trước). Bằng chứng: `tests/test_light_corruption.py` (sương dày dần về phía xa, độ tương phản
+  giảm mạnh nhất ở đó, sương đêm tối và sương ngày sáng; không xê dịch tham số khác; ảnh môi trường trong tắt đúng các
+  tầng môi trường mà giữ mờ camera và hạt; config và hash).
+
 **p23_illum — ánh sáng không đều + lóe vừa** (config `configs/kaggle_illum.yaml` → OUT `outputs/p23_illum`). Kiến
 trúc giữ nguyên như p22_light (nhánh ánh sáng H); chỉ nhiễu đổi. Hình: `docs/kien_truc_illum.svg` (`--illum`).
 - **Vì sao** — log Kaggle của p22 (Cell 14c): ảnh hư hại chỉ là ảnh mờ cộng **một lớp tối đều khắp khung**. Bước thiếu
