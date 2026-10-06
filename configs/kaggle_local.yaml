@@ -1,28 +1,20 @@
-# p25_local: TOI THEO VUNG (thay mot lop toi deu), it mo tong hop, va train tren anh 640x640 GOC.
+# p25_local: TOI THEO VUNG (thay mot lop toi deu) va it mo tong hop; train tren 256x256 nhu cac run truoc.
 #
 # Nguoi dung (06/10/2026): anh van mo va "phu 1 lop mask toi"; can do sang TUNG VUNG thay doi theo moi truong
-# (cho duoc chieu sang hon), model lam dep, giam anh huong anh sang, lam ro va net vung toi va vung sang;
-# "train tren 640, dau ra cung la anh 640".
-#  - data.source_size [640, 640]: anh doc o 640x640 (shard TartanAir 640, KHONG thu nho nhu truoc -- truoc day
-#    moi run doc anh roi thu ve 256); moi mau la mot MANH 256x256 cat tu anh goc (vi tri doi moi epoch,
-#    validation co dinh), di qua nhieu roi vao model. Model toan tich chap nen luc chay that nhan ca khung
-#    640x640 va tra anh 640x640 (ZI 40x40); evaluate --full-frame, Cell 14c/14e va lenh infer chay ca khung.
-#    Train ca khung 640 cham ~7,7 lan (do forward tren CPU) -> 10-12 gio tren 2 x T4: khong vua Kaggle.
+# (cho duoc chieu sang hon), model lam dep, giam anh huong anh sang, lam ro va net vung toi va vung sang.
+# Sau do: "sua lai de train tren 256" -- anh doc roi thu ve 256 nhu truoc; khong dung data.source_size (co che
+# cat manh 256 tu anh 640 goc van co trong code, tests/test_source_crop.py, nhung tat o day).
 #  - Toi theo vung: phoi sang deu nhe hon (x0,5-0,9, gamma 0,7-1,0; p24 x0,26-0,68, 0,52-0,82), vung sang/toi
-#    manh hon (+-1,5-3,5 stop, 3-6 vung, dai sang 0,5-3 stop). Do tren anh cuoi (ban 256): chenh giua cac vung
-#    x2,8 trung vi, x5,7 p90 (p24: x2,3 / x3,9); do sang chung 0,76 (p24 0,74) -- toi don vao tung vung.
-#  - It mo tong hop: lech tieu cu 68% -> 30%, thu nho 32% -> 10%, chuyen dong 20% -> 10%; anh hong con 63% chi
-#    tiet canh (p24: 43%).
-#  - Thong so tinh bang pixel x2,5 de o 640 goc trong nhu ban xem truoc 256 nguoi dung da duyet. Kich thuoc
-#    vung sang/toi va vet nhoe la phan cua MANH dang lam nhieu (256 px), khong phai cua ca khung.
-# Doi data + corruption -> train lai ca hai phase. PSNR khong so thang voi run truoc (manh goc vs khung thu nho).
+#    manh hon (+-1,5-3,5 stop, 3-6 vung, dai sang 0,5-3 stop). Do tren anh cuoi: chenh giua cac vung x2,8 trung
+#    vi, x5,7 p90 (p24: x2,3 / x3,9); do sang chung 0,76 (p24 0,74) -- toi don vao tung vung.
+#  - It mo tong hop: lech tieu cu 68% -> 30% (0,3-0,7 px), thu nho 32% -> 10%, chuyen dong 20% -> 10%; anh hong
+#    con 63% chi tiet canh (p24: 43%). Dung bo thong so ban xem truoc nguoi dung da duyet
+#    (outputs/light_corruption/p25_draft.png).
+# Doi corruption -> train lai ca hai phase.
 extends: kaggle_env.yaml
 
 runtime:
   output_dir: /kaggle/working/qwt_jepa_version3/outputs/p25_local
-
-data:
-  source_size: [640, 640]
 
 corruption:
   image:
@@ -30,11 +22,8 @@ corruption:
     tone_gamma: [0.7, 1.0]              # p24: [0.52, 0.82]
     illum_strength: [1.5, 3.5]          # p24: [1.0, 3.0]
     illum_blobs: [3, 6]                 # p24: [2, 5]
-    illum_blob_size: [0.1, 0.5]         # p24: [0.1, 0.35] (phan cua manh 256)
     illum_gradient: [0.5, 3.0]          # p24: [0.0, 2.5]
     defocus_probability: 0.3            # p24: 0.68
-    defocus_sigma_px: [0.75, 1.75]      # px goc 640 (= 0,3-0,7 px o 256)
+    defocus_sigma_px: [0.3, 0.7]        # p24: [0.3, 0.95]
     downsample_probability: 0.1         # p24: 0.32
     motion_probability: 0.1             # p24: 0.2
-    motion_length_px: [5, 10]           # px goc 640 (= 2-4 px o 256)
-    light_bloom_sigma_px: [[3.75, 10.0], [15.0, 40.0], [50.0, 150.0]]   # px goc 640 (x2,5)

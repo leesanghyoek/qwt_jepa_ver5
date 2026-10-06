@@ -12,23 +12,18 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p25_local — ảnh 640 gốc, tối theo vùng, ít mờ tổng hợp** (config `configs/kaggle_local.yaml` → OUT `outputs/p25_local`).
+**p25_local — tối theo vùng, ít mờ tổng hợp, 256×256** (config `configs/kaggle_local.yaml` → OUT `outputs/p25_local`).
 Kiến trúc như p22–p24. Hình: `docs/kien_truc_local.svg` (`--local`). Người dùng: ảnh vẫn mờ và "phủ một lớp mask tối";
-cần độ sáng **từng vùng** thay đổi theo môi trường, model làm rõ và nét vùng tối, vùng sáng; train trên 640, ra ảnh 640.
-- **Trước đây mọi run đọc ảnh rồi thu về 256** (`data.image_size` bắt buộc 256, ảnh 640 của shard bị thu nhỏ ngay lúc
-  đọc), nên đổi dataset sang 640 không làm model nét hơn. **`data.source_size: [640, 640]`**: đọc ở 640 (pixel gốc),
-  mỗi mẫu là một **mảnh 256×256** cắt từ đó — vị trí theo (mẫu, realization): mỗi epoch một mảnh khác, validation cố
-  định — rồi mới làm nhiễu. Model toàn tích chập (không có embedding vị trí; forward 640 cho ZI 40×40), nên chạy thật
-  nhận cả khung 640 và trả 640: `evaluate --full-frame`, `infer`, preview và `glare_metrics` dùng cả khung khi config
-  có `source_size`. Train cả khung 640 chậm ~7,7 lần (forward trên CPU), ~10–12 giờ trên 2 × T4. Đọc một mẫu còn
-  nhanh hơn (28 so với 34 ms: không thu nhỏ). Thiếu khoá: đọc ở `image_size` như cũ.
+cần độ sáng **từng vùng** thay đổi theo môi trường, model làm rõ và nét vùng tối, vùng sáng.
 - **Tối theo vùng**: phơi sáng đều nhẹ hơn (×0,5–0,9, gamma 0,7–1,0), vùng sáng/tối mạnh hơn (±1,5–3,5 stop, 3–6 vùng,
-  dải sáng 0,5–3 stop). Ảnh cuối (bản 256): chênh giữa các vùng ×2,8 trung vị / ×5,7 p90 (p24 ×2,3 / ×3,9), độ sáng
-  chung 0,76 (p24 0,74). **Ít mờ tổng hợp**: lệch tiêu cự 68% → 30%, thu nhỏ 32% → 10%, chuyển động 20% → 10%; ảnh
-  hỏng còn 63% chi tiết cạnh (p24 43%). Thông số pixel ×2,5 cho 640 gốc.
-- Bằng chứng: `tests/test_source_crop.py` (mảnh đúng là pixel gốc, đổi theo realization, validation cố định, cả khung
-  640; thiếu khoá như cũ; kích thước sai bị từ chối; config; train hai phase qua CLI trên mảnh rồi evaluate và preview
-  cả khung).
+  dải sáng 0,5–3 stop). Ảnh cuối: chênh giữa các vùng ×2,8 trung vị / ×5,7 p90 (p24 ×2,3 / ×3,9), độ sáng chung 0,76
+  (p24 0,74). **Ít mờ tổng hợp**: lệch tiêu cự 68% → 30% (0,3–0,7 px), thu nhỏ 32% → 10%, chuyển động 20% → 10%; ảnh
+  hỏng còn 63% chi tiết cạnh (p24 43%). Đúng bộ thông số bản xem trước người dùng đã duyệt.
+- **Train trên 256** như các run trước (ảnh đọc rồi thu về 256). Mọi run đều thế: config bắt buộc `image_size` 256,
+  nên đổi dataset sang 640 không làm ảnh ra nét hơn. Có thử **`data.source_size`** (đọc ảnh ở 640 gốc, train trên mảnh
+  256 cắt từ đó, chạy cả khung 640 — model toàn tích chập, forward 640 cho ZI 40×40; `evaluate --full-frame`, `infer`,
+  preview và `glare_metrics` dùng cả khung khi config có khoá); người dùng chọn quay về 256, nên p25 không bật. Train cả
+  khung 640 thì chậm ~7,7 lần (10–12 giờ trên 2 × T4). Bằng chứng cho cơ chế: `tests/test_source_crop.py`.
 
 **p24_env — môi trường chụp kém: vùng sáng/tối bất ổn + ảnh môi trường trong** (người dùng bỏ sương mù: "tôi chỉ cần
 ảnh có các vùng sáng tối, bất ổn"; code sương vẫn còn, config không bật) (config `configs/kaggle_env.yaml` → OUT

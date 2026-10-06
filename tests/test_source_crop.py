@@ -4,8 +4,9 @@ Pins: with the key, a sample is a crop of image_size taken from the frame read a
 its own pixels, not a downscale -- at a place drawn per (sample, realization), so epochs see other
 crops and the fixed validation realization always the same one; full_frame returns the whole
 source frame; without the key the dataset reads at image_size exactly as before; bad sizes are
-refused; configs/kaggle_local is p24_env plus the source size and the local-light corruption;
-the recipe trains both phases through the CLI on crops and evaluates and previews whole frames.
+refused; configs/kaggle_local trains on 256 frames (no source size: the user went back to 256) and is
+p24_env plus the local-light corruption; the recipe trains both phases through the CLI on crops and
+evaluates and previews whole frames.
 """
 
 from __future__ import annotations
@@ -77,10 +78,10 @@ def test_without_the_key_the_dataset_reads_at_image_size_as_before(manifest):
         == tuple(item["image_clean"].shape)
 
 
-def test_bad_source_sizes_are_refused_and_kaggle_local_is_p24_plus_source_size_and_local_light():
+def test_bad_source_sizes_are_refused_and_kaggle_local_is_p24_plus_local_light_at_256():
     config = load_config("configs/kaggle_local.yaml")
     validate_config(config)
-    assert config["data"]["source_size"] == [640, 640] and config["data"]["image_size"] == [256, 256]
+    assert "source_size" not in config["data"] and config["data"]["image_size"] == [256, 256]
     for value in ([200, 200], [650, 640], [640], "640", [640.0, 640]):
         bad = copy.deepcopy(config)
         bad["data"]["source_size"] = value
@@ -91,10 +92,8 @@ def test_bad_source_sizes_are_refused_and_kaggle_local_is_p24_plus_source_size_a
     for item in (env, local):
         item.pop("_config_path", None)
         item["runtime"].pop("output_dir")
-    assert local["data"].pop("source_size") == [640, 640]
-    changed = {"exposure_gain", "tone_gamma", "illum_strength", "illum_blobs", "illum_blob_size", "illum_gradient",
-               "defocus_probability", "defocus_sigma_px", "downsample_probability", "motion_probability",
-               "motion_length_px", "light_bloom_sigma_px"}
+    changed = {"exposure_gain", "tone_gamma", "illum_strength", "illum_blobs", "illum_gradient",
+               "defocus_probability", "defocus_sigma_px", "downsample_probability", "motion_probability"}
     for key in changed:
         assert local["corruption"]["image"].pop(key) != env["corruption"]["image"].pop(key), key
     assert local == env
