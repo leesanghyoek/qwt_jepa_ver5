@@ -14,7 +14,7 @@ from ..models.masking import sample_seeds
 from ..models.predictors import image_tokens, imu_tokens
 from ..models.pipeline import LatentPretrainingModel
 from ..execution import Phase1Forward, execution_metadata, parallel_forward
-from .checkpoints import configuration_hash, rng_state, state_dict_hash
+from .checkpoints import configuration_hash, rng_state, state_dict_hash, target_backbone_hash
 from .losses import (
     coding_rate_loss,
     dense_infonce_loss,
@@ -484,6 +484,8 @@ class Phase1Trainer:
                 "manifest_hash": self.manifest_hash,
                 "initialization_hash": self.initialization_hash,
                 "backbone_hash": state_dict_hash(self.model.backbone),
+                # phase2.backbone_weights: target freezes this one instead.
+                "target_backbone_hash": target_backbone_hash(self.model),
                 "normalizer_hash": state_dict_hash(self.model.normalizer),
                 "configuration_hash": configuration_hash(config, "phase1"),
                 "latent_gate_status": latent_gate_status,

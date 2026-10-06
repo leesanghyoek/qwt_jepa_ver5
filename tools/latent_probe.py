@@ -99,7 +99,9 @@ def main() -> None:
         batch = _to_device(raw, device)
         with torch.no_grad():
             latent = backbone.encode_online(batch["image_noisy"], normalize(batch["imu_noisy_phys"]),
-                                            batch["image_time"], batch["imu_times"], with_skips=True)
+                                            batch["image_time"], batch["imu_times"],
+                                            # Mot ViT (I-JEPA) chi co mot do phan giai: khong co tang min.
+                                            with_skips=backbone.encoder_type == "cnn")
             imu_clean = normalize(batch["imu_clean_phys"])
             restored = system.decode(latent) if system is not None else None
         # Decoder that da train, do tren cung mau -> so sanh thang voi probe.
@@ -132,7 +134,7 @@ def main() -> None:
         y_tiles = luminance(image).unfold(2, tile_h, tile_h).unfold(3, tile_w, tile_w)
         y_tiles = y_tiles.reshape(count, rows * columns, -1)
         y_patches.append(y_tiles[:, picked].reshape(-1, y_tiles.shape[-1]).cpu().numpy())
-        for index in stage_cells:
+        for index in stage_cells if latent.image_skips is not None else ():
             stage = latent.image_skips[index]
             s_rows, s_columns = stage.shape[2], stage.shape[3]
             s_h, s_w = height // s_rows, width // s_columns

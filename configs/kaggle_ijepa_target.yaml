@@ -1,0 +1,16 @@
+# p26_ijepa_target: p26_ijepa, nhung phase 2 dong bang trong so cua TARGET encoder (teacher EMA) thay vi
+# context encoder (online). Chi doi phase 2: hash phase 1 bang p26_ijepa, nen dung lai phase 1 cua run do.
+#
+# Nguoi dung (06/10/2026): them khoa chon context hay target cho phase 2 de so thang tren Kaggle.
+#  - Bai bao I-JEPA danh gia bang target encoder ("We use the target-encoder for evaluation"), nhung tren anh
+#    SACH de phan loai. O day phase 2 doc anh NHIEU, ma target encoder chi thay anh sach luc train.
+#  - Do o may (1000 update, 512 cap nhieu, probe tuyen tinh): anh 40,3% (context) / 40,2% (target), IMU 87,0% /
+#    84,2%; D2 nang luong duong net +2,9 / -0,2 diem. Gan nhu ngang nhau -> do bang phase 2 that.
+#  - Phase 2 van mo backbone o 25% update cuoi (LP-FT), tren trong so target.
+extends: kaggle_ijepa.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p26_ijepa_target
+
+phase2:
+  backbone_weights: target

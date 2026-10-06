@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -58,6 +59,14 @@ def state_dict_hash(module: nn.Module) -> str:
         torch.save(tensor, buffer)
         digest.update(buffer.getvalue())
     return digest.hexdigest()
+
+
+def target_backbone_hash(model: nn.Module) -> str:
+    """The backbone phase 2 freezes with phase2.backbone_weights: target -- the phase-1
+    model's backbone carrying its EMA teacher's encoder weights (the fusion, if any, stays)."""
+    backbone = copy.deepcopy(model.backbone)
+    model.teachers.load_into(backbone)
+    return state_dict_hash(backbone)
 
 
 def rng_state() -> dict[str, Any]:

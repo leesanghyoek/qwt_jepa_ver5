@@ -1,0 +1,72 @@
+# p26_ijepa: phase 1 la I-JEPA (Assran 2023), khong co gi khac. Du lieu, nhieu va decoder phase 2 nhu p25_local.
+#
+# Nguoi dung (06/10/2026): "xay dung cho toi I-JEPA, dung dung thu khac"; chon encoder ViT tren he so QWT va
+# encoder ngu canh doc anh NHIEU (teacher EMA doc anh sach). Sau do: "lam ban I-JEPA chung" -- anh va IMU (deu da
+# thanh he so wavelet) vao MOT I-JEPA, thay vi hai I-JEPA rieng khong nhin thay nhau.
+#  - Backbone ViT (model.encoder_type vit): MOT ViT chung cho anh va IMU. Anh: patch 8 tren luoi he so QWT
+#    128x128 (= 16 px anh) -> 16x16 token x 128; IMU: patch 8 tren he so Haar 64 -> 8 token. Dung luoi CNN cu, nen
+#    decoder phase 2 doc ZI/ZU nhu truoc. Attention giua token anh va token IMU chinh la fusion (khong con module
+#    fusion rieng): ZI = FI, ZU = FU, ma ZI da nghe IMU va ZU da nhin anh.
+#  - Loss phase 1 chi la I-JEPA: 4 khoi dich (15-20%, ti le canh 0,75-1,5), 1 khoi ngu canh (85-100%) da cat dich,
+#    rut rieng cho anh va cho IMU; ngu canh la ca hai. Encoder ngu canh chi chay tren token ngu canh cua ca hai loai;
+#    MOT predictor ViT hep doan khoi dich cua loai nao cung tu ngu canh cua ca hai; smooth L1 voi
+#    dau ra teacher EMA da LayerNorm. Khong VICReg, coding rate, InfoNCE, decoder neo, Jacobian, da ti le,
+#    dau hu hong (cac khoa do = 0 ben duoi; validate_config bat chung bang 0).
+#  - Toi uu nhu I-JEPA: weight decay cosine 0,04 -> 0,4 (khong ap cho bias/LayerNorm), EMA tang tuyen tinh
+#    0,996 -> 1, khong cat gradient, khong lat anh. Khac bai bao: batch 8 (bai bao 2048), lr cua repo.
+#  - Phase 2: ViT chi co mot do phan giai nen khong co cac tang 1/2-1/8 (encoder_skips tat), va predictor I-JEPA
+#    can mask nen khong dua vao decoder (decoder_predictor_input tat). Con lai nhu p25_local.
+# Doi model va phase 1 -> train lai ca hai phase.
+extends: kaggle_local.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p26_ijepa
+
+model:
+  encoder_type: vit
+  vit_depth: 6
+  vit_heads: 4
+  encoder_norm: group                   # centre norm la cua CNN; ViT co LayerNorm
+  encoder_norm_calibration: false
+
+encoder_sensitivity:
+  enabled: false
+
+phase1:
+  objective: ijepa
+  ijepa_context_input: noisy
+  ijepa_targets: 4
+  ijepa_target_scale: [0.15, 0.2]
+  ijepa_target_aspect: [0.75, 1.5]
+  ijepa_context_scale: [0.85, 1.0]
+  ijepa_image_min_keep: 10              # I-JEPA min_keep
+  ijepa_imu_min_keep: 1                 # 8 token IMU: khoi dich 1 token
+  ijepa_predictor_dim: 64
+  ijepa_predictor_depth: 4
+  ijepa_predictor_heads: 4
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  teacher_momentum_start: 0.996
+  teacher_momentum_end: 1.0
+  gradient_clip_norm: null
+  augment_hflip: false
+  # Cac so hang cua JEPA cu: tat het.
+  decoder_enabled: false
+  coefficient_reconstruction_loss_weight: 0.0
+  variance_weight: 0.0
+  covariance_weight: 0.0
+  coding_rate_weight: 0.0
+  infonce_weight: 0.0
+  multiscale_fine_weight: 0.0
+  multiscale_coarse_weight: 0.0
+  multiscale_finer_weight: 0.0
+  degradation_weight: 0.0
+  predictor_degradation_condition: false
+  image_mask_ratio: 0.0
+  imu_mask_ratio: 0.0
+
+phase2:
+  encoder_skips: false
+  decoder_input: fused_dense_latent_only
+  split_edge_naf_stage_levels: []
+  decoder_predictor_input: false

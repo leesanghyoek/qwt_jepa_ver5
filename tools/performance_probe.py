@@ -19,10 +19,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qjepa.cli import _dataset, _memory_mib, _system_from_phase2, _training_batch_stream
+from qjepa.cli import _dataset, _memory_mib, _phase1_trainer, _system_from_phase2, _training_batch_stream
 from qjepa.config import build_normalizer, build_phase1_model, load_config, seed_everything
 from qjepa.data import read_manifest
-from qjepa.training.phase1 import Phase1Trainer
 from qjepa.training.phase2 import Phase2Trainer
 
 
@@ -57,7 +56,7 @@ def probe(checkpoint: Path | None, manifest_path: Path, *, config_path: Path | N
     config["runtime"] = dict(config["runtime"], gpu_count=gpus)
     if phase == "phase1":
         model = build_phase1_model(config, build_normalizer(manifest["meta"]))
-        trainer = Phase1Trainer(model, config, device, manifest["meta"]["manifest_hash"])
+        trainer = _phase1_trainer(model, config, device, manifest["meta"]["manifest_hash"])
     else:
         trainer = Phase2Trainer(
             system, config, device,

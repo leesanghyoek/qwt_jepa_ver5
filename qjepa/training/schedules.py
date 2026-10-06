@@ -21,3 +21,14 @@ def ema_momentum(update: int, total_updates: int, start: float, end: float) -> f
     progress = min(max(update / max(1, total_updates - 1), 0.0), 1.0)
     return start + 0.5 * (end - start) * (1.0 - math.cos(math.pi * progress))
 
+
+def linear_momentum(update: int, total_updates: int, start: float, end: float) -> float:
+    """I-JEPA's EMA schedule: start + (end - start) * update / total. Below 1 for every update < total."""
+    progress = min(max(update / max(1, total_updates), 0.0), 1.0)
+    return start + (end - start) * progress
+
+
+def cosine_weight_decay(update: int, total_updates: int, start: float, end: float) -> float:
+    """I-JEPA's CosineWDSchedule: from ``start`` at update 0 to ``end`` at the last update."""
+    progress = min(max(update / max(1, total_updates), 0.0), 1.0)
+    return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))

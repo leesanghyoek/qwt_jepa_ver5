@@ -15,6 +15,9 @@ from ..transforms import (
 )
 from .encoders import DEFAULT_CHANNELS, DenseCoefficientEncoder
 from .fusion import SharedGatedFusion, build_time_metadata
+from .vit import JointCoefficientViT
+
+ENCODER_TYPES = ("cnn", "vit")
 
 
 @dataclass
@@ -52,14 +55,28 @@ class MultimodalBackbone(nn.Module):
         image_transform: str = DEFAULT_QWT_BACKEND,
         encoder_norm: str = "group",
         image_input: str = "rgb",
+        encoder_type: str = "cnn",
+        vit_depth: int = 6,
+        vit_heads: int = 4,
     ) -> None:
         super().__init__()
         if channels[-1] != embedding_dim:
             raise ValueError("The final encoder width must equal embedding_dim")
+        if encoder_type not in ENCODER_TYPES:
+            raise ValueError(f"encoder_type must be one of {ENCODER_TYPES}")
+        self.encoder_type = encoder_type
         # "luminance": QWT, encoder va teacher chi thay kenh sang Y -- JEPA hoc duong net,
         # mau di duong rieng o phase 2. Encoder dau vao 16 kenh thay vi 48.
         self.image_transform = QuaternionWaveletTransform2D(backend=image_transform, image_input=image_input)
         self.imu_transform = HaarTransform1D(channels=6)
+        if encoder_type == "vit":
+            # I-JEPA (phase1.objective: ijepa): MOT ViT chung cho token anh va token IMU, cung luoi
+            # token voi CNN. Attention giua hai loai token chinh la fusion: ZI = FI, ZU = FU.
+            self.joint_encoder = JointCoefficientViT(
+                self.image_transform.coeff_channels, self.imu_transform.coeff_channels, embedding_dim,
+                depth=vit_depth, heads=vit_heads)
+            self.fusion = None
+            return
         self.image_encoder = DenseCoefficientEncoder(
             self.image_transform.coeff_channels, channels, dim=2, groups=groups, norm=encoder_norm
         )
@@ -94,6 +111,12 @@ class MultimodalBackbone(nn.Module):
         image_coeff, image_layout = self.image_transform.analysis(image)
         imu_coeff, imu_layout = self.imu_transform.analysis(imu_normalized)
         image_skips = imu_skips = None
+        if self.encoder_type == "vit":
+            # with_skips: the joint ViT raises -- one resolution, no stages.
+            fi, fu = self.joint_encoder(image_coeff, imu_coeff, return_stages=with_skips)
+            image_rgb = image if self.image_transform.image_input == "luminance" else None
+            return LatentBatch(fi, fu, fi, fu, image_layout, imu_layout, image_coeff, imu_coeff,
+                               None, None, image_rgb)
         if with_skips:
             fi, image_skips = self.image_encoder(image_coeff, return_stages=True)
             fu, imu_skips = self.imu_encoder(imu_coeff, return_stages=True)

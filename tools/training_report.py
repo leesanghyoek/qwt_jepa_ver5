@@ -435,6 +435,12 @@ def config_section(run: Path) -> None:
     print(f"  nguồn: {path}")
     interesting = [
         ("model.image_transform", ("model", "image_transform")),
+        # None = CNN + JEPA cu (khoa chua co); vit + ijepa = p26_ijepa.
+        ("model.encoder_type", ("model", "encoder_type")),
+        ("phase1.objective", ("phase1", "objective")),
+        ("phase1.ijepa_context_input", ("phase1", "ijepa_context_input")),
+        # None = context: phase 2 dong bang encoder online; target = trong so teacher EMA.
+        ("phase2.backbone_weights", ("phase2", "backbone_weights")),
         ("corruption.image.motion_from_imu", ("corruption", "image", "motion_from_imu")),
         ("phase1.max_successful_updates", ("phase1", "max_successful_updates")),
         ("phase1.batch_size", ("phase1", "batch_size")),
@@ -486,6 +492,27 @@ def config_section(run: Path) -> None:
         print(f"  {label:<48}{node}")
 
 
+PHASE1_JEPA = """    Phase 1 — học latent. KHÔNG khôi phục ảnh. Encoder đọc đầu vào NHIỄU và học
+      dự đoán latent mà một teacher EMA tạo ra từ đầu vào SẠCH (JEPA), cộng
+      variance/covariance chống collapse, một decoder "neo" chấm điểm trên hệ số
+      wavelet sạch rồi bị vứt, và một số hạng độ nhạy encoder (Jacobian)."""
+PHASE1_IJEPA = """    Phase 1 — học latent bằng I-JEPA, KHÔNG có số hạng nào khác (không VICReg,
+      không decoder neo, không Jacobian). Encoder ViT trên hệ số wavelet chỉ thấy
+      một khối NGỮ CẢNH (85-100% khung, đã cắt 4 khối ĐÍCH 15-20%); một predictor
+      ViT hẹp đoán latent mà teacher EMA tạo ra cho các khối đích từ đầu vào SẠCH.
+      Chống collapse chỉ nhờ predictor và EMA chậm: theo dõi effective rank."""
+
+
+def phase1_description(run: Path) -> str:
+    """The phase-1 paragraph of the context, for the objective this run trained with."""
+    path = run / "phase1/resolved_config.yaml"
+    if path.is_file() and yaml is not None:
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if (config.get("phase1") or {}).get("objective") == "ijepa":
+            return PHASE1_IJEPA
+    return PHASE1_JEPA
+
+
 def find_run(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit
@@ -517,10 +544,7 @@ BÁO CÁO TRAIN — {run}
 BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án)
   Pipeline hai giai đoạn khôi phục ảnh RGB 256x256 thiếu sáng/mờ và IMU 6 kênh
   nhiễu, dữ liệu TartanAir V2.
-    Phase 1 — học latent. KHÔNG khôi phục ảnh. Encoder đọc đầu vào NHIỄU và học
-      dự đoán latent mà một teacher EMA tạo ra từ đầu vào SẠCH (JEPA), cộng
-      variance/covariance chống collapse, một decoder "neo" chấm điểm trên hệ số
-      wavelet sạch rồi bị vứt, và một số hạng độ nhạy encoder (Jacobian).
+{phase1_description(run)}
     Phase 2 — khôi phục. Backbone ĐÓNG BĂNG. Chỉ hai decoder mới được train; chúng
       dự đoán HIỆU CHỈNH cộng vào hệ số wavelet của chính đầu vào nhiễu.
   Chiều tốt: PSNR/SSIM cao hơn là tốt; mọi *MAE/RMSE/loss thấp hơn là tốt.

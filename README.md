@@ -12,6 +12,90 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p26_ijepa_target — phase 2 trên trọng số target encoder** (config `configs/kaggle_ijepa_target.yaml` → OUT
+`outputs/p26_ijepa_target`). Bằng p26_ijepa cộng đúng một khoá, `phase2.backbone_weights: target`; người dùng muốn so
+thẳng nên dùng encoder nào cho khôi phục.
+- **`phase2.backbone_weights`**: `context` (thiếu khoá: encoder online, như mọi run trước) hoặc `target` (trọng số
+  teacher EMA nạp vào backbone trước phase 2; với backbone CNN thì hai encoder lấy từ teacher, fusion giữ bản online).
+  Khoá nằm trong `phase2` nên hash phase 1 không đổi: hai nhánh dùng chung một phase 1. Predictor không phải lựa chọn:
+  nó đoán vùng bị che từ vùng xung quanh nên không đọc chính vùng cần khôi phục, và bài báo I-JEPA ghi nó "discards
+  the precise low-level details".
+- **Vì sao phải đo**: bài báo I-JEPA đánh giá bằng target encoder ("We use the target-encoder for evaluation", phụ
+  lục), nhưng trên ảnh sạch để phân loại; ở đây phase 2 đọc ảnh nhiễu, mà target encoder chỉ thấy ảnh sạch lúc train.
+  Đo ở máy (1000 update phase 1, 512 cặp nhiễu đầy đủ, hồi quy ridge tuyến tính, % rút được trên 30% giữ lại): ảnh
+  sạch theo ô 16 × 16 — context 40,3%, target 40,2%; IMU sạch theo token — 87,0% / 84,2%; D2 năng lượng mịn / đường
+  nét thêm vào ảnh hỏng — +6,2 / +2,9 điểm (context), +5,8 / −0,2 điểm (target). Gần như ngang nhau, nên so bằng
+  phase 2 thật.
+- Checkpoint phase 1 giờ ghi thêm `target_backbone_hash` (hash của backbone mang trọng số teacher), checkpoint phase 2
+  ghi `backbone_weights`; `frozen_backbone_hash` của phase 2 là hash của đúng bản nó đóng băng, nên resume và
+  `evaluate` kiểm như cũ.
+- Bằng chứng: `tests/test_backbone_weights.py` — thiếu khoá thì phase 2 đóng băng encoder online; `target` nạp đúng
+  trọng số teacher vào ViT chung, hoặc vào hai encoder CNN mà giữ fusion online; khoá đổi hash phase 2 mà không đổi
+  hash phase 1, giá trị lạ bị từ chối; p26_ijepa_target = p26_ijepa chỉ khác khoá này và thư mục output; qua CLI, một
+  phase 1 phục vụ cả hai nhánh (có khởi động lại sau mỗi checkpoint), mỗi checkpoint phase 2 ghi đúng hash của trọng
+  số nó đóng băng, rồi `evaluate` chạy được.
+- Chạy: notebook `qwt-jaco-jepa-ijepa.ipynb`. Chạy `RUN = 'p26_ijepa'` trước, rồi đổi `RUN = 'p26_ijepa_target'` và
+  Run All: Cell 4 lấy lại phase 1 của p26_ijepa (trong `/kaggle/working`, hoặc archive đã giải nén gắn làm Input),
+  Cell 9 không đo lại probe. Đã chạy thử cả hai nhánh nối tiếp ở máy (30 / 12 update).
+
+**p26_ijepa — phase 1 là I-JEPA, không có gì khác** (config `configs/kaggle_ijepa.yaml` → OUT `outputs/p26_ijepa`).
+Dữ liệu, nhiễu và decoder phase 2 như p25_local. Người dùng: "xây dựng cho tôi I-JEPA, đừng dùng thứ khác"; chọn
+encoder ViT trên hệ số QWT, và encoder ngữ cảnh đọc ảnh nhiễu; sau đó: "làm bản I-JEPA chung" — ảnh và IMU (đều
+đã thành hệ số wavelet) vào **một** I-JEPA, thay vì hai I-JEPA riêng không nhìn thấy nhau. Hình: `docs/kien_truc_ijepa.svg`
+(`python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg`; ô mask trong hình là mask thật từ config).
+- **Backbone: một ViT chung** (`model.encoder_type: vit`, `JointCoefficientViT` trong `qjepa/models/vit.py`): ảnh
+  patch 8 trên lưới hệ số QWT 128² (= 16 px) → 256 token; IMU patch 8 trên hệ số Haar → 8 token; mỗi loại có nhúng
+  patch, vị trí sin-cos và embedding loại token riêng, rồi 264 token đi chung qua 6 khối, 4 head, 128 kênh. Attention
+  giữa token ảnh và token IMU chính là fusion, train bằng đúng loss I-JEPA; không còn module fusion riêng: ZI = FI,
+  ZU = FU, nhưng ZI đã nghe IMU và ZU đã nhìn ảnh. Đúng lưới của CNN, nên decoder phase 2 đọc ZI/ZU như cũ. Tham số:
+  ViT chung 1,33 M (CNN 0,74 M + 0,25 M, fusion 0,33 M).
+- **Phase 1 = I-JEPA** (`phase1.objective: ijepa`, `qjepa/models/ijepa.py`, `qjepa/training/ijepa.py`), theo
+  MaskCollator và train.py của I-JEPA: mỗi batch một cỡ khối đích (15–20%, tỉ lệ cạnh 0,75–1,5) và một cỡ khối ngữ
+  cảnh (85–100%, vuông); mỗi ảnh 4 khối đích và 1 khối ngữ cảnh đã cắt bỏ đích, rút riêng cho ảnh (khối trên lưới
+  16 × 16) và cho IMU (đoạn trên 8 token), ngữ cảnh là cả hai; mọi mask cắt về mask ngắn nhất của batch. Trên lưới 16 × 16, ngữ cảnh còn trung vị 42% token (p10–p90: 33–51%, 400 lần rút), các khối đích phủ 48%
+  và chồng nhau 32%. Encoder ngữ cảnh chỉ chạy trên token ngữ cảnh của cả hai, trong một lượt. Một
+  predictor chung (ViT hẹp, 64 kênh, 4 khối) đọc token ngữ cảnh của ảnh lẫn IMU và đặt mask token (kèm vị trí và loại
+  token) ở từng khối đích, ảnh hay IMU, mỗi khối một lượt. Đích là đầu ra teacher EMA trên cặp sạch, qua LayerNorm. Loss smooth L1 (code
+  I-JEPA; bài báo ghi L2, bằng nhau tới hệ số ½ khi sai số < 1), ảnh và IMU mỗi bên một nửa. Weight decay cosine
+  0,04 → 0,4 (không áp cho bias/LayerNorm), EMA tăng tuyến tính 0,996 → 1, không cắt gradient, không lật ảnh.
+- **Khác bài báo**: `ijepa_context_input: noisy` (người dùng chọn) — encoder ngữ cảnh đọc ảnh/IMU nhiễu, teacher đọc
+  bản sạch; `clean` là đúng bài báo. Batch 8 thay vì 2048, lr của repo (phần cứng).
+- **Bỏ hẳn**: VICReg, coding rate, InfoNCE, decoder neo, Jacobian, đích đa tỉ lệ, đầu hư hỏng, che token trên latent.
+  Với `objective: ijepa`, `validate_config` từ chối mọi khoá đó khác 0.
+- **Phase 2 mất hai đầu vào**: các tầng 1/2–1/8 của encoder (ViT chỉ có một độ phân giải, `encoder_skips` tắt) và
+  predictor JEPA (cần mask, `decoder_predictor_input` tắt). Còn lại như p25.
+- **Thử ở máy** (RTX 4060, dữ liệu TartanAir thật, 1000 update phase 1 rồi 200 update phase 2 với LP-FT từ update 150;
+  không VGG vì venv thiếu torchvision; chỉ là kiểm tra đường chạy, chưa phải so sánh với p25). ViT chung so với bản
+  đầu hai ViT riêng, cùng số update:
+
+  | | hai ViT riêng | ViT chung |
+  |---|---|---|
+  | loss I-JEPA validation ảnh / IMU | 0,19 / 0,08 | **0,028** / 0,16 |
+  | độ lệch giữa các mẫu của ZI (khởi tạo → 1000) | 0,23 → 0,68 | 0,21 → **0,22** |
+  | effective rank ZI / ZU | 5,0 → 2,8 / 22 → 8,6 | 5,3 → 2,6 / 23,5 → 8,0 |
+  | probe tuyến tính: ô ảnh / Y / IMU (256 mẫu) | 54% / 66% / 71–81% | 52% / 66% / **80–88%** |
+  | D2: thêm ZI vào ảnh hỏng, năng lượng mịn | +5,6 điểm | +5,8 điểm |
+  | phase 2 (32 ảnh valid): PSNR / SSIM, input 18,50 / 0,758 | 18,61 / 0,783 | 17,83 / 0,775 |
+  | latent đóng góp (`delta_report --ablate-latent`) | 18,3% sai số | 21,4% sai số |
+
+  Gate PASS cả 5 lần, 0,06 s/update. Ở bản chung, token ảnh ít khác nhau giữa các ảnh (0,22) và đích ảnh rất dễ đoán
+  (loss 0,028), nhưng probe cho thấy ZI vẫn giữ ngần ấy thông tin ảnh như bản riêng, còn ZU giữ nhiều thông tin IMU hơn.
+  Rank tụt ở cả hai bản: không có VICReg nên latent dồn về ít chiều; cần xem trên run dài (Cell 8 của notebook in
+  bảng này), gate chỉ báo khi rank dưới 10% lúc khởi tạo. Chênh PSNR phase 2 sau 200 update trên 32 ảnh chưa nói được gì.
+- Config cũ giữ nguyên hash (test ghim hash của p25); thiếu khoá = CNN + JEPA cũ. `tools/latent_probe.py` và
+  `tools/edge_probe.py` bỏ hàng tầng mịn khi encoder là ViT; `tools/performance_probe.py` chọn trainer theo objective.
+- Bằng chứng: `tests/test_ijepa.py` — mask theo MaskCollator (đích đúng cỡ, ngữ cảnh không chứa token đích, tái lập
+  từ seed; IMU là đoạn liên tiếp); đổi token ngoài ngữ cảnh không đổi đầu ra encoder ngữ cảnh, còn đổi một token IMU
+  trong ngữ cảnh thì token ảnh cùng mẫu đổi theo (và mẫu khác thì không); ZI dày đặc đổi khi chỉ IMU đổi, ZU đổi khi
+  chỉ ảnh đổi; mỗi khối đích một lượt predictor, và ngữ cảnh IMU đổi dự đoán ảnh (và ngược lại); encoder ngữ cảnh đọc cặp nhiễu, teacher đọc cặp sạch (và `clean` bỏ qua cặp nhiễu); đích = token teacher
+  đã LayerNorm, không có gradient; một update chỉ log loss I-JEPA và teacher đi đúng EMA 0,996; lịch weight decay,
+  momentum và nhóm tham số của I-JEPA; config từ chối mọi số hạng khác; p26 = p25 chỉ đổi các khoá I-JEPA; CLI train,
+  resume, phase 2 và evaluate; hai tiến trình DDP train ra đúng như một.
+- Chạy: notebook riêng `qwt-jaco-jepa-ijepa.ipynb` (sơ đồ kiến trúc ở đầu, 13 cell: source, dữ liệu, config,
+  manifest, phase 1, kiểm tra rank latent, chẩn đoán, phase 2, đánh giá, báo cáo). Cell 1 ghim `SOURCE_REF` vào
+  commit có I-JEPA. Mặc định phase 1 2500 / phase 2 5000 update như p25. Đổi `model` nên train lại cả hai phase.
+  Đã chạy thử hết các cell ở máy (bản chép repo, dữ liệu TartanAir local, 30 / 12 update).
+
 **p25_local — tối theo vùng, ít mờ tổng hợp, 256×256** (config `configs/kaggle_local.yaml` → OUT `outputs/p25_local`).
 Kiến trúc như p22–p24. Hình: `docs/kien_truc_local.svg` (`--local`). Người dùng: ảnh vẫn mờ và "phủ một lớp mask tối";
 cần độ sáng **từng vùng** thay đổi theo môi trường, model làm rõ và nét vùng tối, vùng sáng.

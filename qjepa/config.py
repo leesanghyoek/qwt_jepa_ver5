@@ -25,7 +25,10 @@ from .corruptions.image import DEGRADATION_FEATURES
 from .data.normalize import ImuNormalizer
 from .transforms import IMAGE_INPUTS, QWT_BACKENDS
 from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
+from .models.backbone import ENCODER_TYPES
 from .models.blocks import ENCODER_NORMS
+from .models.ijepa import CONTEXT_INPUTS, IJEPAPretrainingModel
+from .models.vit import TOKEN_STRIDE
 from .models.decoders import PIXEL_IMAGE_DECODERS
 from .models.predictors import PREDICTOR_TYPES
 from .training.phase1 import NOISE_DIRECTIONS
@@ -127,12 +130,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("phase1.coefficient_reconstruction_loss_weight needs decoder_enabled")
     if phase1.get("gradient_accumulation", 1) != 1:
         raise ValueError("Phase 1 uses real batch statistics; gradient_accumulation must be 1")
-    if not phase1.get("online_clean_forward_for_regularization", False):
+    # Absent before the I-JEPA arm: the VICReg JEPA every checkpoint so far was trained with.
+    ijepa = phase1.get("objective", "jepa") == "ijepa"
+    if not ijepa and not phase1.get("online_clean_forward_for_regularization", False):
         raise ValueError("Phase 1 requires the gradient-enabled clean online branch")
     if phase1.get("covariance_pooling", "per_position") not in ("per_position", "pooled"):
         raise ValueError("phase1.covariance_pooling must be per_position or pooled")
     _validate_phase1_predictor(phase1)
+    _validate_ijepa(config)
     _validate_sharpness(config)
+    if phase2.get("backbone_weights", "context") not in BACKBONE_WEIGHTS:
+        raise ValueError(f"phase2.backbone_weights must be one of {BACKBONE_WEIGHTS}")
     _validate_light(config)
     _validate_light_branch(config)
     _validate_source_size(config)
@@ -140,12 +148,12 @@ def validate_config(config: dict[str, Any]) -> None:
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
         raise ValueError("encoder_sensitivity.signal_floor_log_gain must map image/imu to numbers")
-    if phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0:
+    if not ijepa and (phase1.get("variance_weight", 0) <= 0 or phase1.get("covariance_weight", 0) <= 0):
         raise ValueError("Main latent training requires explicit variance and covariance losses")
     if phase1.get("jepa_weight") != 1.0 or phase1.get("precision") != "fp32":
         raise ValueError("Supported phase-1 recipe requires jepa_weight=1 and FP32")
     required_maps = {"FI", "FU", "ZI", "ZU", "FI_clean", "FU_clean", "ZI_clean", "ZU_clean"}
-    if set(phase1.get("regularized_maps", ())) != required_maps:
+    if not ijepa and set(phase1.get("regularized_maps", ())) != required_maps:
         raise ValueError("phase1.regularized_maps must contain all eight raw feature maps")
     required_phase2 = {"freeze_backbone": True}
     for key, required in required_phase2.items():
@@ -362,6 +370,10 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
         encoder_norm=model.get("encoder_norm", "group"),
         # Absent before the luminance arm: RGB, the 48-channel QWT every checkpoint holds.
         image_input=model.get("image_input", "rgb"),
+        # Absent before the I-JEPA arm: the CNN encoders and the gated fusion.
+        encoder_type=model.get("encoder_type", "cnn"),
+        vit_depth=int(model.get("vit_depth", 6)),
+        vit_heads=int(model.get("vit_heads", 4)),
     )
 
 
@@ -460,6 +472,83 @@ def _validate_phase1_predictor(phase1: dict[str, Any]) -> None:
         pool = phase1.get("multiscale_coarse_pool")
         if not isinstance(pool, int) or pool < 2:
             raise ValueError("phase1.multiscale_coarse_pool must be an integer >= 2")
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _interval(value: Any, low: float, high: float) -> bool:
+    """[a, b] with low <= a <= b <= high."""
+    return (isinstance(value, (list, tuple)) and len(value) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+            and low <= value[0] <= value[1] <= high)
+
+
+# The VICReg JEPA's terms. I-JEPA trains with none of them, and a config that names
+# one of them nonzero would say the run trained something it did not.
+IJEPA_ABSENT_TERMS = ("coefficient_reconstruction_loss_weight", "variance_weight", "covariance_weight",
+                      "coding_rate_weight", "infonce_weight", "multiscale_fine_weight",
+                      "multiscale_coarse_weight", "multiscale_finer_weight", "degradation_weight",
+                      "image_mask_ratio", "imu_mask_ratio")
+
+
+def _validate_ijepa(config: dict[str, Any]) -> None:
+    """model.encoder_type vit and phase1.objective ijepa come together. Every I-JEPA
+    setting is explicit, so the hash records the recipe that was trained."""
+    model, phase1, phase2 = config["model"], config["phase1"], config["phase2"]
+    encoder_type = model.get("encoder_type", "cnn")
+    objective = phase1.get("objective", "jepa")
+    if encoder_type not in ENCODER_TYPES:
+        raise ValueError(f"model.encoder_type must be one of {ENCODER_TYPES}")
+    if objective not in ("jepa", "ijepa"):
+        raise ValueError("phase1.objective must be jepa or ijepa")
+    if (encoder_type == "vit") != (objective == "ijepa"):
+        raise ValueError("phase1.objective ijepa and model.encoder_type vit come together: I-JEPA's context "
+                         "encoder sees only the context tokens, which a CNN cannot do")
+    if encoder_type != "vit":
+        return
+    for key in ("vit_depth", "vit_heads"):
+        if not _positive_int(model.get(key)):
+            raise ValueError(f"model.encoder_type vit needs a positive integer model.{key}")
+    if model["embedding_dim"] % model["vit_heads"] or model["embedding_dim"] % 4:
+        raise ValueError("model.embedding_dim must divide by model.vit_heads and by 4 (2-D positions)")
+    if model.get("encoder_norm", "group") != "group" or model.get("encoder_norm_calibration", False):
+        raise ValueError("model.encoder_norm centre and its calibration belong to the CNN; the ViT has LayerNorm")
+    sides = [*config["data"]["image_size"], config["data"]["imu_window"]]
+    if any(side % TOKEN_STRIDE for side in sides):
+        raise ValueError(f"model.encoder_type vit needs image sides and data.imu_window divisible by {TOKEN_STRIDE}")
+    if phase2.get("encoder_skips", False) or phase2.get("decoder_predictor_input", False):
+        raise ValueError("The ViT has one resolution and I-JEPA's predictor needs masks: "
+                         "phase2.encoder_skips and phase2.decoder_predictor_input must be false")
+    for key in ("ijepa_targets", "ijepa_image_min_keep", "ijepa_imu_min_keep", "ijepa_predictor_dim",
+                "ijepa_predictor_depth", "ijepa_predictor_heads"):
+        if not _positive_int(phase1.get(key)):
+            raise ValueError(f"phase1.objective ijepa needs a positive integer phase1.{key}")
+    if phase1["ijepa_predictor_dim"] % phase1["ijepa_predictor_heads"] or phase1["ijepa_predictor_dim"] % 4:
+        raise ValueError("phase1.ijepa_predictor_dim must divide by ijepa_predictor_heads and by 4")
+    for key, low, high in (("ijepa_target_scale", 0.0, 1.0), ("ijepa_context_scale", 0.0, 1.0),
+                           ("ijepa_target_aspect", 1e-3, 1e3)):
+        if not _interval(phase1.get(key), low, high) or phase1[key][0] <= 0:
+            raise ValueError(f"phase1.{key} must be [min, max] with 0 < min <= max <= {high:g}")
+    if phase1.get("ijepa_context_input") not in CONTEXT_INPUTS:
+        raise ValueError(f"phase1.ijepa_context_input must be one of {CONTEXT_INPUTS}")
+    start, end = phase1.get("teacher_momentum_start"), phase1.get("teacher_momentum_end")
+    if not (_nonnegative_number(start) and _nonnegative_number(end) and start < 1.0 and start <= end <= 1.0):
+        raise ValueError("phase1 teacher momentum must rise from start < 1 to end <= 1")
+    if not _nonnegative_number(phase1.get("weight_decay_end")):
+        raise ValueError("phase1.objective ijepa needs a nonnegative phase1.weight_decay_end")
+    clip = phase1.get("gradient_clip_norm")
+    if clip is not None and (not _nonnegative_number(clip) or clip <= 0):
+        raise ValueError("phase1.gradient_clip_norm must be positive, or null for none (I-JEPA)")
+    for key in IJEPA_ABSENT_TERMS:
+        if phase1.get(key, 0.0) != 0.0:
+            raise ValueError(f"phase1.objective ijepa trains I-JEPA's loss alone: phase1.{key} must be 0")
+    for key in ("decoder_enabled", "predictor_degradation_condition"):
+        if phase1.get(key, False):
+            raise ValueError(f"phase1.objective ijepa trains I-JEPA's loss alone: phase1.{key} must be false")
+    if config.get("encoder_sensitivity", {}).get("enabled", False):
+        raise ValueError("phase1.objective ijepa trains I-JEPA's loss alone: encoder_sensitivity.enabled must be false")
 
 
 def _nonnegative_number(value: Any) -> bool:
@@ -597,9 +686,25 @@ def _validate_sharpness(config: dict[str, Any]) -> None:
             raise ValueError("phase2.imu_increment_windows must list window lengths that divide data.imu_window")
 
 
-def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> LatentPretrainingModel:
+def build_phase1_model(
+    config: dict[str, Any], normalizer: ImuNormalizer
+) -> LatentPretrainingModel | IJEPAPretrainingModel:
     enabled = bool(config["phase1"].get("decoder_enabled", False))
     phase1 = config["phase1"]
+    if phase1.get("objective", "jepa") == "ijepa":
+        return IJEPAPretrainingModel(
+            build_backbone(config), normalizer,
+            predictor_dim=int(phase1["ijepa_predictor_dim"]),
+            predictor_depth=int(phase1["ijepa_predictor_depth"]),
+            predictor_heads=int(phase1["ijepa_predictor_heads"]),
+            masking={"targets": int(phase1["ijepa_targets"]),
+                     "target_scale": tuple(phase1["ijepa_target_scale"]),
+                     "target_aspect": tuple(phase1["ijepa_target_aspect"]),
+                     "context_scale": tuple(phase1["ijepa_context_scale"]),
+                     "image_min_keep": int(phase1["ijepa_image_min_keep"]),
+                     "imu_min_keep": int(phase1["ijepa_imu_min_keep"])},
+            context_input=phase1["ijepa_context_input"],
+        )
     return LatentPretrainingModel(
         backbone=build_backbone(config),
         normalizer=normalizer,
@@ -622,6 +727,18 @@ def build_phase1_model(config: dict[str, Any], normalizer: ImuNormalizer) -> Lat
         decoders=build_decoders(config, residual=False, skips=False,
                                 image_decoder="qwt_coefficients", predictor_input=False) if enabled else None,
     )
+
+
+BACKBONE_WEIGHTS = ("context", "target")
+
+
+def phase2_backbone(config: dict[str, Any], phase1_model) -> nn.Module:
+    """The phase-1 backbone phase 2 freezes. phase2.backbone_weights: context (absent: the
+    online encoder every run so far used) or target (the EMA teacher's encoder weights, which
+    I-JEPA evaluates with)."""
+    if config["phase2"].get("backbone_weights", "context") == "target":
+        phase1_model.teachers.load_into(phase1_model.backbone)
+    return phase1_model.backbone
 
 
 def phase2_latent_modules(

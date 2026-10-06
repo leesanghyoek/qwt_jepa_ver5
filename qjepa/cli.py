@@ -25,6 +25,7 @@ from .config import (
     build_normalizer,
     build_phase1_model,
     load_config,
+    phase2_backbone,
     phase2_latent_modules,
     resolve_device,
     seed_everything,
@@ -48,7 +49,9 @@ from .evaluation.reporting import (
 )
 from .models import LatentPretrainingModel, RestorationSystem
 from .distributed import any_rank, rank0_section, rank_and_world, share_rank0_rng, spawn as spawn_ranks
-from .execution import Phase1Forward, RestorationForward, execution_metadata, parallel_forward, select_device_ids
+from .execution import (
+    IJEPAForward, Phase1Forward, RestorationForward, execution_metadata, parallel_forward, select_device_ids,
+)
 from .training.checkpoints import (
     atomic_torch_save,
     configuration_hash,
@@ -58,6 +61,7 @@ from .training.checkpoints import (
     state_dict_hash,
 )
 from .training.losses import jepa_fine_loss, jepa_latent_loss
+from .training.ijepa import IJEPATrainer, ijepa_loss
 from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
 from .training.phase2 import Phase2Trainer, latent_predictor_hash
 
@@ -501,6 +505,24 @@ def _write_resolved(config: dict[str, Any], output: Path) -> None:
     )
 
 
+def _phase1_trainer(model, config: dict[str, Any], device: torch.device, manifest_hash: str):
+    """phase1.objective: the VICReg JEPA (absent key) or I-JEPA."""
+    if config["phase1"].get("objective", "jepa") == "ijepa":
+        return IJEPATrainer(model, config, device, manifest_hash)
+    return Phase1Trainer(model, config, device, manifest_hash)
+
+
+def _ijepa_validation_batch(model, runner, batch: dict[str, Any], index: int, device: torch.device):
+    """I-JEPA's loss on a bank batch under masks fixed per batch, and the whole-view features."""
+    image_grid, imu_grid = model.token_grids(tuple(batch["image_noisy"].shape), int(batch["imu_noisy_phys"].shape[-1]))
+    masks = model.sample_masks(image_grid, imu_grid, int(batch["image_noisy"].shape[0]), "validation", index)
+    outputs = runner(batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"], batch["imu_clean_phys"],
+                     batch["image_time"], batch["imu_times"], **{key: value.to(device) for key, value in masks.items()},
+                     dense=True)
+    total, image, imu = ijepa_loss(outputs)
+    return outputs, {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu)}
+
+
 @torch.no_grad()
 def _validate_latent(
     model: LatentPretrainingModel,
@@ -510,7 +532,8 @@ def _validate_latent(
     forward_model: torch.nn.Module | None = None,
 ) -> dict[str, float]:
     model.eval()
-    runner = forward_model if forward_model is not None else Phase1Forward(model)
+    ijepa = getattr(model, "objective", "jepa") == "ijepa"
+    runner = forward_model if forward_model is not None else (IJEPAForward(model) if ijepa else Phase1Forward(model))
     collected: dict[str, list[float]] = {}
     bank: dict[str, list[torch.Tensor]] = {}
     counts = []
@@ -518,20 +541,12 @@ def _validate_latent(
         if index >= maximum_batches:
             break
         batch = _to_device(raw, device)
-        outputs = runner(
-            batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
-            batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
-        )
-        total, image, imu = jepa_latent_loss(
-            outputs["prediction_i"], outputs["prediction_u"], outputs["target_i"], outputs["target_u"]
-        )
         counts.append(batch["image_clean"].shape[0])
-        # No mask here: validation JEPA stays comparable with runs that never masked.
-        values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu),
-                  **jepa_report_terms(outputs)}
-        if "prediction_i_fine" in outputs:
-            values["jepa_image_fine"] = float(jepa_fine_loss(outputs["prediction_i_fine"],
-                                                             outputs["target_i_fine"]))
+        if ijepa:
+            outputs, values = _ijepa_validation_batch(model, runner, batch, index, device)
+            teachers = (("teacher_TI", outputs["teacher_i"]), ("teacher_TU", outputs["teacher_u"]))
+        else:
+            outputs, values, teachers = _jepa_validation_batch(runner, batch)
         features = (
             ("noisy_FI", outputs["FI"]),
             ("noisy_FU", outputs["FU"]),
@@ -541,8 +556,7 @@ def _validate_latent(
             ("clean_FU", outputs["FU_clean"]),
             ("clean_ZI", outputs["ZI_clean"]),
             ("clean_ZU", outputs["ZU_clean"]),
-            ("teacher_TI", outputs["target_i"]),
-            ("teacher_TU", outputs["target_u"]),
+            *teachers,
         )
         for name, feature in features:
             bank.setdefault(name, []).append(feature.cpu())
@@ -556,6 +570,24 @@ def _validate_latent(
                 result[f"validation_{name}_{metric}"] = value
     result["validation_bank_samples"] = sum(counts)
     return result
+
+
+def _jepa_validation_batch(runner, batch: dict[str, Any]):
+    """The VICReg JEPA's validation terms on one bank batch."""
+    outputs = runner(
+        batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"],
+        batch["imu_clean_phys"], batch["image_time"], batch["imu_times"],
+    )
+    total, image, imu = jepa_latent_loss(
+        outputs["prediction_i"], outputs["prediction_u"], outputs["target_i"], outputs["target_u"]
+    )
+    # No mask here: validation JEPA stays comparable with runs that never masked.
+    values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu),
+              **jepa_report_terms(outputs)}
+    if "prediction_i_fine" in outputs:
+        values["jepa_image_fine"] = float(jepa_fine_loss(outputs["prediction_i_fine"],
+                                                         outputs["target_i_fine"]))
+    return outputs, values, (("teacher_TI", outputs["target_i"]), ("teacher_TU", outputs["target_u"]))
 
 
 def _latent_gate(
@@ -795,7 +827,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             print("centre norm calibration | RMS before, first -> last layer:"
                   f" image {measured['image'][0]:.2e} -> {measured['image'][-1]:.2e}"
                   f" | IMU {measured['imu'][0]:.2e} -> {measured['imu'][-1]:.2e}")
-    trainer = Phase1Trainer(model, config, device, manifest["meta"]["manifest_hash"])
+    trainer = _phase1_trainer(model, config, device, manifest["meta"]["manifest_hash"])
     resume_payload = None
     if args.resume:
         resume_payload = load_checkpoint(args.resume, device)
@@ -975,7 +1007,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     phase1_model, parent_payload = _load_phase1_for_phase2(config, manifest, checkpoint, device)
     seed_everything(config["phase2"]["decoder_initialization_seed"])
     system = RestorationSystem(
-        phase1_model.backbone, phase1_model.normalizer, build_decoders(config),
+        phase2_backbone(config, phase1_model), phase1_model.normalizer, build_decoders(config),
         # phase2.decoder_predictor_input: the trained phase-1 predictor stays, frozen.
         *phase2_latent_modules(config, phase1_model),
     )
@@ -1490,7 +1522,7 @@ def command_smoke(args: argparse.Namespace) -> None:
     coeff, layout = transform.analysis(qwt_input)
     # Luminance QWT: synthesis gives Y back, so compare with the Y it analysed.
     qwt_error = float((transform.synthesis(coeff, layout) - transform.prepare(qwt_input)).abs().max())
-    trainer1 = Phase1Trainer(model, config, device, "synthetic")
+    trainer1 = _phase1_trainer(model, config, device, "synthetic")
     phase1_metrics = trainer1.step(batch)
     seed_everything(config["phase2"]["decoder_initialization_seed"])
     system = RestorationSystem(model.backbone, model.normalizer, build_decoders(config),

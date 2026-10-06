@@ -189,7 +189,8 @@ def collect(backbone, normalizer, loader, device, cells_per_image: int, margin: 
         with torch.no_grad():
             imu = normalizer.normalize(batch["imu_noisy_phys"])
             latent = backbone.encode_online(batch["image_noisy"], imu, batch["image_time"],
-                                            batch["imu_times"], with_skips=True)
+                                            # Mot ViT (I-JEPA) chi co mot do phan giai: khong co tang min.
+                                            batch["imu_times"], with_skips=backbone.encoder_type == "cnn")
             latent_clean = backbone.encode_online(batch["image_clean"], imu, batch["image_time"],
                                                   batch["imu_times"], with_skips=False)
             grid = tuple(latent.ZI.shape[-2:])

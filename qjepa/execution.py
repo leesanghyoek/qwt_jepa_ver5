@@ -133,6 +133,44 @@ class Phase1Forward(nn.Module):
         return result
 
 
+class IJEPAForward(nn.Module):
+    """One I-JEPA forward (phase1.objective: ijepa). Masks arrive as batch-first index
+    tensors, so DataParallel and the DDP ranks split them with the batch.
+
+    With the masks: the predictions and their LayerNorm'd targets, [B, M, Kt, D].
+    ``dense``: also the whole-view features the latent gate measures (validation only;
+    training runs the context encoder on the context tokens alone).
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, image_noisy, imu_noisy_phys, image_clean, imu_clean_phys, image_time, imu_times,
+                image_context=None, image_targets=None, imu_context=None, imu_targets=None,
+                dense: bool = False) -> dict[str, torch.Tensor]:
+        model = self.model
+        teacher_image, teacher_imu = model.targets(image_clean, imu_clean_phys)
+        result: dict[str, torch.Tensor] = {}
+        if image_context is not None:
+            masks = {"image_context": image_context, "image_targets": image_targets,
+                     "imu_context": imu_context, "imu_targets": imu_targets}
+            noisy = model.context_input == "noisy"
+            prediction_i, prediction_u = model.predict(image_noisy if noisy else image_clean,
+                                                       imu_noisy_phys if noisy else imu_clean_phys, masks)
+            result.update(prediction_i=prediction_i, prediction_u=prediction_u,
+                          target_i=model.target_tokens(teacher_image, image_targets),
+                          target_u=model.target_tokens(teacher_imu, imu_targets))
+        if dense:
+            for prefix, latent in (("", model.encode_online(image_noisy, imu_noisy_phys, image_time, imu_times)),
+                                   ("_clean", model.encode_online(image_clean, imu_clean_phys, image_time,
+                                                                  imu_times))):
+                for name in ("FI", "FU", "ZI", "ZU"):
+                    result[name + prefix] = getattr(latent, name)
+            result.update(teacher_i=teacher_image, teacher_u=teacher_imu)
+        return result
+
+
 class RestorationForward(nn.Module):
     def __init__(self, system: RestorationSystem):
         super().__init__()

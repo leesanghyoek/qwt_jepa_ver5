@@ -299,6 +299,7 @@ class Phase2Trainer:
                 "parent_phase1_checkpoint": self.parent_checkpoint,
                 # The phase-1 parent's backbone, even after LP-FT changed it: provenance.
                 "frozen_backbone_hash": self.frozen_backbone_hash,
+                "backbone_weights": self.phase.get("backbone_weights", "context"),
                 "backbone_finetuned": self.backbone_finetuning,
                 "backbone_current_hash": state_dict_hash(self.system.backbone),
                 "frozen_normalizer_hash": self.frozen_normalizer_hash,
