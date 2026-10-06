@@ -12,6 +12,28 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p23_illum — ánh sáng không đều + lóe vừa** (config `configs/kaggle_illum.yaml` → OUT `outputs/p23_illum`). Kiến
+trúc giữ nguyên như p22_light (nhánh ánh sáng H); chỉ nhiễu đổi. Hình: `docs/kien_truc_illum.svg` (`--illum`).
+- **Vì sao** — log Kaggle của p22 (Cell 14c): ảnh hư hại chỉ là ảnh mờ cộng **một lớp tối đều khắp khung**. Bước thiếu
+  sáng của repo nhân một hệ số phơi sáng, gamma và cân bằng trắng chung cho cả ảnh (vignette chỉ theo khoảng cách tới
+  tâm); lóe nhẹ của p22 chỉ có khi khung có đèn. Người dùng cần độ sáng thay đổi ngẫu nhiên theo vùng, lóe sáng và
+  nhòe tối.
+- **`corruption.image.illum_*`** (`light.illumination_field`), trên ánh sáng tuyến tính, trước bước mờ, ở mọi mode có
+  bước thiếu sáng, trên 80% frame: 2–5 vùng sáng/tối Gauss (mỗi vùng ±1–3 stop, σ 10–35% khung), dải sáng dần 0–2,5
+  stop qua khung (độ sáng trung bình theo stop giữ nguyên), và với xác suất 0,7 có 1–3 **vết nhòe tối** (mép mềm, kéo
+  dài tới 4 lần, làm tối 50–95% ở tâm). Lóe tính trên cảnh đã chiếu không đều, nên chỗ được chiếu sáng lóe mạnh hơn.
+  Luồng ngẫu nhiên riêng (`image_illumination`): thiếu khoá thì ảnh nhiễu giống hệt từng bit (p20, p21, p22 kiểm lại
+  trên 40 frame so với code trước), bật lên cũng không xê dịch tham số nào khác.
+- Gamma của bước thiếu sáng nén chênh lệch: đo trên 60 frame, chênh sáng/tối giữa các khối 32×32 của **ảnh cuối**
+  (p95/p5) là ×2,2 trung vị, ×3,4 ở p90; mức ±0,5–2 stop chỉ được ×1,7, khó thấy, nên chọn ±1–3.
+- Lóe mức vừa: ngưỡng 1,5–3, đèn ×5–30, quầng 0,08–0,8 (sương vùng tối p90 0,124; p21 0,236, p22 0,032).
+- `tools/glare_metrics.py` (Cell 14e) thêm vùng **tối thêm** (nơi nhiễu ánh sáng làm đầu vào tối hơn > 0,05): đo model
+  có làm sáng lại vết nhòe tối không. Cell 14e giờ in báo cáo ngay trong output của cell (bản trước in từ tiến trình
+  con nên notebook đã lưu không giữ được).
+- Bằng chứng: `tests/test_light_corruption.py` (trường sáng thay đổi theo vùng, trung bình theo stop giữ nguyên, ảnh
+  xám đều thành chênh ×4; vết nhòe làm tối đúng `depth` ở tâm, kéo dài đúng hướng; thiếu khoá thì như cũ, bật không
+  xê dịch tham số khác; chỉ ở mode có ánh sáng; config và hash).
+
 **p22_light — nhánh ánh sáng + lóe nhẹ** (config `configs/kaggle_light.yaml` → OUT `outputs/p22_light`). Bằng
 p21_glare cộng (1) các khoá lóe nhẹ hơn và (2) `phase2.split_light_*`. Hình: `docs/kien_truc_light.svg`
 (`python3 tools/draw_architecture_imu.py docs/kien_truc_light.svg --light`).

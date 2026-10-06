@@ -21,11 +21,13 @@ Usage: python3 tools/draw_architecture_imu.py docs/kien_truc_imu.svg
        python3 tools/draw_architecture_imu.py docs/kien_truc_fourier.svg --fourier
        python3 tools/draw_architecture_imu.py docs/kien_truc_gray.svg --gray         (p19 + G)
        python3 tools/draw_architecture_imu.py docs/kien_truc_light.svg --light       (p20 + H)
+       python3 tools/draw_architecture_imu.py docs/kien_truc_illum.svg --illum       (p22, nhiễu ánh sáng không đều)
 """
 import sys
 from xml.sax.saxutils import escape
 
-LIGHT = '--light' in sys.argv[2:]          # p22_light: p20_gray + light branch in phase 2 (H)
+ILLUM = '--illum' in sys.argv[2:]          # p23_illum: p22_light's architecture, uneven light in the corruption
+LIGHT = '--light' in sys.argv[2:] or ILLUM # p22_light: p20_gray + light branch in phase 2 (H)
 GRAY = '--gray' in sys.argv[2:] or LIGHT   # p20_gray: p19_sharp + QWT/JEPA on luminance only (G)
 INFOMAX = '--infomax' in sys.argv[2:] or GRAY  # p16_infomax: (E) phase-1 information terms, (F) stages
 FOURIER = '--fourier' in sys.argv[2:] or INFOMAX
@@ -77,8 +79,8 @@ def arrow(points, color='#455A64', width=2.2, dash=None, label=None, lx=None, ly
 
 def badge(x, y, label):
     """A small tag for what this run adds."""
-    if (LIGHT and label != 'mới · H') or (GRAY and not LIGHT and label != 'mới · G'):
-        return
+    if ILLUM or (LIGHT and label != 'mới · H') or (GRAY and not LIGHT and label != 'mới · G'):
+        return                                  # p23 changes only the corruption: nothing in the figure is new
     width = 12 + 7 * len(label)
     el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#D81B60"/>')
     text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
@@ -94,7 +96,8 @@ region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục', right
 region(190, 505, 810, 200, 'p1', '② Phase 1 — học latent (chỉ lúc train)')
 
 # ---------------- inputs
-img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'đèn lóe nhẹ' if LIGHT else 'nhiễu B'])
+img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'sáng/tối không đều' if ILLUM
+                                                         else 'đèn lóe nhẹ' if LIGHT else 'nhiễu B'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 # ---------------- backbone
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'] if GRAY
@@ -154,7 +157,12 @@ imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
 imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
 badge(1290, 380, 'mới · B')
-if LIGHT:
+if ILLUM:
+    text(W - 20, 26, 'p23_illum — nhiễu: sáng/tối ngẫu nhiên theo vùng, nhòe tối, lóe sáng · nhánh ÁNH SÁNG (H) cân bằng lại',
+         size=15, weight='bold', color='#D81B60', anchor='end')
+    text(W - 20, 44, 'kiến trúc như p22_light: H trước 2 nhánh (trừ sương V, nhân sáng g theo vị trí) · nền p20_gray (G)'
+         ' + p19_sharp (a–f) · phase 2: 4000 update', size=12, color='#AD1457', anchor='end')
+elif LIGHT:
     text(W - 20, 26, 'p22_light — nhánh ÁNH SÁNG (H) trước 2 nhánh: trừ lớp sương lóe, làm sáng chỗ tối, trên cả khung',
          size=15, weight='bold', color='#D81B60', anchor='end')
     text(W - 20, 44, 'nền p20_gray: Y vào backbone (G) · p19_sharp (a–f) · nhiễu: đèn ×4–20, trời không lóe'

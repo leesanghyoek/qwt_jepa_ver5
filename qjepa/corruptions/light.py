@@ -29,6 +29,8 @@ from scipy import ndimage, signal
 
 LUMA_709 = np.array([0.2126, 0.7152, 0.0722])   # do sang tren anh sang tuyen tinh (sRGB/BT.709)
 GHOSTS_MAX = 8
+ILLUM_BLOBS_MAX = 8
+SMUDGES_MAX = 6
 
 
 # float32: hai phep doi nay la phan dat nhat cua buoc (data loader chay tren CPU).
@@ -141,18 +143,69 @@ def draw_light_parameters(rng: np.random.Generator, cfg) -> dict[str, object]:
     }
 
 
-def apply_light(image: np.ndarray, params: dict[str, object], stages: bool = False):
-    """Canh HDR + loe sang o sRGB mo rong (> 1 duoc giu), float64 [H,W,3].
+def draw_illumination_parameters(rng: np.random.Generator, cfg) -> dict[str, object]:
+    """Anh sang khong deu cua mot frame tu cac khoa ``illum_*``: vung sang/toi, dai sang, vet nhoe toi.
 
-    ``image`` sRGB [H,W,3] trong [0,1]. Anh khong co vung sang nao tra ve nguyen ven. Voi
-    ``stages=True`` tra ve (canh HDR, canh HDR + loe sang) de ve tung buoc."""
+    So lan boc co dinh (boc du ILLUM_BLOBS_MAX / SMUDGES_MAX roi cat)."""
+    blob_count = int(rng.integers(cfg.illum_blobs[0], cfg.illum_blobs[1] + 1))
+    blobs = [{"y": float(rng.random()), "x": float(rng.random()),
+              "sigma": float(rng.uniform(*cfg.illum_blob_size)),
+              "stops": float(rng.choice([-1.0, 1.0]) * rng.uniform(*cfg.illum_strength))}
+             for _ in range(ILLUM_BLOBS_MAX)][:blob_count]
+    smudge_draw = float(rng.random())
+    smudge_count = int(rng.integers(cfg.illum_smudge_count[0], cfg.illum_smudge_count[1] + 1))
+    smudges = [{"y": float(rng.random()), "x": float(rng.random()),
+                "size": float(rng.uniform(*cfg.illum_smudge_size)),
+                "elongation": float(rng.uniform(*cfg.illum_smudge_elongation)),
+                "angle": float(rng.uniform(0.0, math.pi)),
+                "depth": float(rng.uniform(*cfg.illum_smudge_depth))} for _ in range(SMUDGES_MAX)][:smudge_count]
+    return {"gradient_stops": float(rng.uniform(*cfg.illum_gradient)),
+            "gradient_angle": float(rng.uniform(0.0, 2.0 * math.pi)),
+            "blobs": blobs, "smudges": smudges if smudge_draw < cfg.illum_smudge_probability else []}
+
+
+def illumination_field(height: int, width: int, params: dict[str, object]) -> np.ndarray:
+    """He so nhan [H,W] tren anh sang tuyen tinh: anh sang chieu khong deu len canh.
+
+    2^(dai sang + tong vung sang/toi Gauss, tru trung binh) -- do sang trung binh (theo stop)
+    giu nguyen, chi phan bo thay doi -- nhan tiep cac vet nhoe toi: Gauss det, mep mem, keo
+    dai theo mot huong, lam toi toi ``depth`` o tam. Toa do theo phan cua canh anh."""
+    yy, xx = np.meshgrid((np.arange(height, dtype=np.float32) + 0.5) / height,
+                         (np.arange(width, dtype=np.float32) + 0.5) / width, indexing="ij")
+    angle = float(params["gradient_angle"])
+    log2 = float(params["gradient_stops"]) * ((xx - 0.5) * math.cos(angle) + (yy - 0.5) * math.sin(angle))
+    for blob in params["blobs"]:
+        distance = (yy - float(blob["y"])) ** 2 + (xx - float(blob["x"])) ** 2
+        log2 = log2 + float(blob["stops"]) * np.exp(-distance / (2.0 * float(blob["sigma"]) ** 2))
+    field = np.exp2(np.clip(log2 - log2.mean(), -4.0, 3.0))
+    for smudge in params["smudges"]:
+        dy, dx = yy - float(smudge["y"]), xx - float(smudge["x"])
+        c, s = math.cos(float(smudge["angle"])), math.sin(float(smudge["angle"]))
+        along, across = dx * c + dy * s, -dx * s + dy * c
+        size = float(smudge["size"])
+        shape = np.exp(-(along / (size * float(smudge["elongation"]))) ** 2 / 2.0 - (across / size) ** 2 / 2.0)
+        field = field * (1.0 - float(smudge["depth"]) * shape)
+    return field.astype(np.float32)
+
+
+def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: bool = False,
+                illumination: dict[str, object] | None = None):
+    """Canh HDR + anh sang khong deu + loe sang o sRGB mo rong (> 1 duoc giu), float64 [H,W,3].
+
+    ``image`` sRGB [H,W,3] trong [0,1]. ``params`` (loe sang) hoac ``illumination`` co the None.
+    Khong co anh sang khong deu va khong co vung sang nao thi tra ve nguyen ven. Voi
+    ``stages=True`` tra ve (canh, canh + loe sang) de ve tung buoc."""
     height, width = image.shape[:2]
     linear = srgb_to_linear(image)
+    field = None if illumination is None else illumination_field(height, width, illumination)[..., None]
+    if params is None:                                  # chi anh sang khong deu, khong loe
+        out = linear_to_srgb(linear * (1.0 if field is None else field)).astype(np.float64)
+        return (out, out.copy()) if stages else out
 
     # 1. Canh HDR: vung sang that ra sang hon nhieu, dom nho (den) hon vung rong (troi).
     mask = _smoothstep(float(params["threshold"]), float(params["threshold"]) + float(params["width"]),
                        linear @ LUMA_709.astype(np.float32))
-    if not mask.any():
+    if not mask.any() and field is None:
         out = np.asarray(image, dtype=np.float64).copy()
         return (out, out.copy()) if stages else out
     # "Dom nho" = mat na tru ban lam mo cua no (Gauss sigma = canh/16), chuan hoa theo max: den
@@ -162,6 +215,9 @@ def apply_light(image: np.ndarray, params: dict[str, object], stages: bool = Fal
     compact = compact / peak if peak > 1e-6 else compact
     gain = float(params["gain"]) * compact + float(params["wide_gain"]) * (1.0 - compact)
     scene = linear * (1.0 + gain * mask ** float(params["shape"]))[..., None]
+    if field is not None:
+        # Anh sang khong deu chieu len ca canh (ca den): cho duoc chieu sang hon loe manh hon.
+        scene = scene * field
 
     # 2. Loe sang tu MOI phan vuot nguong (den, cua so, troi rat sang): quang co the phu len ca
     # vung toi -- nguoi dung chon giu (05/10/2026) de model hoc go.

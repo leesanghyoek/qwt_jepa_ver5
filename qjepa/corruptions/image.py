@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from .light import apply_light, draw_light_parameters, resize_channels
+from .light import apply_light, draw_illumination_parameters, draw_light_parameters, resize_channels
 from .motion import imu_blur_kernel
 from .rng import generator
 
@@ -96,6 +96,21 @@ class LowLightImageCorruptionConfig:
     light_star_strength: tuple[float, float] = (0.05, 0.6)    # log-uniform
     light_ghost_count: tuple[int, int] = (0, 3)
     light_ghost_strength: tuple[float, float] = (0.01, 0.08)
+    # Uneven light (light.illumination_field), with the lamps, before the optics:
+    # random brighter / darker regions and a falloff from one side (mean brightness in
+    # stops kept), and dark smudges -- soft, possibly elongated patches darkened by
+    # ``illum_smudge_depth``. LIGHT_MODES only, its own stream ("image_illumination");
+    # at 0 nothing is drawn and a config without these keys renders as before.
+    illum_probability: float = 0.0
+    illum_strength: tuple[float, float] = (0.5, 2.0)         # stops per region, either sign
+    illum_blobs: tuple[int, int] = (2, 5)
+    illum_blob_size: tuple[float, float] = (0.1, 0.35)      # Gaussian sigma, fraction of the frame
+    illum_gradient: tuple[float, float] = (0.0, 1.5)        # stops across the frame
+    illum_smudge_probability: float = 0.5
+    illum_smudge_count: tuple[int, int] = (1, 3)
+    illum_smudge_size: tuple[float, float] = (0.05, 0.2)    # fraction of the frame (short axis)
+    illum_smudge_elongation: tuple[float, float] = (1.0, 4.0)
+    illum_smudge_depth: tuple[float, float] = (0.3, 0.85)   # darkening at the centre
 
     def _validate_light(self) -> None:
         def bounds(name: str, low_limit: float, strict: bool = False) -> None:
@@ -121,6 +136,19 @@ class LowLightImageCorruptionConfig:
             raise ValueError("light_star_spikes must list spike counts >= 2")
         if self.light_ghost_count[1] > 8:
             raise ValueError("light_ghost_count must stay at most 8")
+        for name in ("illum_probability", "illum_smudge_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0,1]")
+        for name in ("illum_strength", "illum_gradient", "illum_blobs", "illum_smudge_count"):
+            bounds(name, 0.0)
+        for name in ("illum_blob_size", "illum_smudge_size"):
+            bounds(name, 0.0, strict=True)
+        bounds("illum_smudge_elongation", 1.0)
+        bounds("illum_smudge_depth", 0.0)
+        if self.illum_smudge_depth[1] >= 1:
+            raise ValueError("illum_smudge_depth must stay below 1")
+        if self.illum_blobs[1] > 8 or self.illum_smudge_count[1] > 6:
+            raise ValueError("illum_blobs must stay at most 8 and illum_smudge_count at most 6")
 
     def validate(self) -> None:
         if not 0 <= self.clean_probability <= 1:
@@ -320,6 +348,11 @@ class LowLightImageCorruptor:
             light = mode in LIGHT_MODES and float(light_rng.random()) < cfg.light_probability
             drawn = draw_light_parameters(light_rng, cfg)
             parameters.update(light=bool(light), light_params=drawn if light else None)
+        if cfg.illum_probability > 0:
+            illum_rng = generator(self.master_seed, "image_illumination", split, realization, trajectory, segment)
+            uneven = mode in LIGHT_MODES and float(illum_rng.random()) < cfg.illum_probability
+            drawn = draw_illumination_parameters(illum_rng, cfg)
+            parameters.update(illumination=bool(uneven), illumination_params=drawn if uneven else None)
         return parameters
 
     def __call__(
@@ -401,9 +434,9 @@ class LowLightImageCorruptor:
         image = image_clean.astype(np.float64, copy=True)
         # Lamps and glare first: the blur below smears them, the exposure drop below
         # leaves them blown out. From here on values above 1 are real light.
-        hdr = bool(params.get("light"))
+        hdr = bool(params.get("light")) or bool(params.get("illumination"))
         if hdr:
-            image = apply_light(image, params["light_params"])
+            image = apply_light(image, params.get("light_params"), illumination=params.get("illumination_params"))
 
         if optical and params["defocus"]:
             image = ndimage.gaussian_filter(

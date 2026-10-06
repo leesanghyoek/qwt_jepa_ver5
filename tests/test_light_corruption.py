@@ -215,3 +215,69 @@ def test_the_recipe_trains_both_phases_through_the_cli(tmp_path):
     last = output / "phase2/last.pt"
     _run_until_done(["train-phase2", *common, "--backbone-checkpoint", str(output / "phase1/last.pt")], last)
     assert load_checkpoint(last)["successful_updates"] == 3
+
+
+# ---------------------------------------------------------------- uneven light (illum_*)
+ILLUM = {key: value for key, value in load_config("configs/kaggle_illum.yaml")["corruption"]["image"].items()
+         if key.startswith("illum_")}
+
+
+def test_uneven_light_varies_by_region_keeps_the_mean_in_stops_and_smudges_darken_locally():
+    from qjepa.corruptions.light import illumination_field
+    regions = {"gradient_stops": 2.0, "gradient_angle": 0.0, "smudges": [],
+               "blobs": [{"y": 0.3, "x": 0.3, "sigma": 0.15, "stops": 2.0},
+                         {"y": 0.7, "x": 0.7, "sigma": 0.15, "stops": -2.0}]}
+    field = illumination_field(64, 64, regions)
+    assert abs(float(np.log2(field).mean())) < 1e-4                 # mean brightness in stops kept
+    flat = np.full((64, 64, 3), 0.4)
+    lit = _luminance(apply_light(flat, None, illumination=regions))
+    assert lit.max() / lit.min() > 4                                # not one even mask: regions differ
+    smudge = {"gradient_stops": 0.0, "gradient_angle": 0.0, "blobs": [],
+              "smudges": [{"y": 0.5, "x": 0.5, "size": 0.08, "elongation": 3.0, "angle": 0.0, "depth": 0.8}]}
+    field = illumination_field(64, 64, smudge)
+    assert field[32, 32] == pytest.approx(0.2, abs=0.02) and field[2, 2] == pytest.approx(1.0, abs=1e-3)
+    assert field[32, 45] < 0.6 < field[45, 32]                      # 0.2 frame away: dark along x, not along y
+
+
+def test_uneven_light_is_off_without_its_keys_and_moves_no_other_draw():
+    image = _frame()
+    plain = _corruptor()
+    zero = _corruptor(**dict(ILLUM, illum_probability=0.0))
+    uneven = _corruptor(**dict(ILLUM, illum_probability=1.0))
+    for index in range(12):
+        (a, pa), (b, pb), (c, pc) = (_call(x, image, index) for x in (plain, zero, uneven))
+        assert "illumination" not in pa and np.array_equal(a, b) and pa == pb
+        assert pc["illumination"] and {key: pc[key] for key in pa} == pa   # own stream: nothing else moves
+        assert not np.array_equal(a, c)
+    for mode, glares in (("blur_low_light", True), ("low_light_only", True), ("blur_only", False),
+                         ("sensor_noise_only", False)):
+        assert _call(uneven, image, 3, mode=mode)[1]["illumination"] is glares, mode
+
+
+def test_kaggle_illum_is_p22_plus_uneven_light_and_medium_glare_and_spells_its_keys_out():
+    from qjepa.config import ILLUM_KEYS
+    light = serializable_config(load_config("configs/kaggle_light.yaml"))
+    illum = serializable_config(load_config("configs/kaggle_illum.yaml"))
+    assert set(ILLUM) == set(ILLUM_KEYS) and ILLUM["illum_probability"] > 0
+    for config in (light, illum):
+        config.pop("_config_path", None)
+        config["runtime"].pop("output_dir")
+    for key in ILLUM_KEYS:
+        illum["corruption"]["image"].pop(key)
+    for key in ("light_knee", "light_wide_gain", "light_gain", "light_bloom_strength", "light_ghost_strength"):
+        assert illum["corruption"]["image"].pop(key) != light["corruption"]["image"].pop(key), key
+    assert illum == light
+    full_light, full_illum = load_config("configs/kaggle_light.yaml"), load_config("configs/kaggle_illum.yaml")
+    validate_config(full_illum)
+    for phase in ("phase1", "phase2"):
+        assert configuration_hash(full_light, phase) != configuration_hash(full_illum, phase)
+    missing = copy.deepcopy(full_illum)
+    del missing["corruption"]["image"]["illum_smudge_depth"]
+    with pytest.raises(ValueError, match="illum_smudge_depth"):
+        validate_config(missing)
+    for key, value in (("illum_probability", 2.0), ("illum_smudge_depth", [0.5, 1.0]), ("illum_blob_size", [0.0, 0.2]),
+                       ("illum_smudge_elongation", [0.5, 2.0]), ("illum_blobs", [2, 12])):
+        bad = copy.deepcopy(full_illum)
+        bad["corruption"]["image"][key] = value
+        with pytest.raises(ValueError):
+            validate_config(bad)

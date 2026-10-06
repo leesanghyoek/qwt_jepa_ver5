@@ -43,14 +43,20 @@ COLUMNS = (("glare_input", "vào (lóe)"), ("glare_output", "ra (lóe)"),
            ("plain_input", "vào (k.lóe)"), ("plain_output", "ra (k.lóe)"))
 
 
-def region_metrics(image: torch.Tensor, clean: torch.Tensor, halo: torch.Tensor) -> dict[str, float]:
-    """Error and brightness of ``image`` by region of ``clean`` ([1,3,H,W] in [0,1]; ``halo`` [H,W] bool)."""
+def region_metrics(image: torch.Tensor, clean: torch.Tensor, halo: torch.Tensor,
+                   shadow: torch.Tensor | None = None) -> dict[str, float]:
+    """Error and brightness of ``image`` by region of ``clean`` ([1,3,H,W] in [0,1]; ``halo``/``shadow`` [H,W] bool).
+
+    ``halo``: where the light corruption made the input brighter; ``shadow``: where it made it darker."""
     image, clean = image.clamp(0, 1), clean.clamp(0, 1)
     y, y_clean = luminance(image)[0, 0], luminance(clean)[0, 0]
     error = (image - clean).abs().mean(1)[0] * 255.0
     values = {"white_fraction": float((y > WHITE).float().mean()),
               "white_fraction_clean": float((y_clean > WHITE).float().mean())}
-    for name, mask in (("dark", y_clean < DARK), ("bright", y_clean > BRIGHT), ("halo", halo)):
+    regions = [("dark", y_clean < DARK), ("bright", y_clean > BRIGHT), ("halo", halo)]
+    if shadow is not None:
+        regions.append(("shadow", shadow))
+    for name, mask in regions:
         values[f"{name}_fraction"] = float(mask.float().mean())
         if mask.any():
             values[f"{name}_mae255"] = float(error[mask].mean())
@@ -60,10 +66,11 @@ def region_metrics(image: torch.Tensor, clean: torch.Tensor, halo: torch.Tensor)
     return values
 
 
-def frame_metrics(image: torch.Tensor, clean: torch.Tensor, halo: torch.Tensor) -> dict[str, float]:
+def frame_metrics(image: torch.Tensor, clean: torch.Tensor, halo: torch.Tensor,
+                  shadow: torch.Tensor) -> dict[str, float]:
     values = image_metrics(image, clean)
     values["image_mae255"] = values.pop("image_mae") * 255.0
-    values.update(region_metrics(image, clean, halo))
+    values.update(region_metrics(image, clean, halo, shadow))
     return values
 
 
@@ -86,8 +93,10 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
     system, config = _system_from_phase2(str(checkpoint), device)
     system.eval()
     trained_light = float(config["corruption"]["image"].get("light_probability", 0.0))
+    trained_illum = float(config["corruption"]["image"].get("illum_probability", 0.0))
     plain = copy.deepcopy(config)
     plain["corruption"]["image"]["light_probability"] = 0.0
+    plain["corruption"]["image"]["illum_probability"] = 0.0
     glare = with_glare(config, glare_config, glare_probability)
     datasets = {name: _dataset(cfg, manifest, split, fixed_realization=True, image_mode=image_mode)
                 for name, cfg in (("glare", glare), ("plain", plain))}
@@ -108,15 +117,17 @@ def measure(checkpoint: str | Path, manifest_path: str | Path, *, glare_config: 
         clean = with_light["image_clean"].unsqueeze(0).to(device)
         inputs = {"glare": with_light["image_noisy"].unsqueeze(0).to(device),
                   "plain": without["image_noisy"].unsqueeze(0).to(device)}
-        halo = (luminance(inputs["glare"]) - luminance(inputs["plain"]))[0, 0] > HALO
+        change = (luminance(inputs["glare"]) - luminance(inputs["plain"]))[0, 0]
+        halo, shadow = change > HALO, change < -HALO
         row = {"sample_id": with_light["sample_id"], "light": bool(with_light["corruption"]["image"].get("light"))}
         for name, sample in (("glare", with_light), ("plain", without)):
-            row[f"{name}_input"] = frame_metrics(inputs[name], clean, halo)
-            row[f"{name}_output"] = frame_metrics(_restore(system, sample, device), clean, halo)
+            row[f"{name}_input"] = frame_metrics(inputs[name], clean, halo, shadow)
+            row[f"{name}_output"] = frame_metrics(_restore(system, sample, device), clean, halo, shadow)
         rows.append(row)
         if (position + 1) % 16 == 0 or position + 1 == len(chosen):
             print(f"[đo] {position + 1}/{len(chosen)} frame ({time.perf_counter() - started:.0f} s)", flush=True)
     return {"checkpoint": str(checkpoint), "trained_light_probability": trained_light,
+            "trained_illum_probability": trained_illum,
             "image_input": config["model"].get("image_input", "rgb"), "split": split,
             "image_mode": image_mode, "frames": frames, "glare_config": str(glare_config),
             "glare_probability": glare_probability, "seed": seed, "rows": rows}
@@ -137,14 +148,15 @@ def format_report(report: dict) -> str:
     lines = ["=== ĐO CHỈ SỐ ẢNH (Cell 14e) — dán nguyên khối này cho agent ===",
              f"checkpoint: {report['checkpoint']}",
              f"model train với lóe sáng: {'có' if report['trained_light_probability'] > 0 else 'KHÔNG'} "
-             f"(light_probability {report['trained_light_probability']:g}) | backbone đọc: {report['image_input']}",
+             f"(light_probability {report['trained_light_probability']:g}) | ánh sáng không đều: "
+             f"{'có' if report.get('trained_illum_probability', 0) > 0 else 'KHÔNG'} | backbone đọc: {report['image_input']}",
              f"{len(rows)} frame {report['split']}, mode {report['image_mode']}, chọn {report['frames']}, "
              f"lóe {report['glare_probability']:.0%} từ {Path(report['glare_config']).name}, seed {report['seed']} "
              f"| frame có lóe: {sum(row['light'] for row in rows)}/{len(rows)}",
-             "", f"{'chỉ số (trung bình)':<38}" + "".join(f"{title:>13}" for _, title in COLUMNS)]
+             "", f"{'chỉ số (trung bình)':<46}" + "".join(f"{title:>13}" for _, title in COLUMNS)]
 
     def line(label, values, fmt):
-        lines.append(f"{label:<38}" + "".join(f"{format(v, fmt) if math.isfinite(v) else '—':>13}" for v in values))
+        lines.append(f"{label:<46}" + "".join(f"{format(v, fmt) if math.isfinite(v) else '—':>13}" for v in values))
 
     def mean_row(label, key, fmt, scale=1.0):
         line(label, [scale * _mean(rows, column, key) for column, _ in COLUMNS], fmt)
@@ -157,8 +169,11 @@ def format_report(report: dict) -> str:
     line("độ tương phản / sạch", [_ratio(rows, c, "image_contrast") for c, _ in COLUMNS], ".2f")
     mean_row("năng lượng đường nét / sạch", "image_edge_power", ".2f")
     mean_row("độ nhám thừa (/255)", "image_excess_roughness", ".2f")
-    lines.append("--- theo vùng (vùng tính trên ảnh sạch; quầng = nơi lóe sáng thêm > 0,05) ---")
-    for region, label in (("dark", f"vùng tối Y<{DARK}"), ("bright", f"vùng sáng Y>{BRIGHT}"), ("halo", "vùng quầng")):
+    lines.append("--- theo vùng (tối/sáng: trên ảnh sạch; quầng/tối thêm: nơi nhiễu ánh sáng làm sáng/tối thêm > 0,05) ---")
+    for region, label in (("dark", f"vùng tối Y<{DARK}"), ("bright", f"vùng sáng Y>{BRIGHT}"), ("halo", "vùng quầng/sáng thêm"),
+                          ("shadow", "vùng tối thêm (nhòe tối)")):
+        if f"{region}_fraction" not in rows[0]["glare_input"]:
+            continue
         share = 100 * _mean(rows, "glare_input", f"{region}_fraction")
         mean_row(f"{label} ({share:.1f}% px): MAE /255", f"{region}_mae255", ".2f")
         mean_row(f"{label}: độ sáng / sạch", f"{region}_brightness", ".2f")
@@ -167,7 +182,7 @@ def format_report(report: dict) -> str:
 
     psnr = {column: _mean(rows, column, "image_psnr_db") for column, _ in COLUMNS}
     lines += ["--- tóm tắt ---",
-              f"lóe sáng làm PSNR đầu vào đổi {psnr['glare_input'] - psnr['plain_input']:+.2f} dB",
+              f"nhiễu ánh sáng làm PSNR đầu vào đổi {psnr['glare_input'] - psnr['plain_input']:+.2f} dB",
               f"model: {psnr['glare_input']:.2f} → {psnr['glare_output']:.2f} dB trên ảnh lóe "
               f"({psnr['glare_output'] - psnr['glare_input']:+.2f}); {psnr['plain_input']:.2f} → "
               f"{psnr['plain_output']:.2f} dB không lóe ({psnr['plain_output'] - psnr['plain_input']:+.2f})",

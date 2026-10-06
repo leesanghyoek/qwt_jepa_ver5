@@ -1,13 +1,13 @@
-"""Xem truoc nhieu DEN VA LOE SANG cua train (configs/kaggle_glare.yaml, run p21_glare).
+"""Xem truoc nhieu ANH SANG cua train (mac dinh configs/kaggle_illum.yaml, run p23_illum).
 
-Vung sang bi sang manh hon vung toi, bong den loe anh sang ra (quang, tia sao, bong ma), moi
-gia tri ngau nhien. Cac buoc lay thang tu code train (qjepa/corruptions/light.py va
-LowLightImageCorruptor), nen hinh la dung thu model se thay:
+Do sang thay doi ngau nhien theo vung, vet nhoe toi, den sang gap nhieu lan va loe ra (quang, tia
+sao, bong ma), moi gia tri ngau nhien. Cac buoc lay thang tu code train (qjepa/corruptions/light.py
+va LowLightImageCorruptor), nen hinh la dung thu model se thay:
 
-  Sach | Canh HDR (den sang gap nhieu lan) | + loe sang | Nhieu train cu (p20_gray) | Nhieu train moi (p21_glare)
+  Sach | Canh: sang/toi khong deu, den | + loe sang | Nhieu train cu (--baseline) | Nhieu train moi (--config)
 
-"Nhieu train moi" = loe sang roi chuoi nhieu cu cua repo (mo, thieu sang, hat, JPEG). Trong train
-light_probability = 0.8; o day ep 1.0 de hang nao cung thay loe.
+"Nhieu train moi" = anh sang khong deu + loe roi chuoi nhieu cu cua repo (mo, thieu sang, hat,
+JPEG). Trong train light_probability / illum_probability = 0.8; o day ep 1.0 de hang nao cung thay.
 
     python3 tools/light_corruption_preview.py                      # 4 anh co den, mo cua so hinh
                                                                    # (hoac bam Run trong VS Code)
@@ -148,25 +148,27 @@ def corruptor_from(config_name: str, light_probability: float | None = None) -> 
     config = _config_chain(REPO / "configs" / config_name)
     image = LowLightImageCorruptionConfig(**config["corruption"]["image"])
     if light_probability is not None:
-        image = replace(image, light_probability=light_probability)
+        image = replace(image, light_probability=light_probability,
+                        illum_probability=light_probability if image.illum_probability > 0 else 0.0)
     return LowLightImageCorruptor(image, config["data"]["corruption_seed"])
 
 
 def describe(params: dict[str, object]) -> str:
     light = params.get("light_params") or {}
-    if not light:
-        return "không lóe sáng"
-    extras = []
-    if light["star"]:
-        extras.append(f"sao {light['star_spikes']} tia")
-    if light["ghosts"]:
-        extras.append(f"{len(light['ghosts'])} bóng ma")
-    if params.get("motion"):
-        extras.append(f"mờ động {params['motion_length']}px")
-    return (f"đèn ×{light['gain']:.0f} · trời ×{1 + light['wide_gain']:.1f}\n"
-            f"quầng {light['bloom_strength']:.2f} · ngưỡng lóe {light['knee']:.1f}\n"
-            f"phơi sáng {params['exposure_gain']:.2f} · {params['photon_count']:.0f} photon"
-            + (f"\n{', '.join(extras)}" if extras else ""))
+    uneven = params.get("illumination_params") or {}
+    lines = []
+    if uneven:
+        stops = [blob["stops"] for blob in uneven["blobs"]]
+        lines.append(f"{len(stops)} vùng sáng/tối ({min(stops, default=0):+.1f}…{max(stops, default=0):+.1f} stop)"
+                     + (f" · {len(uneven['smudges'])} vết nhòe tối" if uneven["smudges"] else ""))
+    if light:
+        extras = [f"sao {light['star_spikes']} tia"] if light["star"] else []
+        extras += [f"{len(light['ghosts'])} bóng ma"] if light["ghosts"] else []
+        lines.append(f"đèn ×{light['gain']:.0f} · quầng {light['bloom_strength']:.2f}"
+                     + (f" · {', '.join(extras)}" if extras else ""))
+    lines.append(f"phơi sáng {params['exposure_gain']:.2f}" + (f" · mờ động {params['motion_length']}px"
+                                                                if params.get("motion") else ""))
+    return "\n".join(lines)
 
 
 def bring_to_front(figure) -> None:
@@ -197,8 +199,8 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=256, help="canh anh (256 nhu luc train)")
     parser.add_argument("--seed", type=int, default=None,
                         help="bo ngau nhien; mac dinh moi lan chay mot seed moi (in ra de chay lai dung hinh do)")
-    parser.add_argument("--config", default="kaggle_glare.yaml", help="config co nhieu loe sang (trong configs/)")
-    parser.add_argument("--baseline", default="kaggle_gray.yaml", help="config nhieu cu de so sanh")
+    parser.add_argument("--config", default="kaggle_illum.yaml", help="config co nhieu anh sang (trong configs/)")
+    parser.add_argument("--baseline", default="kaggle_light.yaml", help="config nhieu cu de so sanh")
     parser.add_argument("--output", type=Path, default=REPO / "outputs/light_corruption/preview.png")
     parser.add_argument("--no-show", action="store_true", help="chi luu PNG, khong mo cua so")
     # Trong Jupyter / cua so Interactive, sys.argv la cua kernel: dung mac dinh.
@@ -218,9 +220,9 @@ def main() -> int:
     live = has_window and not args.no_show
 
     # Mo cua so NGAY (truoc khi doc anh), roi dien dan tung hang khi tinh xong.
-    columns = [("Sạch", None), ("Cảnh HDR\n(đèn sáng gấp nhiều lần)", "scene"),
-               ("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"), ("Nhiễu train cũ\n(p20_gray)", "old"),
-               ("Nhiễu train mới\n(p21_glare)", "new")]
+    columns = [("Sạch", None), ("Cảnh: sáng/tối không đều,\nnhòe tối, đèn sáng", "scene"),
+               ("+ lóe sáng\n(quầng, sao, bóng ma)", "lit"), (f"Nhiễu train cũ\n({args.baseline})", "old"),
+               (f"Nhiễu train mới\n({args.config})", "new")]
     cell = min(16.0 / len(columns), 9.0 / args.count)
     png_size = (cell * len(columns), cell * args.count + 1.2)
     # layout "constrained": tinh lai moi lan ve, nen cua so phong to / keo gian van khong de chu.
@@ -261,8 +263,9 @@ def main() -> int:
                        timestamp=0.1 * row, frame_index=row, mode="full")
         stages = {"old": baseline(clean, **corrupt)[0]}
         stages["new"], params = glare(clean, **corrupt)
-        if params.get("light_params"):
-            stages["scene"], stages["lit"] = apply_light(clean, params["light_params"], stages=True)
+        if params.get("light_params") or params.get("illumination_params"):
+            stages["scene"], stages["lit"] = apply_light(clean, params.get("light_params"), stages=True,
+                                                         illumination=params.get("illumination_params"))
         else:                                                       # frame "sach" (clean_probability)
             stages["scene"] = stages["lit"] = clean
         print(f"[{row}] {path.relative_to(args.root.parent) if args.root.parent in path.parents else path}")

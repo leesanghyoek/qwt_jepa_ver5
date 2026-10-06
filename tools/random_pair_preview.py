@@ -29,7 +29,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _system_from_phase2
-from qjepa.config import LIGHT_KEYS, load_config
+from qjepa.config import ILLUM_KEYS, LIGHT_KEYS, load_config
 from qjepa.data import read_manifest
 from qjepa.data.dataset import load_rgb
 from qjepa.evaluation.metrics import image_metrics, imu_metrics
@@ -67,10 +67,10 @@ def _eligible_indices(dataset, image_mode: str) -> list[int]:
 
 
 def with_glare(config: dict, glare_config: str | Path, probability: float | None = 1.0) -> dict:
-    """The checkpoint's recipe plus the light_* corruption keys of ``glare_config`` (a copy)."""
-    light = {key: value for key, value in load_config(glare_config)["corruption"]["image"].items()
-             if key in LIGHT_KEYS}
-    if not light:
+    """The checkpoint's recipe plus the light_* (and illum_*, uneven light) keys of ``glare_config`` (a copy)."""
+    image = load_config(glare_config)["corruption"]["image"]
+    light = {key: value for key, value in image.items() if key in LIGHT_KEYS or key in ILLUM_KEYS}
+    if not any(key in LIGHT_KEYS for key in light):
         raise ValueError(f"{glare_config} has no corruption.image.light_* keys")
     config = copy.deepcopy(config)
     config["corruption"]["image"].update(light)
@@ -78,6 +78,8 @@ def with_glare(config: dict, glare_config: str | Path, probability: float | None
         if not 0 < probability <= 1:
             raise ValueError("glare probability must be in (0, 1]")
         config["corruption"]["image"]["light_probability"] = float(probability)
+        if float(image.get("illum_probability", 0.0)) > 0:
+            config["corruption"]["image"]["illum_probability"] = float(probability)
     return config
 
 
