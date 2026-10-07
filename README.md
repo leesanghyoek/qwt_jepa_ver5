@@ -64,6 +64,15 @@ teacher hay batch — đúng, nhưng chưa tìm ra gốc. Đo trên máy (RTX 40
   16 (1500 update, recipe p28): PSNR 23,87, SSIM 0,863, đường nét 0,853, vật nhỏ đúng chỗ 0,644, gồ ghề thừa 0,332 —
   ngang hoặc hơn batch 32 (23,82 / 0,862 / 0,840 / 0,639 / 0,326). Phase 2 chịu GPU (chờ dữ liệu 0,00 s) nên cách này
   không làm phase 2 nhanh hơn.
+- **Đánh giá nhanh** — p28, Cell 12 chấm đủ 18 676 ảnh test mất ~27 phút; người dùng: "lâu quá". `evaluate --every N`
+  giữ 1/N frame của **mỗi** trajectory theo thời gian, cộng frame cuối: mọi môi trường vẫn có mặt, chỉ bỏ các frame
+  cách nhau 0,1 s gần như trùng nhau; cửa sổ IMU 1,28 s vẫn chồng nhau khi N ≤ 12, nên IMU phủ như chấm đủ. Khác
+  `--max-batches`, chỉ lấy vài trajectory đầu. Notebook: `EVAL_EVERY = 8`. Đo trên máy (tập test 3280 ảnh, model 500
+  update): 155 s → 29 s; PSNR chênh so với ảnh vào −1,09 → −1,00 dB, SSIM 0,825 → 0,831, IMU và số hàng IMU được phủ
+  giống hệt. Giá trị tuyệt đối lệch ~0,3–0,4 dB vì ít trajectory — chỉ so các run chấm cùng `EVAL_EVERY`; số cuối
+  để báo cáo thì chấm đủ (`EVAL_EVERY = 1`). Bằng chứng: `tests/test_evaluate_options.py` (mỗi trajectory đều còn,
+  đúng 1/N theo thời gian và frame cuối; ít ảnh hơn mà IMU phủ như chấm đủ; ghi vào evaluation_config.json; < 1 bị
+  từ chối).
 - Bằng chứng: `tests/test_vit_input_standardize.py` (thiếu khoá: không có hệ số, hash và config cũ như trước; `global`
   một hệ số mỗi loại giữ tỉ lệ giữa các dải, `channel` mỗi kênh đúng RMS √(768 / fan-in); patch embedding khởi đầu
   0,7–1,5× vị trí; trên ảnh tối có phổ như ảnh chụp, R² vị trí 0,79 → 0,55 (`global`) → 0,42 (`channel`); teacher cùng

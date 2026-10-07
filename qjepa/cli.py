@@ -422,6 +422,25 @@ def _fixed_validation_bank(dataset: PairedCameraImuDataset, size: int) -> None:
     dataset.samples = selected
 
 
+def _every_nth_frame(dataset: PairedCameraImuDataset, every: int) -> None:
+    """Keep every ``every``-th frame of each trajectory in time order, and its last frame:
+    every trajectory and environment stays, frames 0.1 s apart (nearly the same picture) are
+    thinned. While the kept frames are closer than an IMU window -- every <= 12 at 10 Hz for
+    128 samples at 100 Hz -- the windows still overlap, and with the last frame kept the merged
+    IMU covers each trajectory as the whole split does."""
+    groups: dict[str, list[Any]] = {}
+    for sample in dataset.samples:
+        groups.setdefault(sample.trajectory_key, []).append(sample)
+    selected = []
+    for key in sorted(groups):
+        rows = sorted(groups[key], key=lambda row: row.image_time)
+        kept = rows[::every]
+        if kept[-1] is not rows[-1]:
+            kept.append(rows[-1])
+        selected.extend(kept)
+    dataset.samples = selected
+
+
 @torch.no_grad()
 def _validate_active_blur(
     system: RestorationSystem, loader: DataLoader, device: torch.device,
@@ -1352,6 +1371,8 @@ def _system_from_phase2(checkpoint: str, device: torch.device) -> tuple[Restorat
 def command_evaluate(args: argparse.Namespace) -> None:
     if args.max_batches is not None and args.max_batches < 1:
         raise ValueError("--max-batches must be positive; omit it for the full split")
+    if args.every < 1:
+        raise ValueError("--every must be at least 1 (1 = every frame)")
     if args.panels < 0:
         raise ValueError("--panels cannot be negative")
     if args.scenarios is not None:
@@ -1382,7 +1403,7 @@ def command_evaluate(args: argparse.Namespace) -> None:
     write_json(output / "evaluation_config.json", {
         "checkpoint": str(Path(args.checkpoint).resolve()), "split": args.split,
         "manifest_hash": manifest["meta"]["manifest_hash"], "config": serializable_config(config),
-        "scenarios": scenarios, "max_batches": args.max_batches, "amp": forward.amp,
+        "scenarios": scenarios, "max_batches": args.max_batches, "every": args.every, "amp": forward.amp,
         "validation_realization": config["data"]["validation_realization"],
         "evaluation_clean_probability": 0.0,
         "execution": execution,
@@ -1397,9 +1418,11 @@ def command_evaluate(args: argparse.Namespace) -> None:
             imu_mode=imu_mode,
             full_frame=bool(getattr(args, "full_frame", False)),
         )
+        if args.every > 1:
+            _every_nth_frame(dataset, args.every)
         loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
-        print(f"[{number}/{len(scenarios)}] {name}: ảnh {image_mode}, IMU {imu_mode} · {len(dataset)} mẫu",
-              flush=True)
+        print(f"[{number}/{len(scenarios)}] {name}: ảnh {image_mode}, IMU {imu_mode} · {len(dataset)} mẫu"
+              + (f" (1/{args.every} frame mỗi trajectory)" if args.every > 1 else ""), flush=True)
         results[name] = _evaluate_with_overlap(
             system,
             loader,
@@ -1412,7 +1435,8 @@ def command_evaluate(args: argparse.Namespace) -> None:
             forward_model=runner,
             progress=True,
         )
-    scope = f"max-batches={args.max_batches}" if args.max_batches else "full split"
+    scope = f"max-batches={args.max_batches}" if args.max_batches else (
+        f"1/{args.every} frame" if args.every > 1 else "full split")
     evaluation_summary(output, results, label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {scope}")
     print(json.dumps(results, indent=2))
     print(f"Saved metrics, panels, IMU arrays and comparison.png to {output}")
@@ -1618,7 +1642,10 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--checkpoint", required=True)
     evaluate.add_argument("--manifest")
     evaluate.add_argument("--split", choices=("valid", "test"), default="test")
-    evaluate.add_argument("--max-batches", type=int)
+    evaluate.add_argument("--max-batches", type=int,
+                          help="Only the first batches -- the first trajectories in manifest order; --every spreads")
+    evaluate.add_argument("--every", type=int, default=1,
+                          help="Every N-th frame of each trajectory (all trajectories kept; 8 = ~8x faster)")
     evaluate.add_argument("--device")
     evaluate.add_argument("--gpus", choices=("auto", "1", "2"), default="auto")
     evaluate.add_argument("--output", help="Directory for metrics, image/IMU panels and merged arrays")

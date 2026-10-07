@@ -4,7 +4,10 @@ p26's --protocol ran over half an hour on one GPU and printed nothing until it e
 --scenarios scores a subset of the protocol, in the protocol's order, with exactly the numbers the
 whole protocol gives those scenarios (so two processes, one per GPU, together give the protocol);
 it needs --protocol and known names; each scenario announces itself; --amp (CUDA only) moves the
-metrics by float noise and is recorded in evaluation_config.json.
+metrics by float noise and is recorded in evaluation_config.json. --every N keeps every N-th frame of
+each trajectory in time order and its last one -- every trajectory stays, frames close in time are thinned -- so a test
+split scores ~N times faster; the IMU windows still overlap and cover what the whole split covers; it is
+recorded, and below 1 refused.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import pytest
 import torch
 import yaml
 
-from qjepa.cli import PROTOCOL_SCENARIOS, main
+from qjepa.cli import PROTOCOL_SCENARIOS, _dataset, _every_nth_frame, _manifest, main
 from qjepa.config import load_config, serializable_config
 from test_kaggle_workflow import _write_dataset
 
@@ -57,9 +60,38 @@ def test_a_subset_gives_the_protocols_own_numbers_in_its_order(trained, capsys):
     assert "[1/2] clean_clean" in printed and "[2/2] blur_only" in printed
 
 
+def test_every_keeps_each_trajectory_thinned_in_time_order(trained):
+    manifest_path, checkpoint, root = trained
+    config = load_config(root / "smoke.yaml") if (root / "smoke.yaml").exists() else load_config("configs/smoke.yaml")
+    manifest, _ = _manifest(config, str(manifest_path))
+    dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    groups = {}
+    for sample in dataset.samples:
+        groups.setdefault(sample.trajectory_key, []).append(sample)
+    _every_nth_frame(dataset, 2)
+    kept = {}
+    for sample in dataset.samples:
+        kept.setdefault(sample.trajectory_key, []).append(sample)
+    assert set(kept) == set(groups)
+    for key, rows in groups.items():
+        ordered = sorted(rows, key=lambda row: row.image_time)
+        expected = ordered[::2] + ([] if (len(ordered) - 1) % 2 == 0 else [ordered[-1]])   # and the last
+        assert [row.sample_id for row in kept[key]] == [row.sample_id for row in expected]
+
+
+def test_every_scores_fewer_frames_and_the_imu_still_covers_the_split(trained):
+    whole, _ = _evaluate(trained, "whole_requested")
+    thinned, config = _evaluate(trained, "every2", "--every", "2")
+    assert config["every"] == 2
+    a, b = whole["requested"], thinned["requested"]
+    assert b["image_count"] < a["image_count"]
+    assert b["imu_covered_unique_rows"] == a["imu_covered_unique_rows"]
+
+
 @pytest.mark.parametrize("extra, message", [
     (("--scenarios", "blur_only"), "add --protocol"),
     (("--protocol", "--scenarios", "blur_only,fog_only"), "fog_only"),
+    (("--every", "0"), "--every"),
 ])
 def test_bad_scenarios_are_refused(trained, capsys, extra, message):
     with pytest.raises(SystemExit):
