@@ -406,6 +406,88 @@ class LightBranch(nn.Module):
             return linear_to_srgb(corrected).clamp(0.0, 1.0)
 
 
+def slice_grid(grid: torch.Tensor, guide: torch.Tensor) -> torch.Tensor:
+    """Per-pixel coefficients from a bilateral grid, trilinearly.
+
+    ``grid`` [B, C, bins, Gh, Gw]: C coefficients for each cell of a Gh x Gw spatial grid and
+    each of ``bins`` intensity levels; ``guide`` [B, 1, H, W] in [0, 1] says which level a
+    pixel reads. Returns [B, C, H, W]: the grid interpolated at (x, y, guide) -- smooth across
+    the frame, but following edges wherever the guide changes (HDRNet's slicing)."""
+    batch, _, height, width = guide.shape
+    ys = (torch.arange(height, device=guide.device, dtype=guide.dtype) + 0.5) / height * 2.0 - 1.0
+    xs = (torch.arange(width, device=guide.device, dtype=guide.dtype) + 0.5) / width * 2.0 - 1.0
+    y, x = torch.meshgrid(ys, xs, indexing="ij")
+    z = guide[:, 0].clamp(0.0, 1.0) * 2.0 - 1.0
+    coordinates = torch.stack((x.expand(batch, -1, -1), y.expand(batch, -1, -1), z), dim=-1)[:, None]
+    return F.grid_sample(grid, coordinates, mode="bilinear", padding_mode="border", align_corners=False)[:, :, 0]
+
+
+def apply_affine(coefficients: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    """out_c = sum_j A[c, j] x_j + A[c, 3] per pixel; ``coefficients`` [B, 12, H, W] is A - identity."""
+    batch, _, height, width = coefficients.shape
+    affine = coefficients.view(batch, 3, 4, height, width)
+    return image + torch.einsum("bijhw,bjhw->bihw", affine[:, :, :3], image) + affine[:, :, 3]
+
+
+class BilateralGridTone(nn.Module):
+    """Brightness and colour as a bilateral grid of affine colour transforms (HDRNet, Gharbi et al. 2017).
+
+    On p28's noise ~95% of the input's low-frequency error is a per-region a * x + b of the
+    input itself: one per frame removes 74% of the squared error, one per 4 x 4 region another
+    21% (README p31_bilateral). So this stage does not paint brightness; it predicts, from the
+    frame at 4 x ``size`` px, the JEPA latent and the exposure statistics, a ``size`` x ``size``
+    grid with ``bins`` intensity levels holding a 3 x 4 colour affine per cell, and applies to
+    every pixel the affine sliced at its position and brightness. Intensity levels let it bend
+    a tone curve (the gamma); cells, follow uneven light and vignetting; the guide (luminance,
+    plus a learned pointwise term) keeps transforms from bleeding across edges.
+
+    Replaces the light branch: its output J feeds the colour and edge branches. The last layer
+    and the guide's term are zero-initialised: every affine starts as the identity, so a frame
+    exposed right is left as it is unless the training data says otherwise. fp32 under autocast.
+    """
+
+    def __init__(self, latent_channels: int = 128, *, size: int = 16, bins: int = 8, width: int = 32,
+                 exposure_stats: bool = False) -> None:
+        super().__init__()
+        self.size, self.bins, self.exposure_stats = int(size), int(bins), bool(exposure_stats)
+        self.splat = nn.Sequential(nn.Conv2d(6, width, 3, stride=2, padding=1), nn.ReLU(),
+                                   nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU())
+        self.latent = nn.Conv2d(latent_channels, width, 1)
+        self.local = nn.Sequential(nn.Conv2d(width, width, 3, padding=1), nn.ReLU(),
+                                   nn.Conv2d(width, width, 3, padding=1))
+        self.global_features = nn.Sequential(nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU(),
+                                             nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU())
+        self.global_head = nn.Sequential(
+            nn.Linear(width + (EXPOSURE_FEATURES if self.exposure_stats else 0), width), nn.ReLU(),
+            nn.Linear(width, width))
+        self.out = nn.Conv2d(width, self.bins * 12, 1)
+        self.guide = nn.Sequential(nn.Conv2d(3, 16, 1), nn.ReLU(), nn.Conv2d(16, 1, 1))
+        for layer in (self.out, self.guide[-1]):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def coefficients(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """The grid [B, 12, bins, size, size] of (affine - identity)."""
+        small = F.adaptive_avg_pool2d(image, 4 * self.size)
+        x = self.splat(torch.cat((small, srgb_to_linear(small)), dim=1))
+        x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
+        context = self.global_features(x).mean(dim=(2, 3))
+        if self.exposure_stats:
+            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+        fused = F.relu(self.local(x) + self.global_head(context)[:, :, None, None])
+        grid = self.out(fused)                                    # [B, bins * 12, size, size]
+        return grid.view(grid.shape[0], self.bins, 12, self.size, self.size).transpose(1, 2)
+
+    def guide_map(self, image: torch.Tensor) -> torch.Tensor:
+        return (luminance(image) + self.guide(image)).clamp(0.0, 1.0)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            image, latent = image.float(), latent.float()
+            sliced = slice_grid(self.coefficients(latent, image), self.guide_map(image))
+            return apply_affine(sliced, image).clamp(0.0, 1.0)
+
+
 class UNetBranch(nn.Module):
     """Funnel and loudspeaker: a U-Net whose bottom sits on the latent's grid.
 
@@ -762,9 +844,14 @@ class SplitColorEdgeDecoder(nn.Module):
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
-        light: dict | None = None, exposure_stats: bool = False,
+        light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
     ) -> None:
         super().__init__()
+        if light and tone_grid:
+            raise ValueError("The bilateral tone grid replaces the light branch: turn one of them off")
+        # p31 (phase2.split_tone_grid): brightness and colour as a bilateral grid of affines.
+        self.tone_grid = (BilateralGridTone(latent_channels, **tone_grid, exposure_stats=exposure_stats)
+                          if tone_grid else None)
         # Only when asked: earlier checkpoints have no light layers. ``exposure_stats``
         # (phase2.split_exposure_stats) widens the global tone head and the light branch's context.
         self.light = LightBranch(latent_channels, **light, exposure_stats=exposure_stats) if light else None
@@ -823,6 +910,9 @@ class SplitColorEdgeDecoder(nn.Module):
         if self.light is not None:
             image = self.light(latent, image)
             parts["image_light"] = image
+        if self.tone_grid is not None:
+            image = self.tone_grid(latent, image)
+            parts["image_light"] = image                       # the tone stage's output, as the light branch's
         base = upsample(self.color(latent, downsample(image, self.color_scale)), size)
         light = illumination(base, self.illumination_scale)
         y = luminance(image)

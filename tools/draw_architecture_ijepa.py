@@ -1,8 +1,9 @@
-"""Architecture figure of p26_ijepa to p30_exposure (configs/kaggle_ijepa.yaml ... kaggle_exposure.yaml;
+"""Architecture figure of p26_ijepa to p31_bilateral (configs/kaggle_ijepa.yaml ... kaggle_bilateral.yaml;
 qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption, p28 the training recipe, p29 scales
-the ViT's input coefficients (a line in the encoder box when on) and p30 gives the light branch and the tone
-head the input's exposure statistics and adds a low-frequency MSE (lines in those boxes when on), so one figure
-serves them all; its numbers come from p30's config, the notebook's default run.
+the ViT's input coefficients (a line in the encoder box when on), p30 gives the light branch and the tone head
+the input's exposure statistics and adds a low-frequency MSE, and p31 swaps the light branch for a bilateral
+grid of colour affines (the top box when on), so one figure serves them all; its numbers come from p31's
+config, the notebook's default run.
 
 Same visual language as draw_architecture_imu.py (whose --local figure is p25_local), with
 what p26 changes: the backbone is ONE ViT over the image's and the IMU's wavelet
@@ -30,7 +31,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG = load_config(REPO / "configs/kaggle_exposure.yaml")
+CONFIG = load_config(REPO / "configs/kaggle_bilateral.yaml")
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 # p28 against p27: what the recipe line of the phase-2 loss box reports.
 P2_BEFORE = load_config(REPO / "configs/kaggle_blur.yaml")["phase2"]
@@ -113,10 +114,10 @@ region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đ�
 region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục (như p25)', right=True)
 region(190, 505, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
-text(W - 20, 26, 'p26_ijepa → p30_exposure — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
+text(W - 20, 26, 'p26_ijepa → p31_bilateral — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
      size=15, weight='bold', color='#D81B60', anchor='end')
 text(W - 20, 44, 'MỘT ViT chung cho ảnh và IMU: attention giữa hai loại token là fusion · ngữ cảnh NHIỄU,'
-     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27–p30 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
+     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27–p31 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
      anchor='end')
 text(W - 20, 62, 'khôi phục dùng ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher EMA + predictor'
      ' bỏ sau phase 1', size=12, weight='bold', color='#8E24AA', anchor='end')
@@ -195,9 +196,16 @@ text(1490, 152, 'ViT một độ phân giải: bỏ tầng mịn encoder → NAF
      style='font-style="italic"')
 text(1490, 167, 'predictor I-JEPA cần mask: bỏ đoán của predictor → ZI', size=11, color='#2E7D32', anchor='end',
      style='font-style="italic"')
-light = node(592, 50, 250, 58, 'color', 'Nhánh ÁNH SÁNG · U-Net 64²',
-             ['đọc ZI + phân vị, histogram ảnh vào' if EXPOSURE else 'nhìn cả khung · đọc ZI',
-              'J = (ảnh − sương V) × sáng g'], rx=8, title_size=13)
+if P2.get('split_tone_grid', False):
+    # p31: a bilateral grid of colour affines replaces the light branch, in the same place.
+    cells, bins = P2['split_tone_grid_size'], P2['split_tone_grid_bins']
+    light = node(592, 50, 250, 58, 'color', f'LƯỚI SONG PHƯƠNG · {cells}×{cells}×{bins}',
+                 ['mỗi ô: ma trận màu 3×4 · đọc ZI + phân vị', 'J = A(x, y, sáng) · [ảnh, 1]'], rx=8, title_size=13)
+    badge(600, 112, 'mới · p31')
+else:
+    light = node(592, 50, 250, 58, 'color', 'Nhánh ÁNH SÁNG · U-Net 64²',
+                 ['đọc ZI + phân vị, histogram ảnh vào' if EXPOSURE else 'nhìn cả khung · đọc ZI',
+                  'J = (ảnh − sương V) × sáng g'], rx=8, title_size=13)
 
 # ---------------- arrows: backbone
 arrow([mid_right(img_in), mid_left(qwt)]); arrow([mid_right(imu_in), mid_left(haar)])
@@ -214,7 +222,8 @@ arrow([(95, 200), (95, 79), (592, 79)], color='#2E7D32', width=3,
       label='skip: ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU', lx=340, ly=70)
 el.append('<path d="M 842 79 L 885 79 L 885 320 L 903 320" fill="none" stroke="#EF6C00" stroke-width="3" '
           'marker-end="url(#ah-EF6C00)"/>')
-text(892, 100, 'J (tuyến tính → sRGB)', size=11, weight='bold', color='#EF6C00', anchor='start')
+text(892, 100, 'J (ảnh đã chỉnh sáng)' if P2.get('split_tone_grid', False) else 'J (tuyến tính → sRGB)',
+     size=11, weight='bold', color='#EF6C00', anchor='start')
 arrow([(885, 200), (FX, 200)], color='#EF6C00', width=3)
 arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
 arrow([mid_right(edgb), mid_left(refine)])
@@ -291,10 +300,11 @@ loss2 = node(1150, 520, 350, 196 if LOWFREQ else 168, 'loss', 'Loss phase 2', [
     'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
     'ánh sáng (H): L1 giữa J và ảnh sạch ở 32²',
     *([f'p30 · độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ',')] if LOWFREQ else []), ''])
+# With the grid the 'ánh sáng (H)' line is the grid's L1 against the clean frame at 1/8.
 IMU_Y = 678 if LOWFREQ else 655
 text(1325, IMU_Y, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
 # p28's recipe against p27's: the sharpness penalties, the gradient clip and the learning rate.
-text(1325, IMU_Y + 23, (f'p28–p30: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
+text(1325, IMU_Y + 23, (f'p28–p31: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
                  f'{P2["gradient_clip_norm"]:g}').replace('.', ',') + f' · lr {P2["learning_rate"]:.0e}'.replace('e-0', 'e-'),
      size=12, weight='bold', color='#D81B60')
 arrow([(1325, 520), (1325, 474)], color='#D81B60', dash='6 4', width=2)

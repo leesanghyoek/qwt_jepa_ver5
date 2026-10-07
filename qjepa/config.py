@@ -145,6 +145,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_light(config)
     _validate_light_branch(config)
     _validate_exposure(config)
+    _validate_tone_grid(config)
     _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
@@ -655,6 +656,37 @@ def _validate_exposure(config: dict[str, Any]) -> None:
         raise ValueError(f"phase2.lowfreq_mse_weight needs image sides divisible by {LOWFREQ_SCALE}")
 
 
+TONE_GRID_KEYS = ("split_tone_grid_size", "split_tone_grid_bins", "split_tone_grid_width", "split_tone_grid_weight")
+
+
+def _validate_tone_grid(config: dict[str, Any]) -> None:
+    """p31: phase2.split_tone_grid, the bilateral grid of colour affines that replaces the light branch.
+
+    On, every split_tone_grid_* key must be written out (the hash reads only the config file)."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_tone_grid", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_tone_grid must be true or false")
+    if not enabled:
+        return
+    if phase2.get("image_decoder") != "split_color_edge":
+        raise ValueError("phase2.split_tone_grid works in the split_color_edge decoder")
+    if phase2.get("split_light_branch", False):
+        raise ValueError("phase2.split_tone_grid replaces the light branch: set phase2.split_light_branch: false")
+    missing = [key for key in TONE_GRID_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_tone_grid needs every split_tone_grid_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    for key, low in (("split_tone_grid_size", 2), ("split_tone_grid_bins", 2), ("split_tone_grid_width", 1)):
+        value = phase2[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise ValueError(f"phase2.{key} must be an integer >= {low}")
+    if not _nonnegative_number(phase2["split_tone_grid_weight"]):
+        raise ValueError("phase2.split_tone_grid_weight must be a nonnegative number")
+    if any(side % LOWFREQ_SCALE for side in config["data"]["image_size"]):
+        raise ValueError(f"phase2.split_tone_grid needs image sides divisible by {LOWFREQ_SCALE}")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -859,6 +891,12 @@ def build_decoders(
             } if config["phase2"].get("split_light_branch", False) else None,
             # Absent before p30: the tone head and the light branch see no exposure statistics.
             "exposure_stats": bool(config["phase2"].get("split_exposure_stats", False)),
+            # Absent before p31: no bilateral tone grid.
+            "tone_grid": {
+                "size": int(config["phase2"]["split_tone_grid_size"]),
+                "bins": int(config["phase2"]["split_tone_grid_bins"]),
+                "width": int(config["phase2"]["split_tone_grid_width"]),
+            } if config["phase2"].get("split_tone_grid", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

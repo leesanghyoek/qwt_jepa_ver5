@@ -12,6 +12,42 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p31_bilateral — phase 2: lưới song phương các phép biến đổi màu thay nhánh ánh sáng (HDRNet)** (config
+`configs/kaggle_bilateral.yaml` → OUT `outputs/p31_bilateral`).
+Bằng p30_exposure, nhánh ánh sáng thay bằng lưới; hash phase 1 bằng p28 nên **dùng lại phase 1 của p28**. Người dùng:
+"cần có thay đổi đột phá về kiến trúc P2, việc tối ưu hoặc thêm 1 vài thông số có thể khiến nó tốt hơn nhưng chưa
+đáng kể"; chọn lưới song phương trong ba hướng (lưới song phương / ước lượng tham số nhiễu có giám sát / thay cả
+decoder bằng một U-Net khôi phục lớn). Không train trên máy người dùng; số dưới đây là thống kê thuần trên dữ liệu.
+- **Lỗi độ sáng có cấu trúc gì.** 300 ảnh valid, nhiễu p28, sai số tần số thấp (RMSE sRGB, khối 8 px) của **ảnh vào**
+  so với ảnh sạch, và sau khi khớp tối ưu một phép a·x + b mỗi kênh (oracle, biết ảnh sạch):
+
+  | nhóm | ảnh vào | a·x + b chung cả ảnh | a·x + b từng vùng 4×4 |
+  |---|---|---|---|
+  | bị đổi sáng (191 ảnh) | 0,2246 | 0,1126 | 0,0494 |
+  | không bị đổi sáng (109 ảnh) | 0,0035 | 0,0033 | 0,0032 |
+
+  Theo bình phương lỗi: một phép chung gỡ **74%**, theo vùng thêm **21%**, còn 5%. Đáp án cho độ sáng gần như luôn là
+  một phép affine màu trơn theo vùng của chính ảnh vào; decoder cũ thì "vẽ" độ sáng bằng hiệu chỉnh cộng qua các nhánh
+  CNN, và chỉ cần lệch chút là hỏng ảnh vốn đúng sáng (sai số chỉ 0,0035).
+- **Không dùng nhiều frame được.** Tham số nhiễu đổi theo từng frame (`segment_seconds` 0,05 s < 0,1 s giữa hai frame;
+  0/399 frame liền nhau dùng chung phơi sáng và ánh sáng không đều), nên so frame không tách được ánh sáng giả khỏi cảnh.
+- **`decoders.BilateralGridTone`** (Gharbi et al. 2017, *Deep Bilateral Learning for Real-Time Image Enhancement*):
+  mạng hệ số đọc ảnh thu về 64 × 64 (sRGB và ánh sáng tuyến tính), latent ZI ở lưới của nó và thống kê phơi sáng của
+  p30 (đường toàn cục), cho ra lưới `split_tone_grid_size`² ô × `split_tone_grid_bins` mức sáng, mỗi ô một ma trận màu
+  3 × 4. `slice_grid` cắt lưới tam tuyến tại (x, y, bản đồ dẫn); bản đồ dẫn = độ sáng + một số hạng điểm học được, nên
+  phép biến đổi đi theo cạnh và uốn được đường cong tone (gamma) theo vùng; `apply_affine` áp lên chính pixel. Lớp
+  cuối và số hạng của bản đồ dẫn khởi tạo bằng 0: mọi phép là đồng nhất lúc đầu. 58 353 tham số (nhánh ánh sáng cũ
+  169 092). Đầu ra J vào nhánh màu và nhánh đường nét như J của nhánh ánh sáng; L1 giữa J và ảnh sạch ở 1/8
+  (`split_tone_grid_weight`), cộng MSE tần số thấp của p30 trên ảnh cuối.
+- p31 cấu hình 16 × 16 ô × 8 mức sáng, rộng 32. Không chạy cùng nhánh ánh sáng (`split_light_branch: false`, bắt buộc).
+- So **p31 với p30**: khác đúng nhánh ánh sáng → lưới. `brightness_probe` ở Cell 11 cho biết ảnh vốn đúng sáng còn bị
+  làm tệ đi không, và ảnh bị đổi sáng tiến gần mốc oracle theo vùng (0,049) tới đâu.
+- Bằng chứng: `tests/test_bilateral.py` (cắt lưới tam tuyến: lưới hằng → hệ số hằng, lưới tăng theo x hay theo mức
+  sáng → hệ số tăng theo; phép affine áp lên chính pixel: 0 → đồng nhất, hệ số khuếch đại, độ lệch; khởi đầu đồng nhất
+  với bản đồ dẫn là độ sáng, có đọc latent và thống kê; làm sáng được một vùng mà giữ nguyên vùng khác; trong decoder
+  thay nhánh ánh sáng và trả J ra `image_light`; phase 2 chạy được và log L1 của tầng tone; giá trị sai và bật cùng
+  nhánh ánh sáng bị từ chối; p31 = p30 với nhánh ánh sáng đổi thành lưới, cùng hash phase 1 với p28).
+
 **p30_exposure — phase 2 nhắm vào độ sáng: decoder đọc thống kê phơi sáng, thêm MSE tần số thấp** (config
 `configs/kaggle_exposure.yaml` → OUT `outputs/p30_exposure`).
 Bằng p28_steady, chỉ đổi phase 2; hash phase 1 bằng p28 nên notebook **dùng lại phase 1 của p28**. Người dùng: "loss

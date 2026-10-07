@@ -1,0 +1,30 @@
+# p31_bilateral: p30_exposure (cung phase 1 cua p28 -> dung lai), thay nhanh anh sang bang LUOI SONG PHUONG cac phep
+# affine mau (HDRNet, Gharbi 2017).
+#
+# Nguoi dung (08/10/2026): "can co thay doi dot pha ve kien truc P2, viec toi uu hoac them 1 vai thong so co the khien
+# no tot hon nhung chua dang ke"; chon luoi song phuong. Bang chung (README p31_bilateral, thong ke tren du lieu, khong
+# train model):
+#  - p28: ~95% sai so pixel con lai la do sang / mau o chu ky dai (dai LL).
+#  - Tren 300 anh valid nhieu p28, loi tan so thap cua ANH VAO o anh bi doi sang 0,225 (RMSE, khoi 8 px). Biet dung
+#    mot phep a*x + b moi kenh cho CA anh: con 0,113 (go 74% binh phuong loi); rieng tung vung 4x4: con 0,049 (them 21%);
+#    con lai 5%. Anh khong bi doi sang: 0,0035 -- gan nhu dung, model chi can de yen.
+#  - Tham so nhieu doi theo tung frame (0/399 frame lien nhau dung chung): dung nhieu frame khong tach duoc anh sang gia.
+#  - Vay dap an cho do sang la mot phep affine mau tron theo vung, ap len chinh pixel anh vao. Luoi song phuong:
+#    16x16 o x 8 muc sang, moi o mot ma tran 3x4; moi pixel lay phep affine cat tai vi tri va do sang cua no (ban do
+#    dan = do sang + so hang hoc duoc). Khoi dau la dong nhat. Mang he so doc anh 64x64, latent ZI va thong ke phoi sang
+#    cua p30. 58 nghin tham so (nhanh anh sang cu 169 nghin).
+#  - Dau ra cua luoi (J) vao nhanh mau va nhanh duong net nhu J cua nhanh anh sang; L1 giua J va anh sach o 1/8
+#    (split_tone_grid_weight), cong MSE tan so thap cua p30 tren anh cuoi.
+# Chi doi phase 2: hash phase 1 bang p28.
+extends: kaggle_exposure.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p31_bilateral
+
+phase2:
+  split_light_branch: false             # p30: true -- luoi thay nhanh anh sang
+  split_tone_grid: true
+  split_tone_grid_size: 16              # 16 x 16 o tren anh 256 (16 px moi o)
+  split_tone_grid_bins: 8               # muc do sang: duong cong tone (gamma) theo vung
+  split_tone_grid_width: 32
+  split_tone_grid_weight: 1.0           # nhu split_light_weight cua nhanh anh sang

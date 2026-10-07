@@ -16,7 +16,7 @@ from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from ..models.color_edge import downsample
 from ..models.decoders import PIXEL_IMAGE_DECODERS
-from .losses import color_edge_split_loss, invisible_detail_fraction, lowfreq_mse, phase2_reconstruction_loss
+from .losses import LOWFREQ_SCALE, color_edge_split_loss, invisible_detail_fraction, lowfreq_mse, phase2_reconstruction_loss
 from .perceptual import PerceptualLoss
 from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
@@ -233,7 +233,13 @@ class Phase2Trainer:
                     )
                     loss = loss + split_loss
                     parts.update(split_parts)
-                if "image_light" in restored:
+                if "image_light" in restored and self.phase.get("split_tone_grid", False):
+                    # p31: the bilateral grid's output against the clean frame at 1/8 -- the tone stage alone.
+                    light_l1 = F.l1_loss(downsample(restored["image_light"], LOWFREQ_SCALE),
+                                         downsample(batch["image_clean"], LOWFREQ_SCALE))
+                    loss = loss + float(self.phase["split_tone_grid_weight"]) * light_l1
+                    parts["image_light_l1"] = light_l1
+                elif "image_light" in restored:
                     # The light branch alone, at 1/split_light_loss_scale: brightness and glare,
                     # no edges, so the colour and edge branches keep the detail.
                     light_l1 = F.l1_loss(downsample(restored["image_light"], int(self.phase["split_light_loss_scale"])),
