@@ -1,0 +1,23 @@
+# p29_inputnorm: p28_steady (cung nhieu, kien truc, recipe), them chuan hoa he so dau vao ViT.
+#
+# Nguoi dung (07/10/2026), log p28 tren Kaggle: loss phase 1 0,055 (update 500) -> 0,15 (660) -> 0,10 (1000):
+# "lai khong giam ma tang len 1 doan". Do tren may (xem README p29_inputnorm):
+#  - Dich I-JEPA (dau ra teacher da LayerNorm) do VI TRI token giai thich 78% (anh) / 62% (IMU) luc khoi tao, con
+#    ~80% toi update 500: predictor (biet vi tri khoi dich) hoc thuoc mau theo vi tri, loss roi nhanh; update 500-1000
+#    phan do vi tri sup 78% -> 26% khi teacher hoc noi dung, meo het tac dung, loss bat len.
+#  - Goc: he so QWT/Haar vao ViT khong chuan hoa: patch embedding luc khoi tao chi 0,5x (anh) / 0,3x (IMU) vi tri
+#    sincos. I-JEPA chuan hoa pixel nen hai cai ngang nhau.
+#  - model.vit_input_standardize: global -- MOT he so moi loai du lieu (do mot lan tren bank validation luc bat dau
+#    run, luu trong checkpoint) de RMS = sqrt(768 / fan-in): patch embedding khoi dau nhu I-JEPA tren pixel, cac dai
+#    tan giu ti le tu nhien (nhu chuan hoa pixel giu pho). Phan do vi tri luc khoi tao 78% / 62% -> 58% / 23%; loss
+#    giam deu (khong bat), dao dong 7%; phase 2 1500 update tren may ngang p28 (PSNR 23,82 / 23,74, net 0,840 / 0,845).
+#    Da thu "channel" (moi kenh RMS bang nhau): kenh chi tiet -- va nhieu cam bien trong do -- nhan 15-50 lan, latent
+#    kem han (probe anh 42%, p28 58%); khong dung.
+# Doi model -> train lai ca hai phase.
+extends: kaggle_steady.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p29_inputnorm
+
+model:
+  vit_input_standardize: global         # p28: khong co (he so vao ViT nguyen ban)

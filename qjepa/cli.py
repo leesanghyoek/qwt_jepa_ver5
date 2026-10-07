@@ -852,6 +852,17 @@ def command_train_phase1(args: argparse.Namespace) -> None:
             print("centre norm calibration | RMS before, first -> last layer:"
                   f" image {measured['image'][0]:.2e} -> {measured['image'][-1]:.2e}"
                   f" | IMU {measured['imu'][0]:.2e} -> {measured['imu'][-1]:.2e}")
+    if config["model"].get("vit_input_standardize") is not None and not args.resume:
+        # Fresh runs only, on the fixed validation bank, the same on every rank; a resumed run
+        # loads its gains from the checkpoint.
+        bank = list(validation_loader)
+        measured = model.calibrate_vit_inputs(
+            *(torch.cat([b[key] for b in bank]) for key in ("image_noisy", "imu_noisy_phys",
+                                                            "image_clean", "imu_clean_phys")))
+        if lead:
+            image_rms, imu_rms = measured["image"], measured["imu"]
+            print("vit input standardization | coefficient RMS per channel:"
+                  f" image {min(image_rms):.3f}-{max(image_rms):.3f} | IMU {min(imu_rms):.3f}-{max(imu_rms):.3f}")
     trainer = _phase1_trainer(model, config, device, manifest["meta"]["manifest_hash"])
     resume_payload = None
     if args.resume:

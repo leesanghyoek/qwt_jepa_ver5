@@ -23,6 +23,11 @@ import torch.nn.functional as F
 
 # Coefficients per token side; the transform's own halving makes it 16 px / 16 samples.
 PATCH = 8
+# I-JEPA's patch: 16 x 16 pixels x 3 channels, each normalized to unit variance.
+PIXEL_FAN_IN = 768
+# model.vit_input_standardize: one gain per modality, which keeps the bands' natural ratios as
+# pixel normalization does, or one per coefficient channel, which evens the bands out.
+INPUT_STANDARDIZATIONS = ("global", "channel")
 TOKEN_STRIDE = 2 * PATCH
 INIT_STD = 0.02
 
@@ -111,10 +116,19 @@ class JointCoefficientViT(nn.Module):
     [B, Ki, dim] and [B, Ku, dim], computed from those tokens alone.
     """
 
-    def __init__(self, image_channels: int, imu_channels: int, dim: int, *, depth: int, heads: int) -> None:
+    def __init__(self, image_channels: int, imu_channels: int, dim: int, *, depth: int, heads: int,
+                 input_standardize: str | None = None) -> None:
         super().__init__()
         self.image_embed = nn.Conv2d(image_channels, dim, PATCH, stride=PATCH)
         self.imu_embed = nn.Conv1d(imu_channels, dim, PATCH, stride=PATCH)
+        # model.vit_input_standardize: fixed gains per coefficient channel (calibrate_inputs).
+        # None: no buffers, so the checkpoints trained before the key load as they are.
+        if input_standardize not in (None, *INPUT_STANDARDIZATIONS):
+            raise ValueError(f"input_standardize must be None or one of {INPUT_STANDARDIZATIONS}")
+        self.input_standardize = input_standardize
+        if self.input_standardize is not None:
+            self.register_buffer("image_input_scale", torch.ones(image_channels))
+            self.register_buffer("imu_input_scale", torch.ones(imu_channels))
         self.image_type = nn.Parameter(torch.zeros(dim))
         self.imu_type = nn.Parameter(torch.zeros(dim))
         self.blocks = nn.ModuleList(Block(dim, heads) for _ in range(depth))
@@ -125,6 +139,33 @@ class JointCoefficientViT(nn.Module):
         init_transformer(self, self.blocks)
         nn.init.trunc_normal_(self.image_type, std=INIT_STD)
         nn.init.trunc_normal_(self.imu_type, std=INIT_STD)
+
+    @torch.no_grad()
+    def calibrate_inputs(self, image_coefficients: torch.Tensor, imu_coefficients: torch.Tensor) -> dict[str, list[float]]:
+        """Scale the coefficients to RMS sqrt(768 / fan-in) on these: each patch embedding then
+        starts with the variance I-JEPA's has on normalized pixels (fan-in 768), as large as the
+        sine-cosine positions.
+
+        Unscaled, the patch embeddings start at 0.5x (image) and 0.3x (IMU) the positions: the
+        teacher's LayerNorm'd output -- I-JEPA's target -- is then mostly a function of where the
+        token sits, the predictor learns that pattern first and the loss climbs once the teacher
+        has learnt content. "global": one gain per modality, the bands keep their ratios (the
+        four QWT low-pass channels RMS ~1, the twelve detail ones 0.02-0.07) as normalized pixels
+        keep the spectrum. "channel": every channel to that RMS, the detail bands -- and the
+        sensor noise in them -- raised 15-50x. Returns each channel's RMS before."""
+        if self.input_standardize is None:
+            raise ValueError("calibrate_inputs needs model.vit_input_standardize")
+        measured = {}
+        for name, embed, coefficients, scale in (
+                ("image", self.image_embed, image_coefficients, self.image_input_scale),
+                ("imu", self.imu_embed, imu_coefficients, self.imu_input_scale)):
+            dims = (0, *range(2, coefficients.ndim))
+            rms = coefficients.float().square().mean(dims).sqrt().clamp_min(1e-8)
+            fan_in = embed.in_channels * math.prod(embed.kernel_size)
+            divisor = rms if self.input_standardize == "channel" else coefficients.float().square().mean().sqrt()
+            scale.copy_(math.sqrt(PIXEL_FAN_IN / fan_in) / divisor.clamp_min(1e-8).to(scale.device))
+            measured[name] = rms.tolist()
+        return measured
 
     @staticmethod
     def token_grid(coefficient_shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -137,6 +178,9 @@ class JointCoefficientViT(nn.Module):
             raise ValueError("A ViT encoder has one resolution: there are no encoder stages")
         if (keep_image is None) != (keep_imu is None):
             raise ValueError("Keep the context of both modalities, or of neither")
+        if self.input_standardize is not None:
+            image_coefficients = image_coefficients * self.image_input_scale.view(1, -1, 1, 1).to(image_coefficients.dtype)
+            imu_coefficients = imu_coefficients * self.imu_input_scale.view(1, -1, 1).to(imu_coefficients.dtype)
         parts = []
         for embed, type_embedding, coefficients, keep in (
                 (self.image_embed, self.image_type, image_coefficients, keep_image),

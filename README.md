@@ -12,6 +12,60 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p29_inputnorm — chuẩn hoá hệ số đầu vào ViT: loss phase 1 không còn bật lên** (config
+`configs/kaggle_inputnorm.yaml` → OUT `outputs/p29_inputnorm`).
+Bằng p28_steady, thêm `model.vit_input_standardize: global`. Log p28 trên Kaggle: loss 0,055 (update 500) → 0,15
+(660) → 0,10 (1000); người dùng: "lại không giảm mà tăng lên 1 đoạn". p28 kết luận cú bật không xoá được bằng lr,
+teacher hay batch — đúng, nhưng chưa tìm ra gốc. Đo trên máy (RTX 4060, `manifests/local`, nhiễu p27, batch 32):
+- **Gốc: đích phần lớn là vị trí.** R² vị trí = phần đầu ra teacher (đã LayerNorm, tức đích I-JEPA) giải thích được
+  chỉ bằng vị trí token, trên 64 ảnh validation (`position_probe`, chạy đúng trainer của CLI):
+
+  | update | 0 | 300 | 500 | 700 | 1000 | 1500 |
+  |---|---|---|---|---|---|---|
+  | loss (trung vị 100 update) | — | 0,176 | 0,089 | 0,115 | 0,089 | 0,083 |
+  | R² vị trí: ảnh / IMU | 78% / 62% | 81% / 65% | 78% / 48% | 62% / 24% | 26% / 8% | 16% / 3% |
+
+  Predictor biết vị trí khối đích, nên học thuộc mẫu theo vị trí trước: loss rơi nhanh. Khi teacher học được nội
+  dung, mẫu đó hết tác dụng và loss bật lên — đúng đoạn update 500–1000.
+- **Vì sao vị trí lấn át:** hệ số QWT/Haar vào ViT không chuẩn hoá. Bốn kênh thấp tần QWT RMS ~1, mười hai kênh chi
+  tiết 0,02–0,07; patch embedding lúc khởi tạo (trọng số std 0,02 như I-JEPA) chỉ bằng 0,52–0,60× (ảnh) và 0,32×
+  (IMU) positional embedding sincos. I-JEPA chuẩn hoá pixel (patch 16 × 16 × 3 = 768 đầu vào) nên hai thứ ngang nhau.
+- **Sửa:** `vit_input_standardize` nhân hệ số trước ViT với hệ số cố định, đo một lần trên bank validation lúc bắt
+  đầu run (ảnh nhiễu + sạch, như calibration của CNN), lưu trong checkpoint, teacher dùng cùng hệ số; đích RMS
+  √(768 / fan-in): patch embedding khởi đầu với phương sai như I-JEPA trên pixel. Thiếu khoá: không có buffer, hash
+  và checkpoint cũ như trước. Hai cách, batch 32, 2500 update:
+
+  | | R² vị trí lúc khởi tạo (ảnh / IMU) | bật sau đáy | dao động nửa sau | ảnh / Y / IMU rút được |
+  |---|---|---|---|---|
+  | không chuẩn hoá (p28) | 78% / 62% | ×1,36 | 6% | 58% / 67% / 81% |
+  | `channel` (mỗi kênh RMS bằng nhau) | 30% / 68% (paper-gain: 34% / 26%) | ×1,00 | 6% | 42% / 48% / 75% |
+  | **`global`** (một hệ số mỗi loại) | 58% / 23% | **×1,00** | 7% | 51% / 59% / 75% |
+  | `global`, batch 16 | — | ×1,00 | 10% | 50% / 59% / 80% |
+
+  `channel` nhân kênh chi tiết — và nhiễu cảm biến trong đó — 15–50 lần: latent kém hẳn. `global` giữ tỉ lệ tự nhiên
+  giữa các dải, như chuẩn hoá pixel giữ phổ. Loss `global`: 0,176 · 0,171 · 0,167 · 0,152 · 0,131 · … · 0,096 (đoạn
+  100 update thứ 4, 5, 6, 7, 8 … 25) — giảm đều. Loss tuyệt đối cao hơn p28 vì đích là nội dung, không phải mẫu vị trí.
+- **Phase 2 không đổi:** thăm dò tuyến tính thấp hơn (51% so với 58%) nhưng khôi phục ngang nhau — cùng recipe p28,
+  1500 update, perceptual tắt:
+
+  | validation | ảnh vào | p28 | p29 (`global`) |
+  |---|---|---|---|
+  | PSNR (dB) | 25,34 | 23,74 | 23,82 |
+  | SSIM | 0,820 | 0,864 | 0,862 |
+  | đường nét 4–16 px | 0,645 | 0,845 | 0,840 |
+  | vật nhỏ 2–4 px đúng chỗ | 0,530 | 0,642 | 0,639 |
+  | gồ ghề thừa ↓ | 0,424 | 0,328 | 0,326 |
+  | accel / gyro RMSE | 0,869 / 0,089 | 0,706 / 0,051 | 0,707 / 0,051 |
+
+- **Tốc độ phase 1 trên Kaggle (p28):** 1,1 s/update, 0,83 s trong đó chờ dữ liệu — 4 vCPU không tạo kịp nhiễu cho 32
+  ảnh (mỗi mẫu ~56 ms CPU trên máy: tạo nhiễu ảnh 29, đọc + thu nhỏ ảnh 17, nhiễu IMU 8; không có điểm nghẽn sửa nhanh
+  được mà không đổi dữ liệu). 2500 update ≈ 46 phút. Batch 16 + `global` nhanh gấp đôi, dao động 10%, latent ngang.
+- Bằng chứng: `tests/test_vit_input_standardize.py` (thiếu khoá: không có hệ số, hash và config cũ như trước; `global`
+  một hệ số mỗi loại giữ tỉ lệ giữa các dải, `channel` mỗi kênh đúng RMS √(768 / fan-in); patch embedding khởi đầu
+  0,7–1,5× vị trí; trên ảnh tối có phổ như ảnh chụp, R² vị trí 0,79 → 0,55 (`global`) → 0,42 (`channel`); teacher cùng
+  hệ số; run CLI mới đo một lần, resume giữa chừng giữ hệ số, phase 2 đóng băng đúng hệ số đó; giá trị sai và CNN bị từ
+  chối; p29 = p28 + khoá này).
+
 **p28_steady — phase 1 ổn định hơn, phase 2 học mạnh hơn và phạt độ nét cao hơn một chút** (config
 `configs/kaggle_steady.yaml` → OUT `outputs/p28_steady`).
 Bằng p27_blur (cùng nhiễu, cùng kiến trúc), chỉ đổi recipe train. Người dùng: "p1 loss giảm rồi tăng, hãy sửa giúp;

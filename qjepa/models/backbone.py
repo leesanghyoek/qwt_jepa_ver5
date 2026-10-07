@@ -58,6 +58,7 @@ class MultimodalBackbone(nn.Module):
         encoder_type: str = "cnn",
         vit_depth: int = 6,
         vit_heads: int = 4,
+        vit_input_standardize: str | None = None,
     ) -> None:
         super().__init__()
         if channels[-1] != embedding_dim:
@@ -74,7 +75,7 @@ class MultimodalBackbone(nn.Module):
             # token voi CNN. Attention giua hai loai token chinh la fusion: ZI = FI, ZU = FU.
             self.joint_encoder = JointCoefficientViT(
                 self.image_transform.coeff_channels, self.imu_transform.coeff_channels, embedding_dim,
-                depth=vit_depth, heads=vit_heads)
+                depth=vit_depth, heads=vit_heads, input_standardize=vit_input_standardize)
             self.fusion = None
             return
         self.image_encoder = DenseCoefficientEncoder(

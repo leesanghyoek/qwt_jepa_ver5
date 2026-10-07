@@ -184,6 +184,22 @@ class IJEPAPretrainingModel(nn.Module):
         self.degradation_head = None
         self.degradation_condition = False
 
+    @torch.no_grad()
+    def calibrate_vit_inputs(self, image_noisy: torch.Tensor, imu_noisy_phys: torch.Tensor,
+                             image_clean: torch.Tensor, imu_clean_phys: torch.Tensor) -> dict[str, list[float]]:
+        """model.vit_input_standardize: set the ViT's per-channel input gains on this batch
+        (JointCoefficientViT.calibrate_inputs), then give the EMA teacher the same ones.
+
+        Noisy and clean together: the context encoder reads the noisy pair and the teacher, with
+        the same gains, the clean one. Fresh runs only; a checkpoint carries its gains."""
+        backbone = self.backbone
+        image_coeff, _ = backbone.image_transform.analysis(torch.cat((image_noisy, image_clean)))
+        imu_coeff, _ = backbone.imu_transform.analysis(self.normalizer.normalize(torch.cat((imu_noisy_phys,
+                                                                                           imu_clean_phys))))
+        measured = backbone.joint_encoder.calibrate_inputs(image_coeff, imu_coeff)
+        self.teachers.joint_encoder.load_state_dict(backbone.joint_encoder.state_dict())
+        return measured
+
     def online_parameters(self):
         return [*self.backbone.parameters(), *self.predictor.parameters()]
 

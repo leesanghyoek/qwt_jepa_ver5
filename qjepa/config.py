@@ -28,7 +28,7 @@ from .models import LatentDecoders, LatentPretrainingModel, MultimodalBackbone
 from .models.backbone import ENCODER_TYPES
 from .models.blocks import ENCODER_NORMS
 from .models.ijepa import CONTEXT_INPUTS, IJEPAPretrainingModel
-from .models.vit import TOKEN_STRIDE
+from .models.vit import INPUT_STANDARDIZATIONS, TOKEN_STRIDE
 from .models.decoders import PIXEL_IMAGE_DECODERS
 from .models.predictors import PREDICTOR_TYPES
 from .training.phase1 import NOISE_DIRECTIONS
@@ -374,6 +374,8 @@ def build_backbone(config: dict[str, Any]) -> MultimodalBackbone:
         encoder_type=model.get("encoder_type", "cnn"),
         vit_depth=int(model.get("vit_depth", 6)),
         vit_heads=int(model.get("vit_heads", 4)),
+        # Absent before p29: the coefficients reach the ViT unscaled.
+        vit_input_standardize=model.get("vit_input_standardize"),
     )
 
 
@@ -506,6 +508,11 @@ def _validate_ijepa(config: dict[str, Any]) -> None:
     if (encoder_type == "vit") != (objective == "ijepa"):
         raise ValueError("phase1.objective ijepa and model.encoder_type vit come together: I-JEPA's context "
                          "encoder sees only the context tokens, which a CNN cannot do")
+    standardize = model.get("vit_input_standardize")
+    if standardize is not None and standardize not in INPUT_STANDARDIZATIONS:
+        raise ValueError(f"model.vit_input_standardize must be one of {INPUT_STANDARDIZATIONS} (absent: off)")
+    if standardize is not None and encoder_type != "vit":
+        raise ValueError("model.vit_input_standardize scales the ViT's input coefficients; set model.encoder_type: vit")
     if encoder_type != "vit":
         return
     for key in ("vit_depth", "vit_heads"):

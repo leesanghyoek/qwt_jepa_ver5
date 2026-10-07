@@ -1,6 +1,7 @@
-"""Architecture figure of p26_ijepa, p27_blur and p28_steady (configs/kaggle_ijepa.yaml, kaggle_blur.yaml,
-kaggle_steady.yaml; qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption and p28 only the
-training recipe, so one figure serves all three; its numbers come from p28's config, the notebook's default run.
+"""Architecture figure of p26_ijepa to p29_inputnorm (configs/kaggle_ijepa.yaml, kaggle_blur.yaml,
+kaggle_steady.yaml, kaggle_inputnorm.yaml; qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the
+corruption, p28 the training recipe and p29 scales the ViT's input coefficients (one line in the encoder box),
+so one figure serves them all; its numbers come from p29's config, the notebook's default run.
 
 Same visual language as draw_architecture_imu.py (whose --local figure is p25_local), with
 what p26 changes: the backbone is ONE ViT over the image's and the IMU's wavelet
@@ -28,7 +29,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG = load_config(REPO / "configs/kaggle_steady.yaml")
+CONFIG = load_config(REPO / "configs/kaggle_inputnorm.yaml")
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 # p28 against p27: what the recipe line of the phase-2 loss box reports.
 P2_BEFORE = load_config(REPO / "configs/kaggle_blur.yaml")["phase2"]
@@ -111,10 +112,10 @@ region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đ�
 region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục (như p25)', right=True)
 region(190, 505, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
-text(W - 20, 26, 'p26_ijepa · p27_blur · p28_steady — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
+text(W - 20, 26, 'p26_ijepa → p29_inputnorm — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
      size=15, weight='bold', color='#D81B60', anchor='end')
 text(W - 20, 44, 'MỘT ViT chung cho ảnh và IMU: attention giữa hai loại token là fusion · ngữ cảnh NHIỄU,'
-     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27, p28 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
+     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27–p29 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
      anchor='end')
 text(W - 20, 62, 'khôi phục dùng ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher EMA + predictor'
      ' bỏ sau phase 1', size=12, weight='bold', color='#8E24AA', anchor='end')
@@ -127,7 +128,10 @@ imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'])
 haar = node(210, 365, 135, 70, 'tf', 'Haar', ['12 × 64'])
 depth, heads, dim = MODEL["vit_depth"], MODEL["vit_heads"], MODEL["embedding_dim"]
-vit = node(370, 195, 200, 250, 'bb', 'CONTEXT ENCODER', ['ViT chung ảnh + IMU', '',
+# model.vit_input_standardize (p29): the coefficients enter scaled, one gain per modality.
+scaled = {'global': 'hệ số × g (mỗi loại 1 g)', 'channel': 'hệ số × g (mỗi kênh 1 g)'}.get(
+    MODEL.get('vit_input_standardize'), '')
+vit = node(370, 195, 200, 250, 'bb', 'CONTEXT ENCODER', ['ViT chung ảnh + IMU', scaled,
                                                         'ảnh: patch 8 = 16 px', '→ 256 token', '',
                                                   'IMU: patch 8 = 16 mẫu', '→ 8 token', '',
                                                   f'264 token × {dim}', f'{depth} khối · {heads} head',
@@ -282,7 +286,7 @@ loss2 = node(1150, 528, 350, 168, 'loss', 'Loss phase 2', [
     'ánh sáng (H): L1 giữa J và ảnh sạch ở 32²', ''])
 text(1325, 663, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
 # p28's recipe against p27's: the sharpness penalties, the gradient clip and the learning rate.
-text(1325, 686, (f'p28: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
+text(1325, 686, (f'p28, p29: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
                  f'{P2["gradient_clip_norm"]:g}').replace('.', ',') + f' · lr {P2["learning_rate"]:.0e}'.replace('e-0', 'e-'),
      size=12, weight='bold', color='#D81B60')
 arrow([(1325, 528), (1325, 474)], color='#D81B60', dash='6 4', width=2)
