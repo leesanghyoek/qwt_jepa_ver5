@@ -12,6 +12,48 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p30_exposure — phase 2 nhắm vào độ sáng: decoder đọc thống kê phơi sáng, thêm MSE tần số thấp** (config
+`configs/kaggle_exposure.yaml` → OUT `outputs/p30_exposure`).
+Bằng p28_steady, chỉ đổi phase 2; hash phase 1 bằng p28 nên notebook **dùng lại phase 1 của p28**. Người dùng: "loss
+khôi phục vẫn chưa thực sự tốt … hãy tìm cách để p2 khôi phục tốt hơn, thậm chí là thay đổi kiến trúc" và "đừng chạy
+train trên máy tôi" — mọi số dưới đây lấy từ log Kaggle của p26/p28 hoặc thống kê thuần trên dữ liệu (CPU, không
+train model).
+- **Sai số còn lại ở đâu (p28, `delta_report`, Kaggle).** Lỗi so với ảnh sạch theo dải QWT, ảnh vào → khôi phục: LL
+  (độ sáng, bố cục) 0,272 → 0,140; LH 0,0269 → 0,0211; HL 0,0256 → 0,0201; HH 0,0160 → 0,0143. Làm nét đúng hướng (cả
+  3 dải chi tiết giảm 10–21%, hơn p26), nhưng bình phương lỗi: LL ≈ 0,0196, ba dải chi tiết ≈ 0,0011 — **~95% sai số
+  pixel còn lại là độ sáng / màu ở chu kỳ dài**. Làm nét hoàn hảo cũng chỉ thêm ~0,2 dB PSNR.
+- **Lỗi sửa được.** p26 (cùng decoder), D1: ảnh đúng sáng chỉ bị mờ 35,45 → 26,49 dB, LL ×4,7 tệ hơn ảnh vào; đặt ZI = 0
+  thì 29,60 — decoder đổi độ sáng ảnh không cần sửa.
+- **Thiếu thông tin ở đâu.** `GlobalToneColor` (tone + ma trận màu chung cả ảnh) chỉ nhận trung bình và độ lệch từng
+  kênh, cộng đặc trưng conv **đã lấy trung bình**; `LightBranch` có ngữ cảnh toàn khung cũng là trung bình. Trung bình
+  mất thông tin vùng sáng nhất — dấu hiệu rõ nhất của phơi sáng thiếu (hệ số < 1 giữ cả trời, đèn dưới 1). Hồi quy
+  tuyến tính trên 400 ảnh valid nhiễu p28, đoán log(độ sáng sạch / nhiễu), kiểm chéo 5 phần:
+
+  | đặc trưng | R² | sai số, ảnh bị đổi sáng | sai số, ảnh **không** bị đổi sáng |
+  |---|---|---|---|
+  | trung bình + độ lệch (như `GlobalToneColor`) | 0,58 | 0,129 | 0,096 |
+  | + phân vị 1–99,9%, histogram 16 bin, max mỗi kênh | 0,74 | 0,107 | **0,044** |
+
+- **Đổi 1 — `phase2.split_exposure_stats: true`**: 27 số của ảnh vào (`decoders.exposure_statistics`: 8 phân vị độ
+  sáng, histogram 16 bin, max mỗi kênh; đo trên đầu vào, không gradient, fp32) vào đầu tone chung và ngữ cảnh toàn
+  khung của nhánh ánh sáng. Thêm 1 728 tham số (decoder 3,73 triệu). Vẫn khởi đầu là phép đồng nhất. Thiếu khoá: hình
+  dạng như cũ, checkpoint cũ nạp được.
+- **Đổi 2 — `phase2.lowfreq_mse_weight: 10`**: MSE giữa ảnh khôi phục và ảnh sạch đã trung bình khối 8 × 8 px
+  (`losses.lowfreq_mse`). PSNR là MSE; mọi số hạng ảnh khác là L1, mà với phơi sáng không chắc chắn L1 trả lời bằng
+  trung vị, không phải trung bình. Chi tiết trong khối triệt tiêu, nên số hạng này không đụng tới đường nét. Log ra
+  `image_lowfreq_mse`.
+- **Đo trên Kaggle**: Cell 11 chạy thêm `tools/brightness_probe.py` — sai số tần số thấp của ảnh vào / khôi phục theo
+  nhóm ảnh (không bị đổi sáng / bị đổi sáng), mốc oracle (biết đúng hệ số sáng–màu cả ảnh, từng vùng 4 × 4), tỉ lệ ảnh
+  khôi phục tệ hơn ảnh vào và tỉ số độ sáng ra / sạch. So p30 với p28 (cùng phase 1, cùng 4000 update phase 2): cần
+  thấy nhóm "không bị đổi sáng" ít bị làm tệ đi hơn, và PSNR vượt ảnh vào nhiều hơn 1,3 dB.
+- Hai thay đổi đi cùng một run để tiết kiệm giờ Kaggle; nếu p30 tốt hơn mà cần biết phần nào, tắt từng khoá.
+- Bằng chứng: `tests/test_exposure.py` (thống kê là phân vị tăng dần, histogram tổng 1, max mỗi kênh, tỉ lệ đúng khi
+  ảnh tối đi một nửa, không gradient; thiếu khoá hình dạng như cũ, bật thì đúng hai ma trận rộng thêm 27 cột; cả hai
+  khởi đầu là đồng nhất và có dùng các cột mới; MSE tần số thấp mù với chi tiết trong khối 8 px, bằng bình phương lỗi
+  độ sáng đều; phase 2 chạy được với cả hai và log số hạng; giá trị sai bị từ chối; p30 = p28 + hai khoá, cùng hash
+  phase 1); `tests/test_evaluate_options.py` (`brightness_probe` tách đúng hai nhóm, oracle vùng không tệ hơn oracle
+  chung).
+
 **p29_inputnorm — chuẩn hoá hệ số đầu vào ViT: loss phase 1 không còn bật lên; phase 1 nhanh gấp đôi** (config
 `configs/kaggle_inputnorm.yaml` → OUT `outputs/p29_inputnorm`).
 Bằng p28_steady, thêm `model.vit_input_standardize: global` và phase 1 batch 32 → 16. Log p28 trên Kaggle: loss 0,055 (update 500) → 0,15

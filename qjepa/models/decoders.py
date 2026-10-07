@@ -221,6 +221,32 @@ class PixelResNetDecoder(nn.Module):
         return (image if base is None else base) + self.tail(torch.cat((self.up(x), head), dim=1))
 
 
+# phase2.split_exposure_stats: what a mean and a mean-pooled feature cannot carry about exposure.
+EXPOSURE_QUANTILES = (0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 0.999)
+EXPOSURE_BINS = 16
+EXPOSURE_FEATURES = len(EXPOSURE_QUANTILES) + EXPOSURE_BINS + 3
+
+
+def exposure_statistics(image: torch.Tensor) -> torch.Tensor:
+    """[B, 27] per frame: luminance quantiles, a 16-bin luminance histogram, each channel's maximum.
+
+    An exposure gain below 1 keeps even the brightest pixels (sky, lamps) below 1; a frame
+    exposed right reaches the top of the range. A mean and a std, or features averaged over the
+    frame, lose that: from mean and std a linear fit explains R^2 0.58 of the true brightness
+    ratio on p28's noise, 0.74 with these, and its error on frames whose light was not touched
+    falls 0.096 -> 0.044 (README p30_exposure). Measured on the input, never trained through:
+    detached and in fp32."""
+    with torch.no_grad(), torch.autocast(device_type=image.device.type, enabled=False):
+        x = image.float().clamp(0.0, 1.0)
+        y = luminance(x).flatten(1)
+        levels = torch.tensor(EXPOSURE_QUANTILES, device=y.device, dtype=y.dtype)
+        quantiles = torch.quantile(y, levels, dim=1).transpose(0, 1)
+        bins = (y * EXPOSURE_BINS).long().clamp(max=EXPOSURE_BINS - 1)
+        histogram = torch.zeros(y.shape[0], EXPOSURE_BINS, device=y.device).scatter_add_(
+            1, bins, torch.ones_like(y)) / y.shape[1]
+        return torch.cat((quantiles, histogram, x.flatten(2).amax(dim=-1)), dim=1)
+
+
 class GlobalToneColor(nn.Module):
     """One tone curve and one colour matrix per image, set from the whole frame.
 
@@ -232,11 +258,13 @@ class GlobalToneColor(nn.Module):
     where it cannot tell, L1 answers with the grey in between. Here a small
     funnel and the latent are pooled into one vector per image, which sets
     ``out = M . x^p + b``: ``p`` undoes the gamma, ``M`` the channel gains.
-    Zero-initialised: it starts as the identity.
+    Zero-initialised: it starts as the identity. ``exposure_stats`` adds the input's
+    luminance quantiles, histogram and channel maxima (exposure_statistics) to the pooled vector.
     """
 
-    def __init__(self, latent_channels: int = 128, width: int = 32) -> None:
+    def __init__(self, latent_channels: int = 128, width: int = 32, exposure_stats: bool = False) -> None:
         super().__init__()
+        self.exposure_stats = bool(exposure_stats)
         self.features = nn.Sequential(
             nn.Conv2d(3, width, 3, stride=2, padding=1), nn.ReLU(),
             nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU(),
@@ -244,7 +272,8 @@ class GlobalToneColor(nn.Module):
         )
         self.latent = nn.Conv2d(latent_channels, width, 1)
         # + per-channel mean and std of the input: the statistics a gain and a gamma move.
-        self.head = nn.Sequential(nn.Linear(2 * width + 6, width), nn.ReLU(), nn.Linear(width, 13))
+        extra = EXPOSURE_FEATURES if self.exposure_stats else 0
+        self.head = nn.Sequential(nn.Linear(2 * width + 6 + extra, width), nn.ReLU(), nn.Linear(width, 13))
         nn.init.zeros_(self.head[-1].weight)
         nn.init.zeros_(self.head[-1].bias)
 
@@ -255,6 +284,8 @@ class GlobalToneColor(nn.Module):
             F.relu(self.latent(latent)).mean(dim=(-2, -1)),
             image.mean(dim=(-2, -1)), image.flatten(2).std(dim=-1),
         ), dim=1)
+        if self.exposure_stats:
+            pooled = torch.cat((pooled, exposure_statistics(image).to(pooled.dtype)), dim=1)
         raw = self.head(pooled)
         exponent = torch.exp(raw[:, 0].clamp(-1.0, 1.0))        # 0.37 .. 2.7; gamma 0.46..0.79 needs 1.3..2.2
         matrix = torch.eye(3, dtype=raw.dtype, device=raw.device) + raw[:, 1:10].view(-1, 3, 3)
@@ -279,10 +310,10 @@ class ColorBranch(nn.Module):
     """
 
     def __init__(self, latent_channels: int = 128, width: int = 32, blocks: int = 6,
-                 global_tone: bool = False) -> None:
+                 global_tone: bool = False, exposure_stats: bool = False) -> None:
         super().__init__()
         # Only when asked: p8 checkpoints have no such layers.
-        self.global_tone = GlobalToneColor(latent_channels, width) if global_tone else None
+        self.global_tone = GlobalToneColor(latent_channels, width, exposure_stats) if global_tone else None
         self.head = nn.Sequential(nn.Conv2d(3, width, 3, padding=1), nn.ReLU())
         self.latent = nn.Conv2d(latent_channels, width, 1)
         self.fuse = nn.Conv2d(2 * width, width, 3, padding=1)
@@ -330,15 +361,18 @@ class LightBranch(nn.Module):
     exp and pow at 1/4 resolution cost nothing and fp16 would round the gain.
     """
 
-    def __init__(self, latent_channels: int = 128, width: int = 32, scale: int = 4, levels: int = 3) -> None:
+    def __init__(self, latent_channels: int = 128, width: int = 32, scale: int = 4, levels: int = 3,
+                 exposure_stats: bool = False) -> None:
         super().__init__()
         self.scale = int(scale)
+        # The global context also reads the input's exposure statistics (exposure_statistics).
+        self.exposure_stats = bool(exposure_stats)
         self.head = nn.Sequential(nn.Conv2d(6, width, 3, padding=1), nn.ReLU())
         self.down = nn.ModuleList(
             nn.Sequential(nn.Conv2d(width, width, 4, stride=2, padding=1), nn.ReLU(), _ResidualBlock(width))
             for _ in range(int(levels)))
         self.latent = nn.Conv2d(latent_channels, width, 1)
-        self.context = nn.Linear(width, width)
+        self.context = nn.Linear(width + (EXPOSURE_FEATURES if self.exposure_stats else 0), width)
         self.up = nn.ModuleList(
             nn.Sequential(nn.Conv2d(2 * width, width, 3, padding=1), nn.ReLU()) for _ in range(int(levels)))
         self.tail = nn.Conv2d(width, 4, 3, padding=1)
@@ -354,7 +388,10 @@ class LightBranch(nn.Module):
             skips.append(x)
             x = down(x)
         x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
-        x = x + self.context(x.mean(dim=(2, 3)))[:, :, None, None]
+        context = x.mean(dim=(2, 3))
+        if self.exposure_stats:
+            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+        x = x + self.context(context)[:, :, None, None]
         for up, skip in zip(self.up, reversed(skips)):
             x = up(torch.cat((F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False), skip),
                              dim=1))
@@ -725,11 +762,12 @@ class SplitColorEdgeDecoder(nn.Module):
         branch_arch: str = "resnet", color_widths: tuple[int, ...] = (12, 16, 24, 32),
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
-        light: dict | None = None,
+        light: dict | None = None, exposure_stats: bool = False,
     ) -> None:
         super().__init__()
-        # Only when asked: earlier checkpoints have no light layers.
-        self.light = LightBranch(latent_channels, **light) if light else None
+        # Only when asked: earlier checkpoints have no light layers. ``exposure_stats``
+        # (phase2.split_exposure_stats) widens the global tone head and the light branch's context.
+        self.light = LightBranch(latent_channels, **light, exposure_stats=exposure_stats) if light else None
         # Only when asked: earlier checkpoints have no refiner layers. Scale 1 -- p15/p16,
         # and every config without the key -- keeps EdgeRefiner and its layer names.
         self.refiner = None
@@ -750,14 +788,14 @@ class SplitColorEdgeDecoder(nn.Module):
             # Multi-scale CNN where the edges are: near features (single edges,
             # small objects) at the top levels, overall features (layout, what an
             # object is, exposure) at the bottom. Colour keeps p8's branch and names.
-            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global, exposure_stats)
             self.edge = UNetBranch(2, 1, latent_channels, tuple(edge_widths), unet_blocks)
         elif branch_arch == "nafnet_edge":
             # NAFNet on the edges (deep and cheap: depthwise blocks, channel attention),
             # p8's colour branch; ``naf`` holds widths, block counts and aux factors.
             if not naf:
                 raise ValueError("nafnet_edge needs its naf settings")
-            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global, exposure_stats)
             self.edge = NAFNetBranch(2, 1, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
                                      int(naf["middle_blocks"]), tuple(naf["dec_blocks"]),
                                      tuple(naf.get("aux_factors", ())),
@@ -765,7 +803,7 @@ class SplitColorEdgeDecoder(nn.Module):
                                      naf.get("stage_channels"))
         elif branch_arch == "resnet":
             # p8: layer names are part of its checkpoints; keep them.
-            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global)
+            self.color = ColorBranch(latent_channels, color_width, color_blocks, color_global, exposure_stats)
             self.edge = PixelResNetDecoder(latent_channels, edge_width, edge_blocks,
                                            in_channels=2, out_channels=1)
         else:

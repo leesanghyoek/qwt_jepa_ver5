@@ -456,6 +456,20 @@ def imu_increment_loss(
     return torch.stack(terms).mean()
 
 
+# phase2.lowfreq_mse_weight: the block the colour branch's illumination works at (split_illumination_scale).
+LOWFREQ_SCALE = 8
+
+
+def lowfreq_mse(restored: torch.Tensor, clean: torch.Tensor, scale: int = LOWFREQ_SCALE) -> torch.Tensor:
+    """MSE of the frames averaged over ``scale`` x ``scale`` blocks: brightness and colour at long periods.
+
+    PSNR is an MSE, and on p28 ~95% of the restored frames' squared error sat in the QWT
+    low-pass band; every other image term is an L1, whose answer under an uncertain exposure
+    is the median brightness, not the mean that MSE -- and PSNR -- wants. Detail inside a block
+    averages out, so this term leaves the edges to the edge terms."""
+    return F.mse_loss(F.avg_pool2d(restored.float(), scale), F.avg_pool2d(clean.float(), scale))
+
+
 def phase2_reconstruction_loss(
     image_restored: torch.Tensor,
     image_clean: torch.Tensor,

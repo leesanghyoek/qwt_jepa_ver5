@@ -109,3 +109,26 @@ def test_amp_moves_the_metrics_by_float_noise_only(trained):
     assert abs(a["image_psnr_db"] - b["image_psnr_db"]) < 0.05
     assert abs(a["image_ssim"] - b["image_ssim"]) < 1e-3
     assert a["baseline_image_psnr_db"] == pytest.approx(b["baseline_image_psnr_db"])
+
+
+def test_brightness_probe_splits_frames_by_whether_their_light_was_touched(trained):
+    """tools/brightness_probe.py: low-frequency error of input and restored frames by group, with oracle floors."""
+    import math
+    import subprocess
+    import sys
+    manifest, checkpoint, root = trained
+    output = root / "brightness.json"
+    result = subprocess.run([sys.executable, "tools/brightness_probe.py", "--checkpoint", str(checkpoint),
+                             "--manifest", str(manifest), "--samples", "4", "--batch", "2", "--device", "cpu",
+                             "--output", str(output)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]
+    table = json.loads(output.read_text())
+    assert "tat ca" in table and table["tat ca"]["count"] == 4
+    assert sum(table[group]["count"] for group in ("khong doi sang", "doi sang") if group in table) == 4
+    for row in table.values():
+        assert all(math.isfinite(row[key]) for key in ("anh vao", "khoi phuc", "oracle chung", "oracle vung"))
+        assert 0.0 <= row["worse_than_input"] <= 1.0 and row["brightness_ratio"] > 0
+        # The per-region fit has more freedom than the whole-frame one: never worse.
+        assert row["oracle vung"] <= row["oracle chung"] + 1e-6
+    assert "te hon vao" in result.stdout
+

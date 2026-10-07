@@ -31,6 +31,7 @@ from .models.ijepa import CONTEXT_INPUTS, IJEPAPretrainingModel
 from .models.vit import INPUT_STANDARDIZATIONS, TOKEN_STRIDE
 from .models.decoders import PIXEL_IMAGE_DECODERS
 from .models.predictors import PREDICTOR_TYPES
+from .training.losses import LOWFREQ_SCALE
 from .training.phase1 import NOISE_DIRECTIONS
 
 
@@ -143,6 +144,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"phase2.backbone_weights must be one of {BACKBONE_WEIGHTS}")
     _validate_light(config)
     _validate_light_branch(config)
+    _validate_exposure(config)
     _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
@@ -636,6 +638,23 @@ def _validate_light_branch(config: dict[str, Any]) -> None:
                              "and leave at least one pixel after split_light_levels halvings")
 
 
+def _validate_exposure(config: dict[str, Any]) -> None:
+    """p30: phase2.split_exposure_stats and phase2.lowfreq_mse_weight. Absent: off, as before."""
+    phase2 = config["phase2"]
+    stats = phase2.get("split_exposure_stats", False)
+    if not isinstance(stats, bool):
+        raise ValueError("phase2.split_exposure_stats must be true or false")
+    if stats and not (phase2.get("image_decoder") == "split_color_edge"
+                      and (phase2.get("split_color_global", False) or phase2.get("split_light_branch", False))):
+        raise ValueError("phase2.split_exposure_stats feeds the global tone head (split_color_global) or the light "
+                         "branch (split_light_branch) of the split_color_edge decoder; turn one of them on")
+    weight = phase2.get("lowfreq_mse_weight", 0.0)
+    if not _nonnegative_number(weight):
+        raise ValueError("phase2.lowfreq_mse_weight must be a nonnegative number")
+    if weight > 0 and any(side % LOWFREQ_SCALE for side in config["data"]["image_size"]):
+        raise ValueError(f"phase2.lowfreq_mse_weight needs image sides divisible by {LOWFREQ_SCALE}")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -838,6 +857,8 @@ def build_decoders(
                 "scale": int(config["phase2"]["split_light_scale"]),
                 "levels": int(config["phase2"]["split_light_levels"]),
             } if config["phase2"].get("split_light_branch", False) else None,
+            # Absent before p30: the tone head and the light branch see no exposure statistics.
+            "exposure_stats": bool(config["phase2"].get("split_exposure_stats", False)),
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

@@ -1,0 +1,27 @@
+# p30_exposure: p28_steady (cung nhieu, cung phase 1 -> dung lai phase 1 cua p28), chi doi PHASE 2: decoder thay
+# thong ke phoi sang cua anh vao, va them MSE o tan so thap.
+#
+# Nguoi dung (08/10/2026): "loss khoi phuc van chua thuc su tot ... hay tim cach de p2 khoi phuc tot hon, tham chi la
+# thay doi kien truc". Bang chung (README p30_exposure):
+#  - p28 tren Kaggle: PSNR 22,35 -> 23,63 (+1,3 dB), SSIM 0,793 -> 0,860; duong net tot len o ca 3 dai chi tiet
+#    (-10..-21%), nhung ~95% sai so pixel con lai nam o dai thap tan LL (do sang, mau o chu ky dai): LL 0,272 -> 0,140,
+#    chi tiet gop 0,023 -> 0,019 (delta_report).
+#  - p26 (cung decoder): anh dung sang chi bi mo, PSNR 35,45 -> 26,49: model lam hong do sang anh khong can sua
+#    (LL x4,7), va latent day viec do (dat ZI = 0 thi 29,60).
+#  - Dau GlobalToneColor chi nhan trung binh va do lech cua anh vao (+ dac trung conv da lay trung binh): mat thong
+#    tin vung sang nhat -- dau hieu ro nhat cua phoi sang thieu. Thong ke tren 400 anh valid (khong train model): hoi
+#    quy tuyen tinh doan ti so do sang sach / nhieu tu trung binh + do lech R2 0,58; them phan vi, histogram, max
+#    R2 0,74; sai so tren anh KHONG bi doi sang 0,096 -> 0,044.
+#  - split_exposure_stats: phan vi do sang (1%..99,9%), histogram 16 bin, max moi kenh cua anh vao -> dau tone chung
+#    va ngu canh toan khung cua nhanh anh sang.
+#  - lowfreq_mse_weight 10: MSE giua anh khoi phuc va anh sach da trung binh khoi 8x8 px. PSNR la MSE; moi so hang anh
+#    khac la L1, ma L1 duoi phoi sang khong chac tra loi bang trung vi chu khong phai trung binh.
+# Chi doi phase 2: hash phase 1 bang p28, notebook dung lai outputs/p28_steady/phase1.
+extends: kaggle_steady.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p30_exposure
+
+phase2:
+  split_exposure_stats: true            # p28: khong co
+  lowfreq_mse_weight: 10.0              # p28: khong co

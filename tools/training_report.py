@@ -55,7 +55,7 @@ PHASE2_TERMS = ("loss", "image_l1", "image_detail_l1", "image_detail_modulus_l1"
                 "image_detail_energy", "image_detail_invisible_fraction",
                 "image_color_l1", "image_color_stats_l1", "image_edge_detail_l1", "image_edge_gradient_l1",
                 "image_edge_fft_l1", "image_edge_aux_l1", "image_perceptual",
-                "image_edge_stage1_l1", "image_edge_roughness",
+                "image_edge_stage1_l1", "image_edge_roughness", "image_light_l1", "image_lowfreq_mse",
                 "imu_accel_smooth_l1", "imu_gyro_smooth_l1", "imu_detail_l1",
                 "imu_detail_energy", "imu_accel_variation_l1", "imu_gyro_variation_l1",
                 "gradient_norm")

@@ -16,7 +16,7 @@ from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from ..models.color_edge import downsample
 from ..models.decoders import PIXEL_IMAGE_DECODERS
-from .losses import color_edge_split_loss, invisible_detail_fraction, phase2_reconstruction_loss
+from .losses import color_edge_split_loss, invisible_detail_fraction, lowfreq_mse, phase2_reconstruction_loss
 from .perceptual import PerceptualLoss
 from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
@@ -240,6 +240,12 @@ class Phase2Trainer:
                                          downsample(batch["image_clean"], int(self.phase["split_light_loss_scale"])))
                     loss = loss + float(self.phase["split_light_weight"]) * light_l1
                     parts["image_light_l1"] = light_l1
+                lowfreq_weight = float(self.phase.get("lowfreq_mse_weight", 0.0))
+                if lowfreq_weight > 0:
+                    # p30: PSNR's own (squared) error on brightness and colour at long periods.
+                    lowfreq = lowfreq_mse(restored["image"], batch["image_clean"])
+                    loss = loss + lowfreq_weight * lowfreq
+                    parts["image_lowfreq_mse"] = lowfreq
                 if self.perceptual is not None:
                     with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
                         perceptual = self.perceptual(restored["image"], batch["image_clean"])

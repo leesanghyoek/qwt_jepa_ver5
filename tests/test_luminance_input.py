@@ -128,7 +128,8 @@ def test_old_configs_build_rgb_and_the_key_changes_both_hashes():
                              "kaggle_illum.yaml", "kaggle_env.yaml",
                              "kaggle_local.yaml", "kaggle_ijepa.yaml",
                              "kaggle_ijepa_target.yaml", "kaggle_blur.yaml",
-                             "kaggle_steady.yaml", "kaggle_inputnorm.yaml"):  # p21-p29 extend p20
+                             "kaggle_steady.yaml", "kaggle_inputnorm.yaml",
+                             "kaggle_exposure.yaml"):  # p21-p30 extend p20
             assert "image_input" not in load_config(path)["model"], path
     plain, grey = _config(), _config("luminance")
     assert build_backbone(plain).image_transform.coeff_channels == 48
