@@ -12,9 +12,9 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p29_inputnorm — chuẩn hoá hệ số đầu vào ViT: loss phase 1 không còn bật lên** (config
+**p29_inputnorm — chuẩn hoá hệ số đầu vào ViT: loss phase 1 không còn bật lên; phase 1 nhanh gấp đôi** (config
 `configs/kaggle_inputnorm.yaml` → OUT `outputs/p29_inputnorm`).
-Bằng p28_steady, thêm `model.vit_input_standardize: global`. Log p28 trên Kaggle: loss 0,055 (update 500) → 0,15
+Bằng p28_steady, thêm `model.vit_input_standardize: global` và phase 1 batch 32 → 16. Log p28 trên Kaggle: loss 0,055 (update 500) → 0,15
 (660) → 0,10 (1000); người dùng: "lại không giảm mà tăng lên 1 đoạn". p28 kết luận cú bật không xoá được bằng lr,
 teacher hay batch — đúng, nhưng chưa tìm ra gốc. Đo trên máy (RTX 4060, `manifests/local`, nhiễu p27, batch 32):
 - **Gốc: đích phần lớn là vị trí.** R² vị trí = phần đầu ra teacher (đã LayerNorm, tức đích I-JEPA) giải thích được
@@ -59,12 +59,16 @@ teacher hay batch — đúng, nhưng chưa tìm ra gốc. Đo trên máy (RTX 40
 
 - **Tốc độ phase 1 trên Kaggle (p28):** 1,1 s/update, 0,83 s trong đó chờ dữ liệu — 4 vCPU không tạo kịp nhiễu cho 32
   ảnh (mỗi mẫu ~56 ms CPU trên máy: tạo nhiễu ảnh 29, đọc + thu nhỏ ảnh 17, nhiễu IMU 8; không có điểm nghẽn sửa nhanh
-  được mà không đổi dữ liệu). 2500 update ≈ 46 phút. Batch 16 + `global` nhanh gấp đôi, dao động 10%, latent ngang.
+  được mà không đổi dữ liệu). 2500 update ≈ 46 phút. Người dùng: "cho nó nhanh gấp đôi" → p29 dùng batch 16 (~23
+  phút): với `global` vẫn không bật, dao động 10% (batch 32: 7%), latent ngang (bảng trên). Phase 2 trên phase 1 batch
+  16 (1500 update, recipe p28): PSNR 23,87, SSIM 0,863, đường nét 0,853, vật nhỏ đúng chỗ 0,644, gồ ghề thừa 0,332 —
+  ngang hoặc hơn batch 32 (23,82 / 0,862 / 0,840 / 0,639 / 0,326). Phase 2 chịu GPU (chờ dữ liệu 0,00 s) nên cách này
+  không làm phase 2 nhanh hơn.
 - Bằng chứng: `tests/test_vit_input_standardize.py` (thiếu khoá: không có hệ số, hash và config cũ như trước; `global`
   một hệ số mỗi loại giữ tỉ lệ giữa các dải, `channel` mỗi kênh đúng RMS √(768 / fan-in); patch embedding khởi đầu
   0,7–1,5× vị trí; trên ảnh tối có phổ như ảnh chụp, R² vị trí 0,79 → 0,55 (`global`) → 0,42 (`channel`); teacher cùng
   hệ số; run CLI mới đo một lần, resume giữa chừng giữ hệ số, phase 2 đóng băng đúng hệ số đó; giá trị sai và CNN bị từ
-  chối; p29 = p28 + khoá này).
+  chối; p29 = p28 + khoá này + nửa batch phase 1).
 
 **p28_steady — phase 1 ổn định hơn, phase 2 học mạnh hơn và phạt độ nét cao hơn một chút** (config
 `configs/kaggle_steady.yaml` → OUT `outputs/p28_steady`).

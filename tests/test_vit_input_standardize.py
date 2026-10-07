@@ -9,7 +9,8 @@ and hash stays as it was; "global" gives each modality one gain, so the bands ke
 normalized pixels (fan-in 768), as large as the positions; on dim frames whose spectrum falls like a photo's
 position then explains much less of the target (channel least); the teacher gets the same gains; a fresh
 CLI run calibrates once and the checkpoint carries the gains through a resume into phase 2's frozen
-backbone; two DDP ranks calibrate alike and train what one process does; bad values fail; p29 is p28 with "global".
+backbone; two DDP ranks calibrate alike and train what one process does; bad values fail; p29 is p28 with
+"global" and half the phase-1 batch (twice as fast on Kaggle).
 """
 
 from __future__ import annotations
@@ -184,13 +185,15 @@ def test_bad_values_fail(value):
         validate_config(cnn)
 
 
-def test_p29_is_p28_with_the_key_alone():
+def test_p29_is_p28_with_the_key_and_a_halved_phase1_batch():
     p28, p29 = load_config("configs/kaggle_steady.yaml"), load_config("configs/kaggle_inputnorm.yaml")
     validate_config(p29)
     differ = {(section, key) for section in ("data", "model", "corruption", "phase1", "phase2", "monitor", "runtime")
               for key in {*p28.get(section, {}), *p29.get(section, {})}
               if p28.get(section, {}).get(key) != p29.get(section, {}).get(key)}
-    assert differ == {("model", "vit_input_standardize"), ("runtime", "output_dir")}
+    assert differ == {("model", "vit_input_standardize"), ("phase1", "batch_size"), ("runtime", "output_dir")}
     assert p29["model"]["vit_input_standardize"] == "global"
+    # Twice as fast on Kaggle's four CPUs: half the frames to corrupt per update, still a whole batch per GPU.
+    assert p29["phase1"]["batch_size"] * 2 == p28["phase1"]["batch_size"] and p29["phase1"]["batch_size"] % 2 == 0
     for phase in ("phase1", "phase2"):
         assert configuration_hash(p28, phase) != configuration_hash(p29, phase)

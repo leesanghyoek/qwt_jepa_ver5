@@ -13,6 +13,11 @@
 #    giam deu (khong bat), dao dong 7%; phase 2 1500 update tren may ngang p28 (PSNR 23,82 / 23,74, net 0,840 / 0,845).
 #    Da thu "channel" (moi kenh RMS bang nhau): kenh chi tiet -- va nhieu cam bien trong do -- nhan 15-50 lan, latent
 #    kem han (probe anh 42%, p28 58%); khong dung.
+#  - Nguoi dung: "cho no nhanh gap doi". Phase 1 tren Kaggle p28: 1,1 s/update, 0,83 s cho du lieu (4 vCPU khong tao
+#    kip nhieu cho 32 anh). Batch 32 -> 16: nua so anh moi update, ~23 phut thay vi ~46 cho 2500 update. Tren may voi
+#    global: van khong bat, dao dong 10% (batch 32: 7%), latent anh / Y / IMU rut duoc 50% / 59% / 80% (batch 32:
+#    51% / 59% / 75%); phase 2 1500 update tren no: PSNR 23,87, net 0,853 (batch 32: 23,82 / 0,840). Phase 2 chiu GPU
+#    (cho du lieu 0,00 s), khong nhanh hon nho cach nay.
 # Doi model -> train lai ca hai phase.
 extends: kaggle_steady.yaml
 
@@ -21,3 +26,6 @@ runtime:
 
 model:
   vit_input_standardize: global         # p28: khong co (he so vao ViT nguyen ban)
+
+phase1:
+  batch_size: 16                        # p28: 32 -- nhanh gap doi tren Kaggle, xem tren
