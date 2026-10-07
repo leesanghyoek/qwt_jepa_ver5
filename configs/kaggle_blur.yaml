@@ -1,0 +1,32 @@
+# p27_blur: p26_ijepa (I-JEPA chung, phase 2 tren context encoder), chi doi NHIEU: mo hon p26 mot chut va khong con
+# luon lam toi ca anh.
+#
+# Nguoi dung (07/10/2026), xem anh p26 tren Kaggle: "anh train chua duoc lam mo, dau ra chua net; vung toi co sang
+# hon, cac vung sang qua choi". Do tren 300 anh train voi nhieu cua p26 (= p25_local):
+#  - chi 47% anh co mo; lech tieu cu (36%) sigma trung binh 0,5 px -- o anh 256 gan nhu khong thay.
+#  - model lam sang ca anh von dung sang: D1 anh chi mo 35,45 -> 26,49 dB, sai so do sang (bang LL) gap ~5 lan.
+#    Ly do: 80% anh train bi lam toi va exposure_gain luon < 1 -> model hoc "luon lam sang".
+# Ban dau p27 mo manh (70% lech tieu cu, sigma 0,5-1,4 px); nguoi dung: "giam do mo cua p27 xuong nhung chi cao
+# hon p26 mot chut". Da thu them quang tan xa theo moi truong va vien tan sac ong kinh; nguoi dung bo: "train them cai
+# do vo nghia lam". Ban 45% lech tieu cu, sigma 0,3-0,9 px, thu nho 15% van mo qua; nguoi dung: "giam do mo cua p27
+# nhung van mo hon p26" -> 38%, sigma 0,3-0,8 px; roi "tang do mo len 1 chut xiu nho thoi".
+#  - Mo: lech tieu cu 30% -> 42% anh, sigma 0,3-0,7 -> 0,3-0,85 px; thu nho va mo chuyen dong giu nhu p26 (10%, 10%).
+#  - exposure_gain 0,5-0,9 -> 0,5-1,0 va anh moi truong trong 20% -> 35%: model phai tu nhan ra anh nao da du sang.
+#  - Nguoi dung: "giam loe sang cua anh lai, mong thoi, loe sang qua thi mat dac trung se khoi phuc" -- vung duoc chieu
+#    sang them (+1,5-3,5 stop, nen ve trang) trong nhu roi flash. illum_max_brighten_stops 0,75: moi cho sang them
+#    toi da +0,75 stop; vung toi giu nguyen. Do tren 200 anh train: pixel 'roi flash' (sang >= 1,6 lan va > 0,4)
+#    0,7% -> 0,1%, o 32 px sang nhat x2,12 -> x1,64 (p90; tat han anh sang khong deu: x1,53), chenh giua cac vung
+#    x2,20 -> x2,06 (tat han: x1,26).
+# Doi corruption -> train lai ca hai phase. Recipe phase 1 / phase 2 giu nhu p26 de so thang.
+extends: kaggle_ijepa.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p27_blur
+
+corruption:
+  image:
+    defocus_probability: 0.42           # p26: 0.3
+    defocus_sigma_px: [0.3, 0.85]       # p26: [0.3, 0.7]
+    exposure_gain: [0.5, 1.0]           # p26: [0.5, 0.9]
+    env_clear_probability: 0.35         # p26: 0.2
+    illum_max_brighten_stops: 0.75      # p26: khong co (tran 3 stop)

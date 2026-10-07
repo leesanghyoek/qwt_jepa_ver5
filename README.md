@@ -12,6 +12,73 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p27_blur — mờ hơn p26 một chút, không còn luôn làm tối, lóe sáng mỏng** (config `configs/kaggle_blur.yaml` → OUT
+`outputs/p27_blur`).
+Bằng p26_ijepa (I-JEPA chung, phase 2 trên context encoder), chỉ đổi nhiễu; recipe phase 1 / phase 2 giữ nguyên để so
+thẳng. Người dùng, xem ảnh p26 trên Kaggle: ảnh train chưa được làm mờ, đầu ra chưa nét; vùng tối sáng hơn nhưng vùng
+sáng quá chói.
+- **Đo trên p26** (300 ảnh train, nhiễu p25_local): chỉ 47% ảnh có mờ, lệch tiêu cự σ trung bình 0,5 px — gần như
+  không thấy ở 256; D1 trên ảnh chỉ mờ: ảnh vào đã 35,45 dB. Vùng sáng: nhiễu ít làm cháy (vùng bị đẩy sáng mạnh 0,23%
+  pixel, còn 78% tương phản; pixel mới gần trắng 0,34%), nhưng **model làm sáng cả ảnh vốn đúng sáng**: D1 ảnh chỉ mờ
+  35,45 → 26,49 dB, sai số độ sáng (băng LL) gấp khoảng 5 lần — 80% ảnh train bị làm tối và `exposure_gain` luôn < 1.
+- **Đổi mờ**, ba lần theo người dùng. Bản đầu mờ mạnh (70% lệch tiêu cự, σ 0,5–1,4 px; 30% thu nhỏ); "giảm độ mờ của
+  p27 xuống nhưng chỉ cao hơn p26 một chút" → 45%, σ 0,3–0,9 px, 15% thu nhỏ; "giảm độ mờ của p27 nhưng vẫn mờ hơn
+  p26" → 38%, σ 0,3–0,8 px, thu nhỏ về 10%; "tăng độ mờ lên 1 chút xíu nhỏ thôi" → nay lệch tiêu cự 30% → 42% ảnh,
+  σ 0,3–0,7 → 0,3–0,85 px; thu nhỏ và mờ chuyển động giữ như p26 (10%, 10%). Cùng 300 ảnh train:
+
+  | | p26 | p27 bản đầu | p27 bản hai | p27 bản ba | p27 |
+  |---|---|---|---|---|---|
+  | ảnh có mờ | 47% | 86% | 62% | 53% | 57% |
+  | σ lệch tiêu cự trung bình | 0,50 px | 0,94 px | 0,59 px | 0,54 px | 0,57 px |
+  | PSNR ảnh chỉ mờ (ảnh có mờ, trung vị) | 33,7 dB | 27,6 dB | 31,8 dB | 32,6 dB | 32,4 dB |
+- **Đổi độ sáng**: `exposure_gain` 0,5–0,9 → 0,5–1,0; ảnh môi trường trong 20% → 35%: ảnh bị làm tối > 15% từ 52%
+  xuống 36% (41% sau khi thêm trần làm sáng ở dưới).
+- **Lóe sáng mỏng** — người dùng: "giảm độ nhòa của ánh sáng lại, hiện tại nó quá sáng, trông như ăn 1 quả flash", "lóe
+  sáng quá thì mất đặc trưng sẽ khôi phục". Nguồn: các vùng được chiếu sáng thêm của ánh sáng không đều (±1,5–3,5 stop
+  mỗi vùng, cộng dải sáng và phần bù trung bình, trần cũ +3 stop) rồi nén mềm về trắng. Đo trên 200 ảnh train, tách
+  từng nguyên nhân: tắt ánh sáng không đều thì ô 32 px sáng nhất (p90) ×2,12 → ×1,53; phơi sáng về 0,5–0,9 hay dải
+  sáng 0–1,5 stop gần như không đổi; giảm cả `illum_strength` thì mất luôn vùng tối. Khoá mới
+  `corruption.image.illum_max_brighten_stops` (thiếu khoá: trần 3 stop như cũ, ảnh giống hệt từng bit; không xê dịch
+  lượt bốc nào): mọi chỗ sáng thêm tối đa bấy nhiêu stop, chỗ bị làm tối giữ nguyên. p27 đặt 0,75:
+
+  | trần làm sáng | +3 (cũ) | +1 | +0,75 | +0,5 | tắt ánh sáng không đều |
+  |---|---|---|---|---|---|
+  | pixel "rọi flash" (sáng ≥ 1,6 lần và > 0,4) | 0,7% | 0,1% | 0,1% | 0,1% | 0,0% |
+  | ô 32 px sáng nhất, p90 | ×2,12 | ×1,71 | ×1,64 | ×1,52 | ×1,53 |
+  | chênh giữa các vùng p90/p10 | ×2,20 | ×2,11 | ×2,06 | ×2,00 | ×1,26 |
+  | tương phản còn lại trong vùng sáng thêm | 0,77 | 0,79 | 0,78 | 0,56 | — |
+
+  +0,5 bắt đầu mất tương phản. Màu tím nhạt còn thấy ở vài ảnh là cân bằng trắng (lệch màu toàn ảnh, không làm sáng
+  thêm). Ảnh: `outputs/p27_flash_preview.png` (bốn frame lóe nặng nhất trong 300 ảnh, trước / sau; không vào git).
+- **Đã thử rồi bỏ**: quầng tán xạ quanh vùng sáng theo môi trường (trời trong / mù / sương-mưa, mỗi kênh màu loang một
+  độ rộng) và viền tán sắc ống kính (đỏ/lam lệch nhau về phía góc, viền tím ở mép sáng). Người dùng xem ảnh: "train
+  thêm cái đó vô nghĩa lắm" — không vào code.
+- Ảnh so sánh sạch / p26 / p27 trên cùng frame: `outputs/p27_blur_preview.png` (không vào git).
+- **Rút ngắn thời gian.** p26 trên 2 × T4: phase 1 12,7 phút, phase 2 77,7 phút (đã DDP 2 GPU, fp16), còn
+  `evaluate --protocol` chạy hơn 30 phút trên **1 GPU** mà không in gì. Đo ở máy: khi đánh giá, decoder ảnh phase 2
+  chiếm 51 ms/ảnh (dữ liệu 2 ms, chỉ số 7 ms, encoder 0,6 ms). Nên:
+  - `evaluate --scenarios a,b` (cần `--protocol`): một phần protocol, theo thứ tự protocol, đúng con số protocol đầy
+    đủ cho các kịch bản đó → notebook chia 10 kịch bản thành hai nửa, **mỗi GPU một tiến trình**, rồi gộp.
+  - `evaluate --amp`: fp16 như phase 2 lúc train; ở máy 51 → 41 ms/ảnh, chỉ số lệch ≤ 0,0005 dB PSNR so với fp32.
+  - `evaluate` in mỗi kịch bản và tiến độ mỗi khoảng 10%.
+  - Notebook mặc định đánh giá một kịch bản (nhiễu đầy đủ, cả tập test, = dòng `noisy_noisy` của protocol, khoảng
+    1/10 thời gian); `FULL_TEST = True` mới chạy protocol.
+  - Không đổi: tăng batch phase 2 lên 4 ảnh mỗi GPU hết bộ nhớ trên GPU 8 GB ở máy, chưa đo được trên T4, và đổi
+    batch là đổi recipe (p27 sẽ không còn so thẳng được với p26); batch khi đánh giá đổi 4 → 16 không nhanh hơn.
+- Bằng chứng: `tests/test_ijepa.py::test_p27_blurs_a_little_more_and_darkens_fewer` (p27 = p26 chỉ khác 5 khoá
+  nhiễu — thu nhỏ và mờ chuyển động giữ như p26 —, đổi cả hai hash; lượt bốc nhiễu thật: lệch tiêu cự nhiều hơn p26
+  4–15 điểm %, σ trung bình lớn hơn 0,02–0,1 px, ảnh môi trường trong và `exposure_gain` đổi đúng hướng);
+  `tests/test_brighten_ceiling.py` (thiếu khoá: ảnh và tham số y như cũ, ghi 3 cũng y như cũ; đặt khoá không xê dịch
+  lượt bốc nào; không chỗ nào sáng quá trần, chỗ tối và chỗ dưới trần giữ đúng giá trị; config cũ ghi đủ illum_* vẫn
+  hợp lệ; giá trị sai bị từ chối; p27 đặt 0,75);
+  `tests/test_training_report.py` (báo cáo có log train phase 1 và phase 2 theo update: 10 đoạn liên tiếp phủ cả run,
+  mỗi ô là trung vị của đoạn; loss tăng lại giữa run lộ ra; update bị bỏ không tính và được đếm; có lịch train cạnh
+  loss; run ngắn hơn 10 update thì mỗi update một dòng); `tests/test_evaluate_options.py` (một phần protocol cho đúng con số của protocol đầy đủ theo thứ tự protocol,
+  in từng kịch bản; `--scenarios` thiếu `--protocol` hay tên lạ bị từ chối; `--amp` chỉ lệch cỡ sai số float và được
+  ghi vào `evaluation_config.json`).
+- Chạy: notebook `qwt-jaco-jepa-ijepa.ipynb`, `RUN = 'p27_blur'` (mặc định). Thêm Cell 12b xem ảnh sạch / hư hại /
+  khôi phục. Đã chạy thử hết các cell ở máy, kể cả protocol chia hai tiến trình. Đổi nhiễu nên train lại cả hai phase.
+
 **p26_ijepa_target — phase 2 trên trọng số target encoder** (config `configs/kaggle_ijepa_target.yaml` → OUT
 `outputs/p26_ijepa_target`). Bằng p26_ijepa cộng đúng một khoá, `phase2.backbone_weights: target`; người dùng muốn so
 thẳng nên dùng encoder nào cho khôi phục.

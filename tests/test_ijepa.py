@@ -28,8 +28,8 @@ import torch.nn.functional as F
 import yaml
 
 from qjepa.cli import RESTART_EXIT_CODE, _synthetic_batch, main
-from qjepa.config import (IJEPA_ABSENT_TERMS, _validate_ijepa, build_backbone, build_phase1_model, load_config,
-                          seed_everything, serializable_config, validate_config)
+from qjepa.config import (IJEPA_ABSENT_TERMS, _validate_ijepa, build_backbone, build_corruptors, build_phase1_model,
+                          load_config, seed_everything, serializable_config, validate_config)
 from qjepa.data import ImuNormalizer
 from qjepa.distributed import spawn
 from qjepa.execution import IJEPAForward
@@ -325,6 +325,38 @@ def test_p26_is_p25_with_only_the_ijepa_keys_changed():
     # The grids every phase-2 decoder reads, as the CNN gave them.
     assert latent.ZI.shape == (1, 128, 16, 16) and latent.ZU.shape == (1, 128, 8)
     assert torch.equal(latent.ZI, latent.FI) and torch.equal(latent.ZU, latent.FU)
+
+
+def _draws(config_name, count=600):
+    """The image corruption parameters drawn for ``count`` frames of separate trajectories."""
+    image_corruptor, _ = build_corruptors(load_config(f"configs/{config_name}.yaml"))
+    return [image_corruptor._parameters("train", 0, f"trajectory/{index}", 0.0, "full") for index in range(count)]
+
+
+def test_p27_blurs_a_little_more_and_darkens_fewer():
+    p26, p27 = load_config("configs/kaggle_ijepa.yaml"), load_config("configs/kaggle_blur.yaml")
+    changed = {key for key in {*p26["corruption"]["image"], *p27["corruption"]["image"]}
+               if p26["corruption"]["image"].get(key) != p27["corruption"]["image"].get(key)}
+    # Downsample and motion blur stay p26's: only the defocus grows.
+    assert changed == {"defocus_probability", "defocus_sigma_px", "exposure_gain", "env_clear_probability",
+                       "illum_max_brighten_stops"}
+    for section in ("data", "model", "phase1", "phase2"):
+        assert p26[section] == p27[section], section
+    # Corruption is in both hashes: p27 retrains both phases.
+    for phase in ("phase1", "phase2"):
+        assert configuration_hash(p26, phase) != configuration_hash(p27, phase)
+    stats = {}
+    for name in ("kaggle_ijepa", "kaggle_blur"):
+        draws = [draw for draw in _draws(name) if not draw["clean"]]
+        defocus = [draw["defocus_sigma"] for draw in draws if draw["defocus"]]
+        stats[name] = {"rate": len(defocus) / len(draws), "sigma": sum(defocus) / len(defocus),
+                       "clear": sum(draw.get("env_clear", False) for draw in draws) / len(draws),
+                       "gain": max(draw["exposure_gain"] for draw in draws)}
+    old, new = stats["kaggle_ijepa"], stats["kaggle_blur"]
+    # The user: less blur than p27's first two tries, still more than p26's (measured 0.31 -> 0.42, 0.51 -> 0.58 px).
+    assert old["rate"] + 0.04 < new["rate"] < old["rate"] + 0.15
+    assert old["sigma"] + 0.02 < new["sigma"] < old["sigma"] + 0.1
+    assert new["clear"] > old["clear"] + 0.08 and old["gain"] <= 0.9 < 0.95 < new["gain"] <= 1.0
 
 
 def _run_until_done(arguments, last):

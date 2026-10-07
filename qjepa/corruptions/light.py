@@ -164,6 +164,8 @@ def draw_illumination_parameters(rng: np.random.Generator, cfg) -> dict[str, obj
              "blobs": blobs, "smudges": smudges if smudge_draw < cfg.illum_smudge_probability else []}
     if getattr(cfg, "illum_highlight_rolloff", False):    # chi khi bat: tham so cu giu nguyen
         drawn["rolloff"] = True
+    if getattr(cfg, "illum_max_brighten_stops", None) is not None:   # chi khi co khoa: tham so cu giu nguyen
+        drawn["max_brighten_stops"] = float(cfg.illum_max_brighten_stops)
     return drawn
 
 
@@ -180,7 +182,8 @@ def illumination_field(height: int, width: int, params: dict[str, object]) -> np
     for blob in params["blobs"]:
         distance = (yy - float(blob["y"])) ** 2 + (xx - float(blob["x"])) ** 2
         log2 = log2 + float(blob["stops"]) * np.exp(-distance / (2.0 * float(blob["sigma"]) ** 2))
-    field = np.exp2(np.clip(log2 - log2.mean(), -4.0, 3.0))
+    # Tran lam sang: ``max_brighten_stops`` neu co (vung sang mong, khong nhu roi flash), khong thi 3 stop nhu cu.
+    field = np.exp2(np.clip(log2 - log2.mean(), -4.0, float(params.get("max_brighten_stops", 3.0))))
     for smudge in params["smudges"]:
         dy, dx = yy - float(smudge["y"]), xx - float(smudge["x"])
         c, s = math.cos(float(smudge["angle"])), math.sin(float(smudge["angle"]))

@@ -139,6 +139,41 @@ def term_table(steps: list[dict], terms, title: str) -> None:
               f"{fmt(last)}{change(first, last)}")
 
 
+# Lich train di kem loss trong bang dien bien: doi theo update nen giai thich duoc loss doi.
+SCHEDULE_TERMS = ("learning_rate", "weight_decay", "teacher_momentum")
+
+
+def trajectory_table(steps: list[dict], terms, title: str, segments: int = 10, per_block: int = 6) -> None:
+    """Gia tri train theo dien bien: ``segments`` doan update lien tiep, moi o la trung vi cua doan.
+
+    Moi update nam trong dung mot doan, nen mot update nhieu khong quyet dinh con so va mot doi
+    huong giua run (loss tang lai, gradient vot) van lo ra -- dieu bang dau / thap nhat / cuoi bo qua."""
+    rows = [r for r in steps if not r.get("skipped")]
+    present = [t for t in (*terms, *SCHEDULE_TERMS)
+               if any(isinstance(r.get(t), (int, float)) and math.isfinite(r[t]) for r in rows)]
+    if not rows or not present:
+        return
+    count = min(segments, len(rows))
+    bounds = [round(i * len(rows) / count) for i in range(count + 1)]
+    chunks = [rows[bounds[i]:bounds[i + 1]] for i in range(count)]
+    skipped = [r for r in steps if r.get("skipped")]
+    print(f"\n  {title}")
+    print(f"  {len(rows)} update thành công chia {count} đoạn liên tiếp; mỗi ô là trung vị của đoạn."
+          + (f" {len(skipped)} update bị bỏ (không tính)." if skipped else ""))
+    label = 15
+    for start in range(0, len(present), per_block):
+        block = present[start:start + per_block]
+        widths = [max(12, len(term) + 2) for term in block]
+        print("\n  " + "update".ljust(label) + "".join(term.rjust(width) for term, width in zip(block, widths)))
+        for chunk in chunks:
+            first, last = chunk[0].get("successful_updates", "?"), chunk[-1].get("successful_updates", "?")
+            cells = []
+            for term, width in zip(block, widths):
+                values = [r[term] for r in chunk if isinstance(r.get(term), (int, float)) and math.isfinite(r[term])]
+                cells.append(fmt(median(values) if values else None, width))
+            print("  " + f"{first}–{last}".ljust(label) + "".join(cells))
+
+
 def sensitivity_section(steps: list[dict]) -> list[str]:
     """The Jacobian term, split by branch: image and IMU behave nothing alike."""
     live = [r for r in steps if r.get("encoder_sensitivity_weight", 0) > 0]
@@ -560,6 +595,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
     findings += phase_header("PHASE 1 — học latent", phase1_steps, phase1_checks)
     if phase1_steps:
         term_table(phase1_steps, PHASE1_TERMS, "Thành phần loss (trung vị 5% đầu và 5% cuối)")
+        trajectory_table(phase1_steps, PHASE1_TERMS, "Log train phase 1 — diễn biến theo update")
         findings += sensitivity_section(phase1_steps)
     findings += jepa_quality_section(phase1_steps, phase1_checks, reference)
     findings += latent_gate_section(phase1_checks, reference)
@@ -568,6 +604,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
     findings += phase_header("PHASE 2 — khôi phục", phase2_steps, phase2_checks)
     if phase2_steps:
         term_table(phase2_steps, PHASE2_TERMS, "Thành phần loss (trung vị 5% đầu và 5% cuối)")
+        trajectory_table(phase2_steps, PHASE2_TERMS, "Log train phase 2 — diễn biến theo update")
         overflows = [r["amp_overflow"] for r in phase2_steps if "amp_overflow" in r]
         if overflows:
             share = sum(overflows) / len(overflows)
@@ -581,7 +618,7 @@ BỐI CẢNH (cho người/agent đọc báo cáo này mà chưa biết dự án
         findings += validation_section(phase2_checks, args.max_rows)
 
     known = set(PHASE1_TERMS) | set(PHASE2_TERMS) | {
-        "successful_updates", "skipped", "reason", "learning_rate", "teacher_momentum",
+        "successful_updates", "skipped", "reason", "learning_rate", "teacher_momentum", "weight_decay",
         "encoder_source", "encoder_sensitivity_weight", "probe_clipped_fraction",
         "sensitivity_noise_gain", "sensitivity_signal_gain", "sensitivity_ratio",
         "sensitivity_valid_fraction", "jepa_image_normalized", "jepa_imu_normalized",

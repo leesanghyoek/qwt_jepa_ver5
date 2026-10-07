@@ -1,4 +1,5 @@
-"""Architecture figure of p26_ijepa (configs/kaggle_ijepa.yaml, qwt-jaco-jepa-ijepa.ipynb), as plain SVG.
+"""Architecture figure of p26_ijepa and p27_blur (configs/kaggle_ijepa.yaml, kaggle_blur.yaml;
+qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption, so one figure serves both.
 
 Same visual language as draw_architecture_imu.py (whose --local figure is p25_local), with
 what p26 changes: the backbone is ONE ViT over the image's and the IMU's wavelet
@@ -8,6 +9,11 @@ encoder (the online ViT, on the NOISY pair's context tokens only), one narrow Vi
 for the targets of both, and the EMA teacher on the CLEAN pair. The mask drawn in phase 1 is a real one: multiblock_masks with the
 config's settings. Phase 2 is p25's, less the encoder stages into NAFNet and the
 predictor's guess into ZI (a ViT has one resolution; I-JEPA's predictor needs masks).
+
+The figure says what restoration reads: the context encoder's output (ZI, ZU), the encoder
+frozen and run on every token of the noisy pair; the EMA teacher and the predictor only train
+it and are dropped after phase 1 (phase2.backbone_weights: target loads the teacher's weights
+into the encoder instead).
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg
 """
@@ -84,6 +90,13 @@ def badge(x, y, label):
     text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
 
 
+def dropped(x, y, label='bỏ sau phase 1'):
+    """A grey tag: this block only trains the encoder and does not reach restoration."""
+    width = 12 + 7 * len(label)
+    el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#78909C"/>')
+    text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
+
+
 def mid_right(b): x, y, w, h = b; return (x + w, y + h / 2)
 def mid_left(b):  x, y, w, h = b; return (x, y + h / 2)
 def mid_top(b):   x, y, w, h = b; return (x + w / 2, y)
@@ -91,14 +104,18 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 
 # ---------------- regions
-region(190, 150, 490, 320, 'bb', '① Backbone ViT — train ở phase 1, đóng băng ở phase 2')
+region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đóng băng ở phase 2')
 region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục (như p25)', right=True)
 region(190, 505, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
-text(W - 20, 26, 'p26_ijepa — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
+text(W - 20, 26, 'p26_ijepa · p27_blur — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
      size=15, weight='bold', color='#D81B60', anchor='end')
 text(W - 20, 44, 'MỘT ViT chung cho ảnh và IMU: attention giữa hai loại token là fusion · ngữ cảnh NHIỄU,'
-     ' teacher EMA SẠCH · nhiễu và phase 2 như p25_local', size=12, color='#AD1457', anchor='end')
+     ' teacher EMA SẠCH · nhiễu: p26 như p25_local, p27 mờ nhiều hơn', size=12, color='#AD1457', anchor='end')
+text(W - 20, 62, 'khôi phục dùng ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher EMA + predictor'
+     ' bỏ sau phase 1', size=12, weight='bold', color='#8E24AA', anchor='end')
+text(W - 20, 79, 'phase2.backbone_weights: target → nạp trọng số teacher EMA vào encoder thay thế',
+     size=11, color='#8E24AA', anchor='end', style='font-style="italic"')
 
 # ---------------- inputs and backbone
 img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'tối theo vùng'])
@@ -106,7 +123,8 @@ imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'])
 haar = node(210, 365, 135, 70, 'tf', 'Haar', ['12 × 64'])
 depth, heads, dim = MODEL["vit_depth"], MODEL["vit_heads"], MODEL["embedding_dim"]
-vit = node(370, 195, 200, 250, 'bb', 'ViT CHUNG', ['ảnh: patch 8 = 16 px', '→ 256 token', '',
+vit = node(370, 195, 200, 250, 'bb', 'CONTEXT ENCODER', ['ViT chung ảnh + IMU', '',
+                                                        'ảnh: patch 8 = 16 px', '→ 256 token', '',
                                                   'IMU: patch 8 = 16 mẫu', '→ 8 token', '',
                                                   f'264 token × {dim}', f'{depth} khối · {heads} head',
                                                   '+ loại token + vị trí'])
@@ -116,6 +134,10 @@ text(637, 320, 'ảnh ↔ IMU', size=12, weight='bold', color='#1E88E5')
 text(637, 335, '= fusion', size=12, weight='bold', color='#1E88E5')
 zi = node(705, 205, 110, 70, 'lat', 'ZI = FI', ['128 × 16 × 16'])
 zu = node(705, 365, 110, 70, 'lat', 'ZU = FU', ['128 × 8'])
+# What restoration reads: the encoder's output, ZI and ZU, from every token of the noisy pair.
+text(760, 303, 'ĐẦU RA ENCODER', size=11, weight='bold', color='#8E24AA')
+text(760, 318, 'mọi token nhiễu', size=11, color='#8E24AA')
+text(760, 333, '→ khôi phục ③', size=11, weight='bold', color='#8E24AA')
 el.append('<circle cx="190" cy="240" r="13" fill="#E8EAF6" stroke="#3949AB" stroke-width="2"/>')
 text(190, 245, 'Y', size=14, weight='bold', color='#3949AB')
 text(190, 196, 'tách màu', size=11, weight='bold', color='#3949AB')
@@ -191,13 +213,15 @@ arrow([mid_right(imu_ref), mid_left(imu_out)])
 
 # ---------------- phase 1: I-JEPA
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
-teach = node(205, 548, 180, 94, 'p1', 'Teacher EMA', ['ViT chung · cặp SẠCH', 'LayerNorm → đích', 'ở các khối đích'])
+teach = node(205, 548, 180, 94, 'p1', 'Teacher EMA', ['bản EMA của encoder', 'cặp SẠCH → LayerNorm', '= đích ở khối đích'])
+dropped(215, 646)
 loss1 = node(420, 548, 240, 94, 'loss', 'Loss I-JEPA', ['smooth L1(đoán, đích)', 'ảnh ½ + IMU ½',
                                                        'không VICReg · neo · Jacobian'])
 badge(574, 539, 'mới · I-JEPA')
 pred = node(705, 548, 170, 94, 'p1', 'Predictor chung',
             [f'ViT hẹp · {P1["ijepa_predictor_dim"]} kênh · {P1["ijepa_predictor_depth"]} khối',
              'ngữ cảnh ảnh + IMU', '+ mask token ở vị trí đích'], title_size=15)
+dropped(715, 646)
 arrow([mid_right(clean), mid_left(teach)])
 arrow([mid_right(teach), mid_left(loss1)], label='đích', lx=402, ly=586)
 arrow([mid_left(pred), mid_right(loss1)], label='đoán', lx=683, ly=586)
@@ -206,9 +230,9 @@ arrow([mid_bot(zu), (760, 548)], label='ZU', lx=752, ly=500, lanchor='end')
 el.append('<path d="M 815 262 L 829 262 L 829 393 A 7 7 0 0 1 829 407 L 829 548" '
           'fill="none" stroke="#455A64" stroke-width="2.2" marker-end="url(#ah)"/>')
 text(823, 470, 'ZI', size=13, color='#455A64', anchor='end', style='font-style="italic"')
-text(837, 482, 'token NGỮ CẢNH (ảnh + IMU) của cặp NHIỄU:', size=12, weight='bold', color='#455A64',
+text(837, 482, 'lúc train: encoder chỉ chạy trên token NGỮ CẢNH', size=12, weight='bold', color='#455A64',
      anchor='start')
-text(837, 497, 'ViT chung chỉ chạy trên các token này', size=12, color='#455A64', anchor='start')
+text(837, 497, 'lúc khôi phục: trên mọi token của cặp nhiễu', size=12, color='#455A64', anchor='start')
 # EMA: the teacher follows the online ViTs.
 el.append('<path d="M 470 445 L 470 522 L 375 522 L 375 548" fill="none" stroke="#F9A825" stroke-width="2" '
           'stroke-dasharray="6 4" marker-end="url(#ah-F9A825)"/>')

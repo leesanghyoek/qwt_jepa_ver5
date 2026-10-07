@@ -629,6 +629,21 @@ def _latent_gate(
     return not reasons, reasons
 
 
+# evaluate --protocol: (image mode, IMU mode) per scenario, in the order they run.
+PROTOCOL_SCENARIOS = {
+    "clean_clean": ("clean", "clean"),
+    "noisy_image_clean_imu": ("full", "clean"),
+    "clean_image_noisy_imu": ("clean", "full"),
+    "noisy_noisy": ("full", "full"),
+    "low_light_only": ("low_light_only", "clean"),
+    "blur_only": ("blur_only", "clean"),
+    "sensor_noise_only": ("sensor_noise_only", "clean"),
+    "imu_white_noise_only": ("clean", "white_noise_only"),
+    "imu_bias_only": ("clean", "bias_only"),
+    "imu_bandwidth_only": ("clean", "bandwidth_only"),
+}
+
+
 @torch.no_grad()
 def _evaluate_with_overlap(
     system: RestorationSystem,
@@ -641,8 +656,12 @@ def _evaluate_with_overlap(
     panels: int = 6,
     label: str = "evaluation",
     forward_model: torch.nn.Module | None = None,
+    progress: bool = False,
 ) -> dict[str, float | list[float] | int]:
-    """Final metrics: each physical IMU timestamp is counted once after merging."""
+    """Final metrics: each physical IMU timestamp is counted once after merging.
+
+    ``progress`` prints a line about every 10% of the batches: a whole test split
+    takes long, and a silent cell looks hung."""
     system.eval()
     trajectory_lengths: dict[str, int] = {}
     for sample in dataset.samples:
@@ -662,9 +681,15 @@ def _evaluate_with_overlap(
     frame_index = 0
     estimated_frames = min(len(dataset.samples), maximum_batches * getattr(loader, "batch_size", 1))
     panel_indices = set(np.linspace(0, max(0, estimated_frames - 1), min(panels, estimated_frames), dtype=int))
+    total_batches = min(maximum_batches, len(loader))
+    report_every = max(1, total_batches // 10)
+    started = time.perf_counter()
     for batch_index, raw in enumerate(loader):
         if batch_index >= maximum_batches:
             break
+        if progress and batch_index and batch_index % report_every == 0:
+            print(f"  {label}: {frame_index}/{estimated_frames} ảnh ({100 * batch_index // total_batches}%)"
+                  f" · {time.perf_counter() - started:.0f} s", flush=True)
         batch = _to_device(raw, device)
         inputs = (batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"])
         if forward_model is None:
@@ -1318,24 +1343,25 @@ def command_evaluate(args: argparse.Namespace) -> None:
         raise ValueError("--max-batches must be positive; omit it for the full split")
     if args.panels < 0:
         raise ValueError("--panels cannot be negative")
+    if args.scenarios is not None:
+        if not args.protocol:
+            raise ValueError("--scenarios picks among the --protocol scenarios; add --protocol")
+        picked = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+        unknown = sorted(set(picked) - set(PROTOCOL_SCENARIOS))
+        if not picked or unknown:
+            raise ValueError(f"--scenarios: unknown {unknown}; choose from {list(PROTOCOL_SCENARIOS)}")
     device = resolve_device(args.device or "auto")
     system, config = _system_from_phase2(args.checkpoint, device)
     execution = _configure_execution(config, args, device, use_saved_setting=False)
-    runner, _ = parallel_forward(RestorationForward(system), device, config["runtime"]["gpu_count"])
+    forward = RestorationForward(system)
+    # --amp: fp16 autocast as phase 2 trained with it; outputs and metrics stay fp32.
+    forward.amp = bool(args.amp) and device.type == "cuda"
+    runner, _ = parallel_forward(forward, device, config["runtime"]["gpu_count"])
     manifest, _ = _manifest(config, args.manifest)
     if args.protocol:
-        scenarios = {
-            "clean_clean": ("clean", "clean"),
-            "noisy_image_clean_imu": ("full", "clean"),
-            "clean_image_noisy_imu": ("clean", "full"),
-            "noisy_noisy": ("full", "full"),
-            "low_light_only": ("low_light_only", "clean"),
-            "blur_only": ("blur_only", "clean"),
-            "sensor_noise_only": ("sensor_noise_only", "clean"),
-            "imu_white_noise_only": ("clean", "white_noise_only"),
-            "imu_bias_only": ("clean", "bias_only"),
-            "imu_bandwidth_only": ("clean", "bandwidth_only"),
-        }
+        # In the protocol's order, whatever order --scenarios names them in.
+        scenarios = {name: modes for name, modes in PROTOCOL_SCENARIOS.items()
+                     if args.scenarios is None or name in picked}
     else:
         scenarios = {"requested": (args.image_mode, args.imu_mode)}
     results = {}
@@ -1345,12 +1371,12 @@ def command_evaluate(args: argparse.Namespace) -> None:
     write_json(output / "evaluation_config.json", {
         "checkpoint": str(Path(args.checkpoint).resolve()), "split": args.split,
         "manifest_hash": manifest["meta"]["manifest_hash"], "config": serializable_config(config),
-        "scenarios": scenarios, "max_batches": args.max_batches,
+        "scenarios": scenarios, "max_batches": args.max_batches, "amp": forward.amp,
         "validation_realization": config["data"]["validation_realization"],
         "evaluation_clean_probability": 0.0,
         "execution": execution,
     })
-    for name, (image_mode, imu_mode) in scenarios.items():
+    for number, (name, (image_mode, imu_mode)) in enumerate(scenarios.items(), start=1):
         dataset = _dataset(
             config,
             manifest,
@@ -1361,6 +1387,8 @@ def command_evaluate(args: argparse.Namespace) -> None:
             full_frame=bool(getattr(args, "full_frame", False)),
         )
         loader = _loader(config, dataset, config["phase2"]["batch_size"], train=False)
+        print(f"[{number}/{len(scenarios)}] {name}: ảnh {image_mode}, IMU {imu_mode} · {len(dataset)} mẫu",
+              flush=True)
         results[name] = _evaluate_with_overlap(
             system,
             loader,
@@ -1371,6 +1399,7 @@ def command_evaluate(args: argparse.Namespace) -> None:
             output=output / name, panels=args.panels,
             label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {name}",
             forward_model=runner,
+            progress=True,
         )
     scope = f"max-batches={args.max_batches}" if args.max_batches else "full split"
     evaluation_summary(output, results, label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {scope}")
@@ -1584,6 +1613,10 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--output", help="Directory for metrics, image/IMU panels and merged arrays")
     evaluate.add_argument("--panels", type=int, default=6, help="Image panels and IMU trajectory plots per scenario")
     evaluate.add_argument("--protocol", action="store_true", help="Evaluate all clean/noise/blur groups")
+    evaluate.add_argument("--scenarios",
+                          help="With --protocol: only these comma-separated scenarios (e.g. one half per GPU)")
+    evaluate.add_argument("--amp", action="store_true",
+                          help="fp16 autocast on CUDA, as a phase 2 trained with precision amp_fp16; metrics stay fp32")
     evaluate.add_argument("--full-frame", action="store_true",
                           help="With data.source_size: score whole source frames (e.g. 640x640), not training crops")
     evaluate.add_argument(

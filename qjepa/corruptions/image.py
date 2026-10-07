@@ -116,6 +116,10 @@ class LowLightImageCorruptionConfig:
     # of clipping, like a camera's highlight curve: lit areas get brighter but keep their
     # detail. Off: hard clip at the sensor, as before.
     illum_highlight_rolloff: bool = False
+    # Ceiling on how far the uneven light brightens any spot, in stops (blobs, gradient and the
+    # mean shift together). A brightened region past ~1 stop reads as a flash and the roll-off
+    # turns its detail milky. Absent: the old ceiling of 3 stops; darkening is untouched.
+    illum_max_brighten_stops: float | None = None
     # Fog / haze (light.apply_fog): I = J*t + A*(1 - t), t = exp(-density * depth) on a
     # synthetic depth (the dataset has none) that grows towards a random, tilted horizon,
     # with thicker and thinner patches; forward scattering softens J where the fog is
@@ -168,6 +172,9 @@ class LowLightImageCorruptionConfig:
             raise ValueError("illum_smudge_depth must stay below 1")
         if not isinstance(self.illum_highlight_rolloff, bool):
             raise ValueError("illum_highlight_rolloff must be true or false")
+        cap = self.illum_max_brighten_stops
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float)) or not 0 < cap <= 3):
+            raise ValueError("illum_max_brighten_stops must be in (0, 3] stops (absent: 3)")
         if self.illum_blobs[1] > 8 or self.illum_smudge_count[1] > 6:
             raise ValueError("illum_blobs must stay at most 8 and illum_smudge_count at most 6")
         for name in ("fog_probability", "env_clear_probability"):

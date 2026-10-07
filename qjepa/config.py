@@ -559,7 +559,7 @@ LIGHT_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig)
 ILLUM_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("illum_"))
 FOG_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("fog_"))
 # Optional switches inside a group: absent means the old behaviour, so they need not be written out.
-OPTIONAL_KEYS = ("illum_highlight_rolloff",)
+OPTIONAL_KEYS = ("illum_highlight_rolloff", "illum_max_brighten_stops")
 
 
 def _validate_light(config: dict[str, Any]) -> None:
