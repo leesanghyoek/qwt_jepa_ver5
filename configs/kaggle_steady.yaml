@@ -1,0 +1,37 @@
+# p28_steady: p27_blur (cung nhieu, cung kien truc), chi doi recipe train: phase 1 on dinh hon, phase 2 hoc manh hon
+# va phat do net cao hon mot chut.
+#
+# Nguoi dung (07/10/2026): "p1 loss giam roi tang, hay sua giup; p2 thay co kha quan ve thong tin hoc duoc nhung khoi
+# phuc chua co net, check lai kien truc p2, tang cac thong so hoc va phat len cao 1 chut".
+#  - Phase 1. Log p26: loss 0,45 -> 0,042 (update 550) -> 0,15 (790) roi dao dong 0,08-0,16 toi cuoi. Do tren may
+#    (p27, 2500 update, xem README p28_steady):
+#      * Cu bat sau warmup co o MOI bien the (lr 1e-4, teacher 0,99, ca hai): no la luc teacher EMA bat kip encoder
+#        da hoc va dich kho len (rank cua teacher tang), doi sieu tham so chi doi cho no xay ra som / muon.
+#      * Batch 8 rat nhieu: ba lan chay CUNG config ket thuc o loss 0,069 / 0,076 / 0,129, dao dong nua sau 15-18%.
+#        Batch 32: hai lan chay 0,078 / 0,085, dao dong 6%, sau update 700 giam deu toi cuoi; latent anh rut duoc
+#        58% (batch 8: 55%), Y 67% (64%), IMU 81% (87%).
+#    -> batch_size 8 -> 32 (toan cuc: 16 moi GPU khi DDP). Learning rate, warmup, teacher giu nhu p26.
+#  - Phase 2. Kien truc: latent ZI vao day nhanh duong net (NAFNet 16x16) va nhanh mau -- duong do khong dut; ViT chi
+#    co mot do phan giai nen khong co tang skip, chi tiet min den tu chinh anh hong. Log p26: gradient norm trung vi
+#    6,7 (dau) -> 8,1 (cuoi) ma gradient_clip_norm 5: GAN NHU MOI update bi cat, buoc hoc that nho hon lr 25-40%.
+#      * learning_rate 2e-4 -> 3e-4, gradient_clip_norm 5 -> 10.
+#      * Phat do net x1,5: chi tiet he so wavelet 2 -> 3, nang luong chi tiet 1 -> 1,5, duong net / gradient / pho
+#        FFT 1 -> 1,5, perceptual 0,5 -> 0,75. Giu phat go ghe (split_edge_smooth_weight 2): khong sinh soc gia.
+# Doi phase 1 -> train lai ca hai phase.
+extends: kaggle_blur.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p28_steady
+
+phase1:
+  batch_size: 32                        # p27: 8
+
+phase2:
+  learning_rate: 3.0e-4                 # p27: 2e-4
+  gradient_clip_norm: 10.0              # p27: 5
+  reconstruction_detail_weight: 3.0     # p27: 2
+  detail_energy_weight: 1.5             # p27: 1
+  split_edge_weight: 1.5                # p27: 1
+  split_gradient_weight: 1.5            # p27: 1
+  split_edge_fft_weight: 1.5            # p27: 1
+  perceptual_weight: 0.75               # p27: 0.5

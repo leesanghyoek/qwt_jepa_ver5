@@ -1,5 +1,6 @@
-"""Architecture figure of p26_ijepa and p27_blur (configs/kaggle_ijepa.yaml, kaggle_blur.yaml;
-qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption, so one figure serves both.
+"""Architecture figure of p26_ijepa, p27_blur and p28_steady (configs/kaggle_ijepa.yaml, kaggle_blur.yaml,
+kaggle_steady.yaml; qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption and p28 only the
+training recipe, so one figure serves all three; its numbers come from p28's config, the notebook's default run.
 
 Same visual language as draw_architecture_imu.py (whose --local figure is p25_local), with
 what p26 changes: the backbone is ONE ViT over the image's and the IMU's wavelet
@@ -27,8 +28,10 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG = load_config(REPO / "configs/kaggle_ijepa.yaml")
-P1, MODEL = CONFIG["phase1"], CONFIG["model"]
+CONFIG = load_config(REPO / "configs/kaggle_steady.yaml")
+P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
+# p28 against p27: what the recipe line of the phase-2 loss box reports.
+P2_BEFORE = load_config(REPO / "configs/kaggle_blur.yaml")["phase2"]
 # A typical draw (context 40% of the tokens; median 42%, p10-p90 33-51% over 400 draws) whose four
 # target blocks barely overlap (6%; median 32%), so each block can be seen.
 MASK_SEED = 382
@@ -108,10 +111,11 @@ region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đ�
 region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục (như p25)', right=True)
 region(190, 505, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
-text(W - 20, 26, 'p26_ijepa · p27_blur — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
+text(W - 20, 26, 'p26_ijepa · p27_blur · p28_steady — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
      size=15, weight='bold', color='#D81B60', anchor='end')
 text(W - 20, 44, 'MỘT ViT chung cho ảnh và IMU: attention giữa hai loại token là fusion · ngữ cảnh NHIỄU,'
-     ' teacher EMA SẠCH · nhiễu: p26 như p25_local, p27 mờ nhiều hơn', size=12, color='#AD1457', anchor='end')
+     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27, p28 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
+     anchor='end')
 text(W - 20, 62, 'khôi phục dùng ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher EMA + predictor'
      ' bỏ sau phase 1', size=12, weight='bold', color='#8E24AA', anchor='end')
 text(W - 20, 79, 'phase2.backbone_weights: target → nạp trọng số teacher EMA vào encoder thay thế',
@@ -215,7 +219,8 @@ arrow([mid_right(imu_ref), mid_left(imu_out)])
 clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
 teach = node(205, 548, 180, 94, 'p1', 'Teacher EMA', ['bản EMA của encoder', 'cặp SẠCH → LayerNorm', '= đích ở khối đích'])
 dropped(215, 646)
-loss1 = node(420, 548, 240, 94, 'loss', 'Loss I-JEPA', ['smooth L1(đoán, đích)', 'ảnh ½ + IMU ½',
+loss1 = node(420, 548, 240, 94, 'loss', 'Loss I-JEPA', ['smooth L1(đoán, đích)',
+                                                       f'ảnh ½ + IMU ½ · batch {P1["batch_size"]}',
                                                        'không VICReg · neo · Jacobian'])
 badge(574, 539, 'mới · I-JEPA')
 pred = node(705, 548, 170, 94, 'p1', 'Predictor chung',
@@ -270,12 +275,16 @@ text(GX + 16 * CELL + 10, GY + 40, 'IMU: cùng cách,', size=11, color='#546E7A'
 text(GX + 16 * CELL + 10, GY + 54, 'đoạn trên 8 token', size=11, color='#546E7A', anchor='start')
 
 # ---------------- phase 2 losses
-loss2 = node(1150, 528, 350, 150, 'loss', 'Loss phase 2', [
+loss2 = node(1150, 528, 350, 168, 'loss', 'Loss phase 2', [
     'ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)',
     'màu: L1 Cb/Cr + thống kê màu từng ảnh',
     'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
     'ánh sáng (H): L1 giữa J và ảnh sạch ở 32²', ''])
-text(1325, 654, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
+text(1325, 663, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
+# p28's recipe against p27's: the sharpness penalties, the gradient clip and the learning rate.
+text(1325, 686, (f'p28: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
+                 f'{P2["gradient_clip_norm"]:g}').replace('.', ',') + f' · lr {P2["learning_rate"]:.0e}'.replace('e-0', 'e-'),
+     size=12, weight='bold', color='#D81B60')
 arrow([(1325, 528), (1325, 474)], color='#D81B60', dash='6 4', width=2)
 text(1333, 498, 'train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 text(1333, 513, '25% cuối thêm backbone', size=12, color='#D81B60', anchor='start', style='font-style="italic"')

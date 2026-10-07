@@ -12,6 +12,68 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p28_steady — phase 1 ổn định hơn, phase 2 học mạnh hơn và phạt độ nét cao hơn một chút** (config
+`configs/kaggle_steady.yaml` → OUT `outputs/p28_steady`).
+Bằng p27_blur (cùng nhiễu, cùng kiến trúc), chỉ đổi recipe train. Người dùng: "p1 loss giảm rồi tăng, hãy sửa giúp;
+p2 thấy có khả quan về thông tin học được nhưng khôi phục chưa có nét, check lại kiến trúc p2, tăng các thông số học và
+phạt lên cao 1 chút". Đo trên máy (RTX 4060, `manifests/local`, nhiễu p27, phase 1 2500 update như notebook):
+- **Phase 1 — vì sao loss giảm rồi tăng.** Log p26: 0,45 → 0,042 (update 550) → 0,15 (790), rồi dao động 0,08–0,16 tới
+  cuối. Thử bốn biến thể, loss trung vị theo đoạn 100 update:
+
+  | | đáy sớm | bật lên trong 1000 update sau | loss cuối |
+  |---|---|---|---|
+  | p27 (lr 2e-4, teacher 0,996 → 1, batch 8) | 0,079 (401–500) | ×1,29 | 0,069 |
+  | teacher bắt đầu 0,99 | 0,074 (301–400) | ×1,63 | 0,101 |
+  | lr 1e-4 | 0,082 (601–700) | ×1,79 | 0,090 |
+  | cả hai | 0,088 (401–500) | ×1,61 | 0,149 |
+
+  Cú bật có ở **mọi** biến thể; teacher nhanh hơn đưa nó sớm hơn, lr thấp hơn đưa nó muộn hơn. Đó là lúc teacher EMA
+  (trễ ~250 update = 10% run; bài báo 0,13%) bắt kịp encoder đã học: đích hết là đặc trưng của teacher ngẫu nhiên lúc
+  khởi tạo (dễ đoán) và thành đặc trưng thật (rank teacher ảnh ×0,56 → ×0,82 so với khởi tạo, update 1000 → 2500).
+  Đích khó lên chứ model không tệ đi. Thử chuẩn hoá loss (÷ loss của token hằng theo batch, rồi theo từng ảnh) để
+  thấy tiến bộ thật: không dùng được — bank validation là chuỗi frame cùng trajectory nên chuẩn theo batch thổi phồng
+  tỉ số (>1), chuẩn theo ảnh thì mẫu số đã lộ đáp án; không giữ trong code.
+- **Phase 1 — dao động là do batch 8.** Ba lần chạy CÙNG config p27 (GPU không tất định) kết thúc ở 0,069 / 0,076 /
+  0,129; dao động nửa sau 15–18% trung vị. Batch 32 (cùng lr, warmup, teacher), hai lần chạy:
+
+  | | loss cuối | dao động nửa sau | ảnh rút được | Y | IMU |
+  |---|---|---|---|---|---|
+  | batch 8 | 0,069 / 0,076 / 0,129 | 15–18% | 55% | 64% | 87% |
+  | batch 32 | 0,078 / 0,085 | 6% | 58% / 58% | 67% / 66% | 81% / 81% |
+
+  Cú bật ngắn ở update 500–700 vẫn còn (0,089 → 0,121), sau đó loss giảm đều tới cuối. "Rút được" = phần thông tin
+  về ảnh / IMU sạch mà hồi quy tuyến tính lấy lại được từ latent của đầu vào NHIỄU (`tools/latent_probe.py`, 6000
+  mẫu valid). → `phase1.batch_size` 8 → 32 (toàn cục, 16 mỗi GPU khi DDP). Phase 1 trên Kaggle sẽ lâu hơn p26 (12,7
+  phút) vì gấp 4 số ảnh phải tạo nhiễu.
+- **Phase 2 — kiến trúc.** Latent ZI vào đáy nhánh đường nét (NAFNet, 16×16 — `NAFNetBranch.latent`) và nhánh màu:
+  đường đó không đứt. ViT chỉ có một độ phân giải nên không có tầng skip; chi tiết mịn đến từ chính ảnh hỏng. Log p26:
+  gradient norm trung vị 6,7 (đầu) → 8,1 (cuối) mà `gradient_clip_norm` 5 — gần như mọi update bị cắt, bước học thật
+  nhỏ hơn lr 25–40%.
+- **Phase 2 — đổi**: `learning_rate` 2e-4 → 3e-4, `gradient_clip_norm` 5 → 10; phạt độ nét ×1,5: chi tiết hệ số
+  wavelet 2 → 3, năng lượng chi tiết 1 → 1,5, đường nét / gradient / phổ FFT 1 → 1,5, perceptual 0,5 → 0,75; giữ
+  phạt gồ ghề 2. So trên cùng checkpoint phase 1 batch 32, 1500 update mỗi bên, perceptual tắt cả hai (máy không có
+  torchvision):
+
+  | validation | ảnh vào | recipe p27 | recipe p28 |
+  |---|---|---|---|
+  | PSNR (dB) | 25,34 | 23,55 | 23,74 |
+  | SSIM | 0,820 | 0,860 | 0,864 |
+  | đường nét 4–16 px (1 = như sạch) | 0,645 | 0,834 | 0,845 |
+  | đường nét đúng chỗ | 0,762 | 0,882 | 0,890 |
+  | vật nhỏ 2–4 px đúng chỗ | 0,530 | 0,631 | 0,642 |
+  | sọc 2 px | 0,151 | 0,150 | 0,159 |
+  | gồ ghề thừa ↓ | 0,424 | 0,356 | 0,328 |
+  | accel / gyro RMSE | 0,869 / 0,089 | 0,722 / 0,053 | 0,706 / 0,051 |
+
+  Update bị cắt gradient 16% (trần 5) → 9% (trần 10). Cần để ý: với nhiễu p27 ảnh vào đã 25,3 dB, nên sau 1500 update
+  cả hai recipe còn DƯỚI ảnh vào về PSNR (SSIM, độ nét đã vượt) — model vẫn chỉnh cả ảnh vốn đúng sáng; run 5000
+  update trên Kaggle phải cho thấy PSNR vượt ảnh vào.
+- Hình kiến trúc (`docs/kien_truc_ijepa.svg`, đầu notebook) đọc số từ config p28: batch phase 1 trong ô loss I-JEPA,
+  dòng recipe phase 2 (phạt nét ×1,5 · cắt gradient ở 10 · lr 3e-4) dưới ô loss phase 2. Kiến trúc không đổi.
+- Bằng chứng: `tests/test_steady_config.py` (p28 = p27 chỉ khác batch phase 1, lr, trần cắt gradient và các trọng
+  số độ nét của phase 2; batch là batch toàn cục chia đều 2 GPU, ≥ 8 cho cổng latent; mọi trọng số độ nét tăng đúng
+  ×1,5, phạt gồ ghề giữ nguyên; đổi cả hai hash).
+
 **p27_blur — mờ hơn p26 một chút, không còn luôn làm tối, lóe sáng mỏng** (config `configs/kaggle_blur.yaml` → OUT
 `outputs/p27_blur`).
 Bằng p26_ijepa (I-JEPA chung, phase 2 trên context encoder), chỉ đổi nhiễu; recipe phase 1 / phase 2 giữ nguyên để so
