@@ -41,7 +41,7 @@ from .data import (
     write_manifest,
 )
 from .data.dataset import load_rgb
-from .corruptions.image import degradation_vector
+from .corruptions.image import brightness_stops, degradation_vector
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
 from .evaluation.reporting import (
@@ -127,6 +127,7 @@ def _dataset(
     sensor_reference: bool = False,
     hflip_probability: float = 0.0,
     full_frame: bool = False,
+    brightness_target: bool = False,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -149,6 +150,7 @@ def _dataset(
         hflip_probability=hflip_probability,
         source_size=tuple(config["data"]["source_size"]) if config["data"].get("source_size") else None,
         full_frame=full_frame,
+        brightness_target=brightness_target,
     )
 
 
@@ -163,8 +165,11 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
     # Only phase 1's Jacobian reads the frame without grain; rendering it costs a readout.
     sensor_reference = (phase == "phase1" and bool(sensitivity.get("enabled", False))
                         and sensitivity.get("noise_direction", "corruption") == "sensor_noise")
+    # Only phase 2's relight loss reads the corruption's stop map (phase2.split_relight).
+    brightness_target = phase == "phase2" and bool(config["phase2"].get("split_relight", False))
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
-                    hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0, **kwargs)
+                    hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
+                    brightness_target=brightness_target, **kwargs)
 
 
 def _loader(
@@ -1520,7 +1525,7 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
     yy, xx = np.mgrid[0:height, 0:width]
     image_corruptor, imu_corruptor = build_corruptors(config)
     clean_images, noisy_images, clean_imus, noisy_imus = [], [], [], []
-    noise_free_images, degradations = [], []
+    noise_free_images, degradations, stop_maps = [], [], []
     timestamps = np.arange(length, dtype=np.float64) * 0.01
     for sample in range(batch_size):
         clean = np.stack(
@@ -1548,6 +1553,7 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
         )
         noise_free_images.append(torch.from_numpy(noise_free.transpose(2, 0, 1)))
         degradations.append(torch.from_numpy(degradation_vector(image_parameters)))
+        stop_maps.append(torch.from_numpy(brightness_stops(image_parameters, height, width))[None])
         noisy_imu, _ = imu_corruptor.window(
             imu_clean,
             time,
@@ -1570,6 +1576,7 @@ def _synthetic_batch(config: dict[str, Any]) -> dict[str, Any]:
         "imu_times": torch.from_numpy(timestamps).float().repeat(batch_size, 1),
         "image_noise_free": torch.stack(noise_free_images).float(),
         "image_degradation": torch.stack(degradations).float(),
+        "image_stops": torch.stack(stop_maps).float(),
         "sample_id": [f"synthetic-{index}" for index in range(batch_size)],
     }
 

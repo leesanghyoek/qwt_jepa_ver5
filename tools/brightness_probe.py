@@ -10,6 +10,8 @@ Moc oracle (khong phai model, chi de biet tran):
   * oracle chung: biet dung he so a, b moi kenh cho CA anh (sach ~ a * vao + b, binh phuong toi thieu);
   * oracle vung: nhu tren, rieng cho tung vung 4 x 4.
 "sang / sach": do sang trung binh anh khoi phuc chia anh sach; > 1 la lam sang qua, < 1 la con toi.
+Model co ban do stop (p32, phase2.split_relight): them "stop doan" = L1 (stop) giua ban do model doan va ban do that
+cua buoc nhieu (corruptions.image.brightness_stops), canh "|stop that|" = L1 cua viec doan 0 khap noi.
 
     python3 tools/brightness_probe.py --checkpoint <phase2 .pt> --manifest <manifest> [--samples 512] [--amp]
 """
@@ -29,11 +31,13 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _manifest, _system_from_phase2  # noqa: E402
+from qjepa.corruptions.image import brightness_stops  # noqa: E402
 from qjepa.data import collate_paired  # noqa: E402
 from qjepa.execution import RestorationForward  # noqa: E402
 
 GROUPS = ("khong doi sang", "doi sang", "tat ca")
 COLUMNS = ("anh vao", "khoi phuc", "oracle chung", "oracle vung")
+STOP_COLUMNS = ("stop doan", "|stop that|")
 LUMA = torch.tensor([0.299, 0.587, 0.114]).view(3, 1, 1)
 
 
@@ -87,8 +91,9 @@ def main() -> None:
             collated = collate_paired(samples)                     # IMU [L, 6] per sample -> [B, 6, L]
             batch = {key: collated[key].to(device) for key in ("image_noisy", "imu_noisy_phys", "image_time",
                                                                 "imu_times")}
-            restored = forward(batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"],
-                               batch["imu_times"])["image"].float().clamp(0, 1).cpu()
+            outputs = forward(batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"])
+            restored = outputs["image"].float().clamp(0, 1).cpu()
+            stops = outputs["image_stops"].float().cpu() if "image_stops" in outputs else None
             for k, sample in enumerate(samples):
                 params = sample["corruption"]["image"]
                 relit = bool(params.get("low_light")) or bool(params.get("illumination"))
@@ -96,25 +101,33 @@ def main() -> None:
                 row = {"anh vao": rmse(noisy, clean), "khoi phuc": rmse(out, clean),
                        "oracle chung": oracle(noisy, clean, 1), "oracle vung": oracle(noisy, clean, 4),
                        "sang / sach": float((out * LUMA).sum(0).mean() / (clean * LUMA).sum(0).mean().clamp_min(1e-3))}
+                if stops is not None:
+                    truth = torch.from_numpy(brightness_stops(params, *sample["image_noisy"].shape[-2:]))[None, None]
+                    truth = F.adaptive_avg_pool2d(truth, stops.shape[-2:])[0]
+                    row.update({"stop doan": float((stops[k] - truth).abs().mean()), "|stop that|": float(truth.abs().mean())})
                 for group in ("doi sang" if relit else "khong doi sang", "tat ca"):
                     for name, value in row.items():
                         values[group][name].append(value)
     table = {}
     print(f"{len(indices)} anh {args.split}, nhieu day du (fixed realization). RMSE tan so thap (sRGB, khoi 8x8 px), "
           "thap hon la tot.")
-    print(f"{'nhom':<16}{'so anh':>7}" + "".join(f"{c:>14}" for c in COLUMNS) + f"{'te hon vao':>12}{'sang / sach':>13}")
+    stop_columns = [c for c in STOP_COLUMNS if values["tat ca"].get(c)]
+    print(f"{'nhom':<16}{'so anh':>7}" + "".join(f"{c:>14}" for c in COLUMNS) + f"{'te hon vao':>12}{'sang / sach':>13}"
+          + "".join(f"{c:>13}" for c in stop_columns))
     for group in GROUPS:
         rows = values[group]
         if not rows:
             continue
         worse = float(np.mean(np.array(rows["khoi phuc"]) > np.array(rows["anh vao"])))
-        table[group] = {**{c: float(np.mean(rows[c])) for c in COLUMNS}, "count": len(rows["anh vao"]),
+        table[group] = {**{c: float(np.mean(rows[c])) for c in (*COLUMNS, *stop_columns)}, "count": len(rows["anh vao"]),
                         "worse_than_input": worse, "brightness_ratio": float(np.median(rows["sang / sach"]))}
         print(f"{group:<16}{len(rows['anh vao']):>7}" + "".join(f"{table[group][c]:>14.4f}" for c in COLUMNS)
-              + f"{100 * worse:>11.0f}%{table[group]['brightness_ratio']:>13.3f}")
+              + f"{100 * worse:>11.0f}%{table[group]['brightness_ratio']:>13.3f}"
+              + "".join(f"{table[group][c]:>13.3f}" for c in stop_columns))
     print("\nDoc: 'khong doi sang' te hon vao nhieu -> model lam hong do sang anh dung sang (sua duoc: p30).\n"
           "     'doi sang' khoi phuc gan oracle chung -> da doan dung phoi sang ca anh; xa -> con doan sai.\n"
-          "     oracle vung << oracle chung -> phan lon loi la anh sang khong deu theo vung.")
+          "     oracle vung << oracle chung -> phan lon loi la anh sang khong deu theo vung.\n"
+          "     stop doan << |stop that| -> model doan dung vung nao bi toi/sang bao nhieu (p32).")
     if args.output:
         Path(args.output).write_text(json.dumps(table, indent=2), encoding="utf-8")
 

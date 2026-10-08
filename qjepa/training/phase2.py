@@ -15,7 +15,7 @@ from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from ..models.color_edge import downsample
-from ..models.decoders import PIXEL_IMAGE_DECODERS
+from ..models.decoders import PIXEL_IMAGE_DECODERS, RELIGHT_STOP_RANGE
 from .losses import LOWFREQ_SCALE, color_edge_split_loss, invisible_detail_fraction, lowfreq_mse, phase2_reconstruction_loss
 from .perceptual import PerceptualLoss
 from .phase1 import _finite_gradients, _to_device
@@ -246,6 +246,16 @@ class Phase2Trainer:
                                          downsample(batch["image_clean"], int(self.phase["split_light_loss_scale"])))
                     loss = loss + float(self.phase["split_light_weight"]) * light_l1
                     parts["image_light_l1"] = light_l1
+                if "image_stops" in restored and self.phase.get("split_relight", False):
+                    # p32: the predicted stop map against the corruption's own, L1 in stops.
+                    if "image_stops" not in batch:
+                        raise KeyError("phase2.split_relight needs batch['image_stops'] (the training dataset's "
+                                       "brightness_target)")
+                    predicted = restored["image_stops"]
+                    target = F.adaptive_avg_pool2d(batch["image_stops"], predicted.shape[-2:]).clamp(*RELIGHT_STOP_RANGE)
+                    stops_l1 = F.l1_loss(predicted, target)
+                    loss = loss + float(self.phase["split_relight_weight"]) * stops_l1
+                    parts["image_stops_l1"] = stops_l1
                 lowfreq_weight = float(self.phase.get("lowfreq_mse_weight", 0.0))
                 if lowfreq_weight > 0:
                     # p30: PSNR's own (squared) error on brightness and colour at long periods.

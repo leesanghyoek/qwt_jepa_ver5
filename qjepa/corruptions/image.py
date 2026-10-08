@@ -17,7 +17,7 @@ from PIL import Image
 from scipy import ndimage
 
 from .light import (apply_light, draw_fog_parameters, draw_illumination_parameters, draw_light_parameters,
-                    resize_channels)
+                    illumination_field, resize_channels)
 from .motion import imu_blur_kernel
 from .rng import generator
 
@@ -314,6 +314,33 @@ def degradation_vector(params: dict[str, object]) -> np.ndarray:
         if params.get("jpeg"):
             vector[7] = (100.0 - float(params["jpeg_quality"])) / 100.0
     return vector
+
+
+# sRGB ~ (tuyen tinh)^(1/2.2): mot he so k nhan tren sRGB la k^2.2 tren anh sang tuyen tinh.
+SRGB_EXPONENT = 2.2
+
+
+def brightness_stops(params: dict[str, object], height: int, width: int) -> np.ndarray:
+    """Stops [H,W] the corruption moved each point's linear light by (negative = darker), float32.
+
+    What phase2.split_relight learns to undo. The uneven light (light.illumination_field)
+    multiplies linear light; the low-light stage then multiplies sRGB by the vignette and
+    exposure_gain and raises it to tone_gamma, which scales every stop before it by gamma.
+    Left to the bilateral grid: white balance (colour, not brightness), black level, and
+    the tone curve gamma bends. Lamps and fog add light rather than scale it: not here.
+    On p31's validation frames, dividing the noisy frame by these stops and fitting one
+    affine per channel leaves 0.031 of 0.225 low-frequency RMSE (4 x 4 regional oracle: 0.050).
+    """
+    stops = np.zeros((height, width), dtype=np.float32)
+    if params.get("clean"):
+        return stops
+    if params.get("illumination"):
+        field = illumination_field(height, width, params["illumination_params"])
+        stops += np.log2(np.maximum(field, 1e-6))
+    if active_stages(params)[1]:
+        sensor = _vignette(height, width, float(params["vignette_strength"]))[..., 0] * float(params["exposure_gain"])
+        stops = float(params["tone_gamma"]) * (stops + SRGB_EXPONENT * np.log2(sensor))
+    return stops.astype(np.float32)
 
 
 class LowLightImageCorruptor:

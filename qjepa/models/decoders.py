@@ -488,6 +488,89 @@ class BilateralGridTone(nn.Module):
             return apply_affine(sliced, image).clamp(0.0, 1.0)
 
 
+# phase2.split_relight: the stops the relight may apply. The loss sees the map unbounded.
+RELIGHT_STOP_RANGE = (-8.0, 2.0)
+_LUMA_709 = (0.2126, 0.7152, 0.0722)
+
+
+class RelightStops(nn.Module):
+    """Undo the uneven light: predict, in stops, how far the corruption moved each pixel's light (p32).
+
+    p31's grid could only learn brightness through its affines' slopes, and a slope's gradient
+    in a dark region is that region's own small value: dark areas came out lifted towards grey
+    instead of relit, while frames exposed right came out changed (brightness_probe on p31: 98%
+    of them worse than the input). Here a small U-Net reads the frame at ``size`` px -- sRGB,
+    log luminance, pixel coordinates (vignette, gradients), the JEPA latent at its 16 x 16
+    level, the exposure statistics in its global path -- and predicts the stop map, supervised
+    directly by corruptions.image.brightness_stops (phase2.split_relight_weight, L1 in stops;
+    0 everywhere on a frame nobody darkened). The frame is then divided by it in linear light,
+    and the bilateral grid after it does what is left: white balance and the tone curve.
+
+    The division reads the map DETACHED: only its own L1 trains it, the median stop given the
+    frame. The image losses downstream would pull it towards the mean, and the low-frequency
+    MSE's mean is "relight every frame a little" -- what changed p31's untouched frames.
+
+    Returns (relit frame, stops [B, 1, size, size]). The last layer is zero-initialised: stops
+    0, the frame passes unchanged. fp32 under autocast (exp2 and pow).
+    """
+
+    def __init__(self, latent_channels: int = 128, *, size: int = 64, widths: tuple[int, ...] = (32, 64, 96, 128),
+                 exposure_stats: bool = False) -> None:
+        super().__init__()
+        self.size, self.exposure_stats = int(size), bool(exposure_stats)
+        widths = tuple(int(width) for width in widths)
+
+        def block(inputs: int, outputs: int) -> nn.Sequential:
+            return nn.Sequential(nn.Conv2d(inputs, outputs, 3, padding=1), nn.ReLU(),
+                                 nn.Conv2d(outputs, outputs, 3, padding=1), nn.ReLU())
+
+        # Inputs: sRGB, log2 luminance, y, x.
+        self.encoders = nn.ModuleList([block(6, widths[0])] + [block(widths[k], widths[k + 1])
+                                                               for k in range(len(widths) - 1)])
+        self.latent_level = min(2, len(widths) - 1)          # 64 px / 4 = ZI's 16 x 16
+        self.latent = nn.Conv2d(latent_channels, widths[self.latent_level], 1)
+        self.global_head = nn.Sequential(
+            nn.Linear(widths[-1] + (EXPOSURE_FEATURES if self.exposure_stats else 0), widths[-1]), nn.ReLU(),
+            nn.Linear(widths[-1], widths[-1]))
+        self.decoders = nn.ModuleList(block(widths[k + 1] + widths[k], widths[k]) for k in range(len(widths) - 1))
+        self.out = nn.Conv2d(widths[0], 1, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def stops(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        small = F.adaptive_avg_pool2d(image, self.size)
+        batch, _, height, width = small.shape
+        ys = (torch.arange(height, device=image.device, dtype=image.dtype) + 0.5) / height * 2.0 - 1.0
+        xs = (torch.arange(width, device=image.device, dtype=image.dtype) + 0.5) / width * 2.0 - 1.0
+        y, x = torch.meshgrid(ys, xs, indexing="ij")
+        luma = (srgb_to_linear(small) * small.new_tensor(_LUMA_709).view(1, 3, 1, 1)).sum(dim=1, keepdim=True)
+        features = torch.cat((small, torch.log2(luma + 1.0 / 256.0) / 4.0,
+                              y.expand(batch, 1, -1, -1), x.expand(batch, 1, -1, -1)), dim=1)
+        skips = []
+        for level, encoder in enumerate(self.encoders):
+            features = encoder(features if level == 0 else F.avg_pool2d(features, 2))
+            if level == self.latent_level:
+                features = features + F.interpolate(self.latent(latent), size=features.shape[-2:], mode="bilinear",
+                                                    align_corners=False)
+            skips.append(features)
+        context = features.mean(dim=(2, 3))
+        if self.exposure_stats:
+            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+        features = features + self.global_head(context)[:, :, None, None]
+        for level in reversed(range(len(self.decoders))):
+            up = F.interpolate(features, size=skips[level].shape[-2:], mode="bilinear", align_corners=False)
+            features = self.decoders[level](torch.cat((up, skips[level]), dim=1))
+        return self.out(features)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            image, latent = image.float(), latent.float()
+            stops = self.stops(latent, image)
+            gain = torch.exp2(-F.interpolate(stops.detach().clamp(*RELIGHT_STOP_RANGE), size=image.shape[-2:],
+                                             mode="bilinear", align_corners=False))
+            return linear_to_srgb(srgb_to_linear(image) * gain).clamp(0.0, 1.0), stops
+
+
 class UNetBranch(nn.Module):
     """Funnel and loudspeaker: a U-Net whose bottom sits on the latent's grid.
 
@@ -845,10 +928,15 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
         light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
+        relight: dict | None = None,
     ) -> None:
         super().__init__()
         if light and tone_grid:
             raise ValueError("The bilateral tone grid replaces the light branch: turn one of them off")
+        if relight and not tone_grid:
+            raise ValueError("The relight leaves white balance and the tone curve to the bilateral grid: turn it on")
+        # p32 (phase2.split_relight): the stop map, divided out before the grid. Absent: no layers.
+        self.relight = RelightStops(latent_channels, **relight, exposure_stats=exposure_stats) if relight else None
         # p31 (phase2.split_tone_grid): brightness and colour as a bilateral grid of affines.
         self.tone_grid = (BilateralGridTone(latent_channels, **tone_grid, exposure_stats=exposure_stats)
                           if tone_grid else None)
@@ -910,6 +998,8 @@ class SplitColorEdgeDecoder(nn.Module):
         if self.light is not None:
             image = self.light(latent, image)
             parts["image_light"] = image
+        if self.relight is not None:
+            image, parts["image_stops"] = self.relight(latent, image)
         if self.tone_grid is not None:
             image = self.tone_grid(latent, image)
             parts["image_light"] = image                       # the tone stage's output, as the light branch's

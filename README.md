@@ -12,6 +12,53 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p32_relight — phase 2: bản đồ stop (vùng nào tối đi bao nhiêu) đoán có giám sát, chia ra trước lưới song phương**
+(config `configs/kaggle_relight.yaml` → OUT `outputs/p32_relight`).
+Bằng p31_bilateral cộng một tầng trước lưới; hash phase 1 bằng p28 nên **dùng lại phase 1 của p28**. Người dùng, sau
+p31: "loss vẫn các bản trước, ở bản này 1 số vùng tối còn không được làm sáng lên".
+- **p31 đo trên Kaggle** (`brightness_probe`, 512 ảnh valid; RMSE tần số thấp, khối 8 px): ảnh bị đổi sáng 0,159 →
+  0,099 (oracle chung 0,085, oracle vùng 4×4 0,036), sáng/sạch 0,92 — **vẫn tối**; ảnh **không** bị đổi sáng 0,0029 →
+  0,0237, **98% tệ hơn ảnh vào** (D1 blur_only 33,8 → 26,6 dB). PSNR 22,35 → 22,62, train loss ~1,0 như các bản trước.
+- **Vì sao.** (1) Lưới học độ sáng qua hệ số góc của phép affine; gradient của hệ số góc ở vùng tối bằng chính giá trị
+  pixel (nhỏ), nên vùng tối được nâng bằng hệ số tự do b — lên xám — thay vì được nhân sáng lại. (2) Thông tin để để
+  yên ảnh không bị đổi sáng là có: hồi quy logistic trên thống kê ảnh vào (27 số phơi sáng, trung bình, bố cục sáng
+  8×8) phân biệt hai loại đúng 90%, AUC 0,96 (600 ảnh valid, kiểm chéo 5 phần); lưới không học ra. MSE tần số thấp
+  (×10) kéo về trung bình: "làm sáng mọi ảnh một chút".
+- **Trần của cách mới** (thống kê thuần, không train). Bước nhiễu biết chính xác nó nhân ánh sáng mỗi điểm bao nhiêu:
+  `corruptions.image.brightness_stops` = log2 trường ánh sáng không đều (`light.illumination_field`, trên ánh sáng
+  tuyến tính), cộng vignette và `exposure_gain` của bước thiếu sáng (hệ số trên sRGB → mũ 2,2 trên tuyến tính), cả bản
+  đồ nhân `tone_gamma`. 300 ảnh valid:
+
+  | nhóm | ảnh vào | chia bản đồ stop thật | + một affine mỗi kênh cả ảnh | oracle chung | oracle vùng 4×4 |
+  |---|---|---|---|---|---|
+  | bị đổi sáng (191) | 0,2246 | 0,0713 | **0,0313** | 0,1128 | 0,0500 |
+  | không bị đổi sáng (109) | 0,0035 | 0,0035 | 0,0044 | 0,0044 | 0,0052 |
+
+  Biết bản đồ stop + một phép màu chung (đúng việc lưới làm tốt) tốt hơn cả oracle vùng 4×4.
+- **Đoán được không** (thử ngắn trên CPU, < 10 phút như người dùng cho phép; U-Net nhỏ, ảnh 32×32, 2 600 ảnh train,
+  3 100 bước, 300 ảnh valid). L1 theo stop: ảnh bị đổi sáng 1,414 (đoán 0) → **0,566**, trong khi đoán *đúng* một hằng
+  số cho mỗi ảnh vẫn 0,722 — mạng học được vùng nào tối, không chỉ mức chung, và còn đang giảm; ảnh không bị đổi sáng
+  0,006–0,03 stop — **để yên**. Lần thử trước không có thống kê phơi sáng: chỉ học mức chung và làm tối nhầm ảnh không bị
+  đổi sáng (lỗi 0,0036 → 0,076) — thống kê phơi sáng là bắt buộc.
+- **`decoders.RelightStops`**: U-Net 4 mức trên ảnh thu về `split_relight_size`² (sRGB, log2 độ sáng tuyến tính, toạ độ
+  pixel cho vignette/dải sáng; ZI cộng ở mức 16×16; thống kê phơi sáng vào đường toàn cục), ra bản đồ stop S. Ảnh chia
+  2^S trên ánh sáng tuyến tính (S chặn trong [−8, 2]), rồi lưới song phương của p31 làm phần còn lại (cân bằng trắng,
+  đường cong tone). Lớp cuối khởi tạo 0: S = 0, ảnh đi qua nguyên vẹn. Loss: L1 theo stop giữa S và bản đồ thật thu về
+  cùng cỡ (`split_relight_weight`), log `image_stops_l1`; ảnh không bị đổi sáng có nhãn 0 khắp nơi. **Phép chia đọc S
+  đã `detach`**: chỉ L1 của nó train S (trung vị, không phải trung bình), loss ảnh phía sau không kéo S về "làm sáng mọi
+  ảnh một chút". 954 817 tham số (lưới 58 353; decoder ảnh 4,58 triệu); chạy ở 64², rẻ so với NAFNet 256².
+- Dataset chỉ tính bản đồ khi train phase 2 có `split_relight` (`brightness_target`, lật cùng ảnh khi augment); batch
+  smoke có sẵn. Thiếu khoá: decoder y như p31, checkpoint p31 nạp được.
+- Notebook: `RUN = 'p32_relight'`, dùng lại phase 1 của p28 như p30/p31. Hình đầu notebook vẽ thêm ô "Bản đồ stop S →
+  Làm sáng lại" trước lưới. Đọc kết quả ở `brightness_probe` (Cell 11): cột mới "stop doan" (L1 stop của model) cạnh
+  "|stop that|" (đoán 0); "khong doi sang" phải gần ảnh vào (p31: 0,0237), "doi sang" phải dưới p31 (0,099).
+- Bằng chứng: `tests/test_relight.py` (bản đồ = trường ánh sáng tính theo stop, nhân bởi bước thiếu sáng, 0 khi ảnh
+  sạch hay không qua bước nào; chia cho bản đồ của một trường đã biết trả lại đúng ảnh; dataset mang bản đồ chỉ khi
+  được hỏi và lật cùng ảnh; khởi đầu đồng nhất, có đọc latent, toạ độ và thống kê; làm sáng đúng số stop, có chặn; chỉ
+  L1 stop train bản đồ; trong decoder đứng trước lưới và cần lưới; thiếu khoá thì giữ đúng các lớp của p31; phase 2 chạy
+  và log L1 stop, `brightness_probe` chấm bản đồ; giá trị sai bị từ chối; p32 = p31 + các khoá relight, cùng hash phase 1
+  với p28).
+
 **p31_bilateral — phase 2: lưới song phương các phép biến đổi màu thay nhánh ánh sáng (HDRNet)** (config
 `configs/kaggle_bilateral.yaml` → OUT `outputs/p31_bilateral`).
 Bằng p30_exposure, nhánh ánh sáng thay bằng lưới; hash phase 1 bằng p28 nên **dùng lại phase 1 của p28**. Người dùng:

@@ -146,6 +146,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_light_branch(config)
     _validate_exposure(config)
     _validate_tone_grid(config)
+    _validate_relight(config)
     _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
@@ -687,6 +688,38 @@ def _validate_tone_grid(config: dict[str, Any]) -> None:
         raise ValueError(f"phase2.split_tone_grid needs image sides divisible by {LOWFREQ_SCALE}")
 
 
+RELIGHT_KEYS = ("split_relight_size", "split_relight_widths", "split_relight_weight")
+
+
+def _validate_relight(config: dict[str, Any]) -> None:
+    """p32: phase2.split_relight, the stop map divided out before the bilateral grid.
+
+    On, every split_relight_* key must be written out (the hash reads only the config file)."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_relight", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_relight must be true or false")
+    if not enabled:
+        return
+    if not phase2.get("split_tone_grid", False):
+        raise ValueError("phase2.split_relight leaves white balance and the tone curve to the bilateral grid: "
+                         "set phase2.split_tone_grid: true")
+    missing = [key for key in RELIGHT_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_relight needs every split_relight_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    size, widths = phase2["split_relight_size"], phase2["split_relight_widths"]
+    if isinstance(size, bool) or not isinstance(size, int) or size < 8:
+        raise ValueError("phase2.split_relight_size must be an integer >= 8")
+    if (not isinstance(widths, (list, tuple)) or len(widths) < 2
+            or any(isinstance(w, bool) or not isinstance(w, int) or w < 1 for w in widths)):
+        raise ValueError("phase2.split_relight_widths must be a list of at least two positive integers")
+    if size % 2 ** (len(widths) - 1):
+        raise ValueError("phase2.split_relight_size must halve cleanly once per extra split_relight_widths level")
+    if not _nonnegative_number(phase2["split_relight_weight"]):
+        raise ValueError("phase2.split_relight_weight must be a nonnegative number")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -897,6 +930,11 @@ def build_decoders(
                 "bins": int(config["phase2"]["split_tone_grid_bins"]),
                 "width": int(config["phase2"]["split_tone_grid_width"]),
             } if config["phase2"].get("split_tone_grid", False) else None,
+            # Absent before p32: no stop map before the grid.
+            "relight": {
+                "size": int(config["phase2"]["split_relight_size"]),
+                "widths": tuple(int(width) for width in config["phase2"]["split_relight_widths"]),
+            } if config["phase2"].get("split_relight", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

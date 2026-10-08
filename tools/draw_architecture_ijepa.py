@@ -1,4 +1,4 @@
-"""Architecture figure of the run the notebook trains (configs/kaggle_bilateral.yaml, p31_bilateral;
+"""Architecture figure of the run the notebook trains (configs/kaggle_relight.yaml, p32_relight;
 qwt-jaco-jepa-ijepa.ipynb), as plain SVG.
 
 Drawn from the config: phase 1 is I-JEPA alone -- ONE ViT over the image's and the IMU's wavelet
@@ -9,7 +9,10 @@ reads its output ZI, ZU from every token of the noisy pair. With phase2.split_to
 frame first goes through the tone stage -- a coefficient net (frame at 64 x 64, ZI, exposure statistics)
 predicts a bilateral grid of 3 x 4 colour affines, sliced per pixel at (x, y, guide) and applied to the
 pixel itself -- and its output J feeds the colour branch and the edge branch; without it the stage is the
-light branch (veil V, log gain g). The loss box lists the terms the config turns on.
+light branch (veil V, log gain g). With phase2.split_relight (p32) a U-Net first predicts the stop map S
+(frame at 64 x 64, ZI, exposure statistics; learned only from the corruption's true map) and the frame is
+divided by 2^S in linear light before the grid, which the panel then draws as one box. The loss box lists
+the terms the config turns on.
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
@@ -23,11 +26,12 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_bilateral.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_relight.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
 GRID = bool(P2.get("split_tone_grid", False))
+RELIGHT = bool(P2.get("split_relight", False))
 EXPOSURE = bool(P2.get("split_exposure_stats", False))
 LOWFREQ = float(P2.get("lowfreq_mse_weight", 0.0))
 # A typical draw (context 40% of the tokens; median 42%, p10-p90 33-51% over 400 draws) whose four
@@ -103,14 +107,15 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 # ---------------- header
 text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA (backbone ViT trên hệ số wavelet) · phase 2 khôi phục'
-     f'{" với tầng tone lưới song phương" if GRID else ""}', size=16, weight='bold', color='#D81B60', anchor='start')
+     f'{" với bản đồ stop + lưới song phương" if RELIGHT else " với tầng tone lưới song phương" if GRID else ""}',
+     size=16, weight='bold', color='#D81B60', anchor='start')
 text(20, 48, 'MỘT ViT chung cho ảnh và IMU (attention giữa hai loại token là fusion) · ngữ cảnh NHIỄU, teacher EMA SẠCH'
      ' · khôi phục đọc ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher + predictor bỏ sau phase 1',
      size=12, color='#AD1457', anchor='start')
 
 # ---------------- regions
 region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đóng băng ở phase 2')
-region(842, 88, 663, 432, 'edge', '③ Phase 2 — khôi phục (backbone đóng băng)')
+region(842, 88, 663, 432, 'edge', '③ Phase 2 — khôi phục (backbone đóng băng)', right=RELIGHT)   # ảnh nhiễu rơi ở x 1113
 OY = 60                                                   # phase 1 sits below phase 2's taller region
 region(190, 505 + OY, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
@@ -145,7 +150,18 @@ arrow([(570, 240), mid_left(zi)]); arrow([(570, 400), mid_left(zu)])
 # ---------------- phase 2: the tone stage
 el.append('<rect x="856" y="116" width="636" height="110" rx="10" fill="#FFFFFF" fill-opacity="0.8" '
           'stroke="#EF6C00" stroke-width="1.5"/>')
-if GRID:
+if RELIGHT:
+    cells, bins, size = P2['split_tone_grid_size'], P2['split_tone_grid_bins'], P2['split_relight_size']
+    text(868, 136, 'TẦNG TONE', size=14, weight='bold', color='#EF6C00', anchor='start')   # ảnh nhiễu rơi vào x 1113
+    badge(1236, 123, 'mới · p32: bản đồ stop')
+    t1 = node(866, 146, 165, 68, 'color', 'Bản đồ stop S', [f'U-Net {size}² · ảnh + ZI',
+                                                           '+ thống kê phơi sáng' if EXPOSURE else ''], title_size=14)
+    t2 = node(1046, 146, 135, 68, 'color', 'Làm sáng lại', ['ảnh · 2^(−S)', 'ánh sáng tuyến tính'], title_size=14)
+    t3 = node(1196, 146, 140, 68, 'color', 'Lưới song phương', [f'{cells}×{cells}×{bins} ô · A 3×4',
+                                                              'cắt ở (x, y, sáng)'], title_size=14)
+    t4 = node(1351, 146, 133, 68, 'color', "J = A·[ảnh′, 1]", ['màu, đường cong', 'đầu: = đồng nhất'],
+              title_size=14)
+elif GRID:
     cells, bins = P2['split_tone_grid_size'], P2['split_tone_grid_bins']
     text(868, 136, 'TẦNG TONE · LƯỚI SONG PHƯƠNG (HDRNet)', size=14, weight='bold', color='#EF6C00',
          anchor='start')
@@ -166,12 +182,15 @@ else:
 for left, right in ((t1, t2), (t2, t3), (t3, t4)):
     arrow([mid_right(left), mid_left(right)], color='#EF6C00', width=2)
 # The noisy frame: into the coefficient net, the guide and the affine.
-line([(95, 200), (95, 76), (1418, 76)], '#2E7D32', width=3)
+line([(95, 200), (95, 76), (1113 if RELIGHT else 1418, 76)], '#2E7D32', width=3)
 text(470, 68, 'ảnh nhiễu RGB 256² — chỉ đi qua tầng tone (đường duy nhất mang MÀU)', size=13, color='#2E7D32',
      style='font-style="italic"')
 arrow([(850, 76), (850, 170), (866, 170)], color='#2E7D32', width=2.4)
-arrow([(1266, 76), (1266, 146)], color='#2E7D32', width=2.4)
-arrow([(1418, 76), (1418, 146)], color='#2E7D32', width=2.4)
+if RELIGHT:                                              # the grid reads the relit frame
+    arrow([(1113, 76), (1113, 146)], color='#2E7D32', width=2.4)
+else:
+    arrow([(1266, 76), (1266, 146)], color='#2E7D32', width=2.4)
+    arrow([(1418, 76), (1418, 146)], color='#2E7D32', width=2.4)
 # ZI into the coefficient net.
 arrow([(760, 205), (760, 194), (866, 194)], color='#8E24AA', width=2.4, label='ZI', lx=800, ly=188, lsize=12)
 
@@ -294,7 +313,8 @@ text(GX + 16 * CELL + 10, GY + 54, 'đoạn trên 8 token', size=11, color='#546
 # ---------------- phase 2 losses: what the config turns on
 terms = ['ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)', 'màu: L1 Cb/Cr + thống kê màu từng ảnh',
          'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
-         'tone: L1 giữa J và ảnh sạch ở 32²' if GRID or P2.get('split_light_branch', False) else '']
+         'tone: L1 giữa J và ảnh sạch ở 32²' if GRID or P2.get('split_light_branch', False) else '',
+         'stop: L1 giữa S và stop thật của bước nhiễu' if RELIGHT else '']
 if LOWFREQ:
     terms.append(f'độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ','))
 terms.append('IMU: L1 · chi tiết Haar · rung · rung thừa · gia số')

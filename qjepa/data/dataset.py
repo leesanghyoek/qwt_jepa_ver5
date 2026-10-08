@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
-from ..corruptions.image import degradation_vector
+from ..corruptions.image import brightness_stops, degradation_vector
 from ..corruptions.rng import derive_seed
 from .manifest import PairedSample
 from .tartanair import Trajectory
@@ -96,6 +96,7 @@ class PairedCameraImuDataset(Dataset):
         hflip_probability: float = 0.0,
         source_size: tuple[int, int] | None = None,
         full_frame: bool = False,
+        brightness_target: bool = False,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -103,6 +104,8 @@ class PairedCameraImuDataset(Dataset):
             raise ValueError("hflip_probability must be in [0, 1]")
         # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
         self.sensor_reference = sensor_reference
+        # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
+        self.brightness_target = bool(brightness_target)
         self.hflip_probability = hflip_probability
         self.samples = samples
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
@@ -200,10 +203,12 @@ class PairedCameraImuDataset(Dataset):
             trajectory=sample.trajectory_key,
             mode=imu_mode,
         )
+        stops = brightness_stops(image_parameters, *noisy_image.shape[:2]) if self.brightness_target else None
         if mirror_draw(self.scenario_seed, sample.sample_id, self.realization, self.hflip_probability):
             # After corruption: every corruption draw is mirror-symmetric in distribution,
             # and the seeds stay those of the unmirrored sample.
             clean_image, noisy_image = clean_image[:, ::-1], noisy_image[:, ::-1]
+            stops = None if stops is None else stops[:, ::-1]
             noise_free = None if noise_free is None else noise_free[:, ::-1]
             clean_imu, noisy_imu = mirror_imu(clean_imu), mirror_imu(noisy_imu)
         chw = lambda value: torch.from_numpy(np.ascontiguousarray(value.transpose(2, 0, 1))).float()
@@ -222,6 +227,8 @@ class PairedCameraImuDataset(Dataset):
         }
         if noise_free is not None:
             item["image_noise_free"] = chw(noise_free)
+        if stops is not None:
+            item["image_stops"] = torch.from_numpy(np.ascontiguousarray(stops))[None]
         return item
 
 
@@ -229,7 +236,7 @@ def collate_paired(batch: list[dict[str, object]]) -> dict[str, object]:
     output: dict[str, object] = {}
     for key in ("image_clean", "image_noisy", "image_time", "imu_times", "imu_start"):
         output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
-    for key in ("image_degradation", "image_noise_free"):
+    for key in ("image_degradation", "image_noise_free", "image_stops"):
         if key in batch[0]:
             output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
     for key in ("imu_clean_phys", "imu_noisy_phys"):

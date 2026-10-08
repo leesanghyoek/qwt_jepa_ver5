@@ -1,0 +1,26 @@
+# p32_relight: p31_bilateral (cung phase 1 cua p28 -> dung lai) + BAN DO STOP truoc luoi song phuong.
+#
+# Nguoi dung (08/10/2026), sau p31: "loss van nhu cac ban truoc, o ban nay 1 so vung toi con khong duoc lam sang len".
+# Do tren p31 (Kaggle, brightness_probe va latent_oracle, 512 anh valid):
+#  - Anh bi doi sang: loi tan so thap 0,159 -> 0,099; oracle chung 0,085, oracle vung 4x4 0,036; sang/sach 0,92: con toi.
+#  - Anh KHONG bi doi sang: 0,0029 -> 0,0237, 98% te hon anh vao (blur_only: 33,8 -> 26,6 dB). Luoi lam sang "trung
+#    binh" moi anh. Thong ke anh vao phan biet hai loai dung 90% (AUC 0,96, hoi quy logistic): thong tin co, luoi khong dung.
+#  - Ly do: luoi hoc do sang qua he so goc cua phep affine; gradient cua he so goc o vung toi bang chinh gia tri pixel
+#    (nho), nen vung toi duoc nang len xam (he so tu do b) thay vi lam sang lai.
+# Thong ke tren du lieu (khong train model): chia anh nhieu cho ban do stop THAT cua buoc nhieu
+# (corruptions.image.brightness_stops: truong anh sang khong deu, vignette, exposure_gain, mu tone_gamma) roi mot affine
+# moi kenh cho ca anh: loi tan so thap anh doi sang 0,225 -> 0,031 (oracle vung 4x4: 0,050; oracle chung 0,113).
+# Vay: mot U-Net nho (64x64, 4 muc, latent ZI o muc 16x16, toa do pixel, thong ke phoi sang) DOAN ban do stop, hoc
+# THANG bang L1 tren stop voi ban do that (anh khong bi doi sang: 0 khap noi); anh chia cho no tren anh sang tuyen tinh,
+# roi luoi song phuong lam phan con lai (can bang trang, duong cong tone).
+# Chi doi phase 2: hash phase 1 bang p28.
+extends: kaggle_bilateral.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p32_relight
+
+phase2:
+  split_relight: true
+  split_relight_size: 64                # ban do stop 64x64 (4 px moi o; vet toi nho nhat ~13 px)
+  split_relight_widths: [32, 64, 96, 128]   # muc 64, 32, 16 (+ ZI), 8 (+ tong quat)
+  split_relight_weight: 0.5             # L1 tren stop; |stop| trung binh ~0,9 luc dau
