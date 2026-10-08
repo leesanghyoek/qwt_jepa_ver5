@@ -1,25 +1,17 @@
-"""Architecture figure of p26_ijepa to p31_bilateral (configs/kaggle_ijepa.yaml ... kaggle_bilateral.yaml;
-qwt-jaco-jepa-ijepa.ipynb), as plain SVG. p27 changes only the corruption, p28 the training recipe, p29 scales
-the ViT's input coefficients (a line in the encoder box when on), p30 gives the light branch and the tone head
-the input's exposure statistics and adds a low-frequency MSE, and p31 swaps the light branch for a bilateral
-grid of colour affines (the top box when on), so one figure serves them all; its numbers come from p31's
-config, the notebook's default run.
+"""Architecture figure of the run the notebook trains (configs/kaggle_bilateral.yaml, p31_bilateral;
+qwt-jaco-jepa-ijepa.ipynb), as plain SVG.
 
-Same visual language as draw_architecture_imu.py (whose --local figure is p25_local), with
-what p26 changes: the backbone is ONE ViT over the image's and the IMU's wavelet
-coefficients together -- the attention between the two kinds of token is the fusion, so
-there is no fusion module and ZI = FI, ZU = FU -- and phase 1 is I-JEPA alone: the context
-encoder (the online ViT, on the NOISY pair's context tokens only), one narrow ViT predictor
-for the targets of both, and the EMA teacher on the CLEAN pair. The mask drawn in phase 1 is a real one: multiblock_masks with the
-config's settings. Phase 2 is p25's, less the encoder stages into NAFNet and the
-predictor's guess into ZI (a ViT has one resolution; I-JEPA's predictor needs masks).
+Drawn from the config: phase 1 is I-JEPA alone -- ONE ViT over the image's and the IMU's wavelet
+coefficients (attention between the two kinds of token is the fusion, ZI = FI, ZU = FU), the context
+encoder on the NOISY pair's context tokens, one narrow predictor, the EMA teacher on the CLEAN pair; the
+mask drawn is a real one (multiblock_masks with the config's settings). Phase 2 freezes the encoder and
+reads its output ZI, ZU from every token of the noisy pair. With phase2.split_tone_grid (p31) the noisy
+frame first goes through the tone stage -- a coefficient net (frame at 64 x 64, ZI, exposure statistics)
+predicts a bilateral grid of 3 x 4 colour affines, sliced per pixel at (x, y, guide) and applied to the
+pixel itself -- and its output J feeds the colour branch and the edge branch; without it the stage is the
+light branch (veil V, log gain g). The loss box lists the terms the config turns on.
 
-The figure says what restoration reads: the context encoder's output (ZI, ZU), the encoder
-frozen and run on every token of the noisy pair; the EMA teacher and the predictor only train
-it and are dropped after phase 1 (phase2.backbone_weights: target loads the teacher's weights
-into the encoder instead).
-
-Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg
+Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
 import sys
 from pathlib import Path
@@ -31,15 +23,18 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG = load_config(REPO / "configs/kaggle_bilateral.yaml")
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_bilateral.yaml"
+CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
-# p28 against p27: what the recipe line of the phase-2 loss box reports.
-P2_BEFORE = load_config(REPO / "configs/kaggle_blur.yaml")["phase2"]
+RUN = Path(CONFIG["runtime"]["output_dir"]).name
+GRID = bool(P2.get("split_tone_grid", False))
+EXPOSURE = bool(P2.get("split_exposure_stats", False))
+LOWFREQ = float(P2.get("lowfreq_mse_weight", 0.0))
 # A typical draw (context 40% of the tokens; median 42%, p10-p90 33-51% over 400 draws) whose four
 # target blocks barely overlap (6%; median 32%), so each block can be seen.
 MASK_SEED = 382
 
-W, H = 1520, 720
+W, H = 1520, 790
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -89,17 +84,14 @@ def arrow(points, color='#455A64', width=2.2, dash=None, label=None, lx=None, ly
         text(lx, ly, label, size=lsize, color=color, anchor=lanchor, style='font-style="italic"')
 
 
-def badge(x, y, label):
-    """A small tag for what this run adds."""
-    width = 12 + 7 * len(label)
-    el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#D81B60"/>')
-    text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
+def line(points, color, width=2.4):
+    el.append(f'<path d="M ' + ' L '.join(f'{px} {py}' for px, py in points) +
+              f'" fill="none" stroke="{color}" stroke-width="{width}"/>')
 
 
-def dropped(x, y, label='bỏ sau phase 1'):
-    """A grey tag: this block only trains the encoder and does not reach restoration."""
+def badge(x, y, label, color='#D81B60'):
     width = 12 + 7 * len(label)
-    el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="#78909C"/>')
+    el.append(f'<rect x="{x}" y="{y}" width="{width}" height="18" rx="9" fill="{color}"/>')
     text(x + width / 2, y + 13, label, size=11, weight='bold', color='#FFFFFF')
 
 
@@ -109,50 +101,85 @@ def mid_top(b):   x, y, w, h = b; return (x + w / 2, y)
 def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 
+# ---------------- header
+text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA (backbone ViT trên hệ số wavelet) · phase 2 khôi phục'
+     f'{" với tầng tone lưới song phương" if GRID else ""}', size=16, weight='bold', color='#D81B60', anchor='start')
+text(20, 48, 'MỘT ViT chung cho ảnh và IMU (attention giữa hai loại token là fusion) · ngữ cảnh NHIỄU, teacher EMA SẠCH'
+     ' · khôi phục đọc ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher + predictor bỏ sau phase 1',
+     size=12, color='#AD1457', anchor='start')
+
 # ---------------- regions
 region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đóng băng ở phase 2')
-region(842, 110, 663, 360, 'edge', '③ Phase 2 — decoder khôi phục (như p25)', right=True)
-region(190, 505, 940, 200, 'p1', '② Phase 1 — I-JEPA')
-
-text(W - 20, 26, 'p26_ijepa → p31_bilateral — phase 1 là I-JEPA, không có gì khác · backbone ViT trên hệ số QWT',
-     size=15, weight='bold', color='#D81B60', anchor='end')
-text(W - 20, 44, 'MỘT ViT chung cho ảnh và IMU: attention giữa hai loại token là fusion · ngữ cảnh NHIỄU,'
-     ' teacher EMA SẠCH · nhiễu: p26 như p25_local; p27–p31 mờ hơn một chút, lóe mỏng', size=12, color='#AD1457',
-     anchor='end')
-text(W - 20, 62, 'khôi phục dùng ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher EMA + predictor'
-     ' bỏ sau phase 1', size=12, weight='bold', color='#8E24AA', anchor='end')
-text(W - 20, 79, 'phase2.backbone_weights: target → nạp trọng số teacher EMA vào encoder thay thế',
-     size=11, color='#8E24AA', anchor='end', style='font-style="italic"')
+region(842, 88, 663, 432, 'edge', '③ Phase 2 — khôi phục (backbone đóng băng)')
+OY = 60                                                   # phase 1 sits below phase 2's taller region
+region(190, 505 + OY, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
 # ---------------- inputs and backbone
-img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'tối theo vùng'])
+img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu, tối theo vùng'])
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'])
 haar = node(210, 365, 135, 70, 'tf', 'Haar', ['12 × 64'])
 depth, heads, dim = MODEL["vit_depth"], MODEL["vit_heads"], MODEL["embedding_dim"]
-# model.vit_input_standardize (p29): the coefficients enter scaled, one gain per modality.
 scaled = {'global': 'hệ số × g (mỗi loại 1 g)', 'channel': 'hệ số × g (mỗi kênh 1 g)'}.get(
     MODEL.get('vit_input_standardize'), '')
 vit = node(370, 195, 200, 250, 'bb', 'CONTEXT ENCODER', ['ViT chung ảnh + IMU', scaled,
                                                         'ảnh: patch 8 = 16 px', '→ 256 token', '',
-                                                  'IMU: patch 8 = 16 mẫu', '→ 8 token', '',
-                                                  f'264 token × {dim}', f'{depth} khối · {heads} head',
-                                                  '+ loại token + vị trí'])
-badge(478, 186, 'mới · ViT chung')
+                                                        'IMU: patch 8 = 16 mẫu', '→ 8 token', '',
+                                                        f'264 token × {dim}', f'{depth} khối · {heads} head',
+                                                        '+ loại token + vị trí'])
 text(637, 305, 'attention', size=12, weight='bold', color='#1E88E5')
 text(637, 320, 'ảnh ↔ IMU', size=12, weight='bold', color='#1E88E5')
 text(637, 335, '= fusion', size=12, weight='bold', color='#1E88E5')
-zi = node(705, 205, 110, 70, 'lat', 'ZI = FI', ['128 × 16 × 16'])
-zu = node(705, 365, 110, 70, 'lat', 'ZU = FU', ['128 × 8'])
-# What restoration reads: the encoder's output, ZI and ZU, from every token of the noisy pair.
+zi = node(705, 205, 110, 70, 'lat', 'ZI = FI', [f'{dim} × 16 × 16'])
+zu = node(705, 365, 110, 70, 'lat', 'ZU = FU', [f'{dim} × 8'])
 text(760, 303, 'ĐẦU RA ENCODER', size=11, weight='bold', color='#8E24AA')
 text(760, 318, 'mọi token nhiễu', size=11, color='#8E24AA')
 text(760, 333, '→ khôi phục ③', size=11, weight='bold', color='#8E24AA')
 el.append('<circle cx="190" cy="240" r="13" fill="#E8EAF6" stroke="#3949AB" stroke-width="2"/>')
 text(190, 245, 'Y', size=14, weight='bold', color='#3949AB')
 text(190, 196, 'tách màu', size=11, weight='bold', color='#3949AB')
+arrow([mid_right(img_in), mid_left(qwt)]); arrow([mid_right(imu_in), mid_left(haar)])
+arrow([mid_right(qwt), (370, 240)]); arrow([mid_right(haar), (370, 400)])
+arrow([(570, 240), mid_left(zi)]); arrow([(570, 400), mid_left(zu)])
 
-# ---------------- phase 2 (p25's): light branch, colour ResNet, edge NAFNet + WF, IMU decoder + smoother
+# ---------------- phase 2: the tone stage
+el.append('<rect x="856" y="116" width="636" height="110" rx="10" fill="#FFFFFF" fill-opacity="0.8" '
+          'stroke="#EF6C00" stroke-width="1.5"/>')
+if GRID:
+    cells, bins = P2['split_tone_grid_size'], P2['split_tone_grid_bins']
+    text(868, 136, 'TẦNG TONE · LƯỚI SONG PHƯƠNG (HDRNet)', size=14, weight='bold', color='#EF6C00',
+         anchor='start')
+    badge(1180, 123, 'mới · p31')
+    t1 = node(866, 146, 165, 68, 'color', 'Mạng hệ số', ['ảnh 64² + ZI',
+                                                        '+ thống kê phơi sáng' if EXPOSURE else ''], title_size=14)
+    t2 = node(1046, 146, 135, 68, 'color', 'Lưới hệ số', [f'{cells}×{cells}×{bins} ô', 'mỗi ô: A 3×4'], title_size=14)
+    t3 = node(1196, 146, 140, 68, 'color', 'Cắt lưới', ['tại (x, y, độ sáng)', 'bản đồ dẫn'], title_size=14)
+    t4 = node(1351, 146, 133, 68, 'color', 'J = A·[ảnh, 1]', ['áp lên chính pixel', 'đầu: = đồng nhất'],
+              title_size=14)
+else:
+    text(868, 136, 'NHÁNH ÁNH SÁNG · U-Net 64²', size=14, weight='bold', color='#EF6C00', anchor='start')
+    t1 = node(866, 146, 165, 68, 'color', 'U-Net 64²', ['ảnh + ZI', '+ thống kê phơi sáng' if EXPOSURE else ''],
+              title_size=14)
+    t2 = node(1046, 146, 135, 68, 'color', 'Sương V, sáng g', ['bản đồ trơn'], title_size=14)
+    t3 = node(1196, 146, 140, 68, 'color', 'Phóng lên', ['song tuyến'], title_size=14)
+    t4 = node(1351, 146, 133, 68, 'color', 'J = (ảnh − V)·eᵍ', ['ánh sáng tuyến tính'], title_size=14)
+for left, right in ((t1, t2), (t2, t3), (t3, t4)):
+    arrow([mid_right(left), mid_left(right)], color='#EF6C00', width=2)
+# The noisy frame: into the coefficient net, the guide and the affine.
+line([(95, 200), (95, 76), (1418, 76)], '#2E7D32', width=3)
+text(470, 68, 'ảnh nhiễu RGB 256² — chỉ đi qua tầng tone (đường duy nhất mang MÀU)', size=13, color='#2E7D32',
+     style='font-style="italic"')
+arrow([(850, 76), (850, 170), (866, 170)], color='#2E7D32', width=2.4)
+arrow([(1266, 76), (1266, 146)], color='#2E7D32', width=2.4)
+arrow([(1418, 76), (1418, 146)], color='#2E7D32', width=2.4)
+# ZI into the coefficient net.
+arrow([(760, 205), (760, 194), (866, 194)], color='#8E24AA', width=2.4, label='ZI', lx=800, ly=188, lsize=12)
+
+# ---------------- phase 2: colour and edge branches on J, IMU decoder
+FX = 905
+EDGE_Y = 372
+
+
 def unet_block(x, yc, kind, title):
     """One branch as a U-Net at block level: Encoder -> Bottleneck (ZI joins) -> Decoder, skip across."""
     fill, stroke = C[kind]
@@ -165,8 +192,8 @@ def unet_block(x, yc, kind, title):
     text(x + 36, yc + 5, 'Encoder', size=12, weight='bold', color=stroke)
     text(x + 196, yc + 5, 'Decoder', size=12, weight='bold', color=stroke)
     text(x + 116, yc + 4, 'Bottleneck', size=10, weight='bold', color=C['lat'][1])
-    el.append(f'<path d="M {x + 80} {yc} L {x + 86} {yc}" stroke="{stroke}" stroke-width="2"/>')
-    el.append(f'<path d="M {x + 146} {yc} L {x + 152} {yc}" stroke="{stroke}" stroke-width="2"/>')
+    line([(x + 80, yc), (x + 86, yc)], stroke, 2)
+    line([(x + 146, yc), (x + 152, yc)], stroke, 2)
     el.append(f'<path d="M {x + 40} {yc + 24} C {x + 56} {yc + 54}, {x + 176} {yc + 54}, {x + 192} {yc + 24}" '
               f'fill="none" stroke="#90A4AE" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-90A4AE)"/>')
     text(x + 116, yc + 53, 'skip connection', size=10, color='#78909C', style='font-style="italic"')
@@ -174,108 +201,80 @@ def unet_block(x, yc, kind, title):
     return (x, yc - 30, 232, 60)
 
 
-el.append('<rect x="860" y="125" width="285" height="272" rx="10" fill="#FFFFFF" fill-opacity="0.7" stroke="#2E7D32" stroke-width="1.5"/>')
-FX = 905
-# phase2.split_exposure_stats (p30): the tone head and the light branch also read the input's exposure statistics.
-EXPOSURE = bool(P2.get('split_exposure_stats', False))
-colb = node(FX, 168, 232, 64, 'color', 'Nhánh MÀU · ResNet 128²',
-            ['tone cả ảnh (+ phân vị) → từng vùng' if EXPOSURE else 'tone/màu cả ảnh → từng vùng'], title_size=14)
-edgb = unet_block(FX, 320, 'edge', 'Nhánh ĐƯỜNG NÉT (Y) · NAFNet + 4 WF')
+colb = node(FX, 250, 232, 60, 'color', 'Nhánh MÀU · ResNet 128²',
+            ['tone chung (+ phân vị) → từng vùng' if EXPOSURE else 'tone/màu cả ảnh → từng vùng'], title_size=14)
+edgb = unet_block(FX, EDGE_Y, 'edge', 'Nhánh ĐƯỜNG NÉT (Y của J) · NAFNet + 4 WF')
 for x in (FX + 4, FX + 198):
-    el.append(f'<rect x="{x}" y="266" width="30" height="17" rx="4" fill="#FCE4EC" stroke="#D81B60" stroke-width="1.6"/>')
-    text(x + 15, 279, 'WF', size=10, weight='bold', color='#D81B60')
-    arrow([(x + 15, 283), (x + 15, 296)], color='#D81B60', width=1.4)
-refine = node(1160, 296, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
-join = node(1292, 231, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
-img_out = node(1392, 221, 100, 78, 'out', 'Ảnh', ['phục hồi'])
-imu_dec = node(FX, 406, 232, 44, 'edge', 'Decoder IMU', ['Haar · không skip từ encoder'], title_size=14)
-imu_out = node(1392, 398, 100, 60, 'out', 'IMU', ['phục hồi'])
-imu_ref = node(1160, 400, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
+    el.append(f'<rect x="{x}" y="{EDGE_Y - 48}" width="30" height="15" rx="4" fill="#FCE4EC" stroke="#D81B60" '
+              f'stroke-width="1.6"/>')
+    text(x + 15, EDGE_Y - 37, 'WF', size=10, weight='bold', color='#D81B60')
+    arrow([(x + 15, EDGE_Y - 33), (x + 15, EDGE_Y - 24)], color='#D81B60', width=1.4)
+refine = node(1160, EDGE_Y - 24, 118, 48, 'edge', 'CNN làm nét', ['+ mượt · 4 khối'], rx=8, title_size=13)
+join = node(1292, 300, 58, 58, 'out', 'Ghép', [], rx=29, title_size=14)
+img_out = node(1392, 290, 100, 78, 'out', 'Ảnh', ['phục hồi'])
+imu_dec = node(FX, 458, 232, 44, 'edge', 'Decoder IMU', ['Haar · không skip từ encoder'], title_size=14)
+imu_ref = node(1160, 452, 190, 58, 'edge', 'CNN làm mượt IMU', ['1-D · dilation 1-2-4-8 · 0,65 s',
                                                               'đọc cả IMU nhiễu'], rx=8, title_size=13)
-text(1490, 152, 'ViT một độ phân giải: bỏ tầng mịn encoder → NAFNet', size=11, color='#2E7D32', anchor='end',
-     style='font-style="italic"')
-text(1490, 167, 'predictor I-JEPA cần mask: bỏ đoán của predictor → ZI', size=11, color='#2E7D32', anchor='end',
-     style='font-style="italic"')
-if P2.get('split_tone_grid', False):
-    # p31: a bilateral grid of colour affines replaces the light branch, in the same place.
-    cells, bins = P2['split_tone_grid_size'], P2['split_tone_grid_bins']
-    light = node(592, 50, 250, 58, 'color', f'LƯỚI SONG PHƯƠNG · {cells}×{cells}×{bins}',
-                 ['mỗi ô: ma trận màu 3×4 · đọc ZI + phân vị', 'J = A(x, y, sáng) · [ảnh, 1]'], rx=8, title_size=13)
-    badge(600, 112, 'mới · p31')
-else:
-    light = node(592, 50, 250, 58, 'color', 'Nhánh ÁNH SÁNG · U-Net 64²',
-                 ['đọc ZI + phân vị, histogram ảnh vào' if EXPOSURE else 'nhìn cả khung · đọc ZI',
-                  'J = (ảnh − sương V) × sáng g'], rx=8, title_size=13)
-
-# ---------------- arrows: backbone
-arrow([mid_right(img_in), mid_left(qwt)]); arrow([mid_right(imu_in), mid_left(haar)])
-arrow([mid_right(qwt), (370, 240)]); arrow([mid_right(haar), (370, 400)])
-arrow([(570, 240), mid_left(zi)]); arrow([(570, 400), mid_left(zu)])
-# ---------------- arrows: phase 2
+imu_out = node(1392, 452, 100, 58, 'out', 'IMU', ['phục hồi'])
+# J: from the tone stage down to both branches.
+line([(1418, 214), (1418, 236), (885, 236), (885, 280)], '#EF6C00', width=3)
+arrow([(885, 280), (FX, 280)], color='#EF6C00', width=3)
+arrow([(885, 280), (885, EDGE_Y), (FX - 2, EDGE_Y)], color='#EF6C00', width=3)
+text(1300, 254, 'J (ảnh đã chỉnh sáng) → cả hai nhánh', size=12, weight='bold', color='#EF6C00')
+# ZI: to the colour branch and the edge bottleneck (hopping over J).
 DX = FX + 116
-el.append(f'<path d="M 815 240 L 845 240 L 845 260 L 878 260 A 7 7 0 0 1 892 260 L {DX} 260" '
+el.append(f'<path d="M 815 240 L 845 240 L 845 317 L 878 317 A 7 7 0 0 1 892 317 L {DX} 317" '
           f'fill="none" stroke="#8E24AA" stroke-width="2.4"/>')
-arrow([(DX, 260), (DX, 232)], color='#8E24AA', width=2.4)
-arrow([(DX, 260), (DX, 307)], color='#8E24AA', width=2.4)
-text(962, 254, 'ZI → cả hai nhánh', size=12, weight='bold', color='#8E24AA')
-arrow([(95, 200), (95, 79), (592, 79)], color='#2E7D32', width=3,
-      label='skip: ảnh mờ RGB 256 × 256 — đường duy nhất mang MÀU', lx=340, ly=70)
-el.append('<path d="M 842 79 L 885 79 L 885 320 L 903 320" fill="none" stroke="#EF6C00" stroke-width="3" '
-          'marker-end="url(#ah-EF6C00)"/>')
-text(892, 100, 'J (ảnh đã chỉnh sáng)' if P2.get('split_tone_grid', False) else 'J (tuyến tính → sRGB)',
-     size=11, weight='bold', color='#EF6C00', anchor='start')
-arrow([(885, 200), (FX, 200)], color='#EF6C00', width=3)
-arrow([mid_right(colb), (1272, 200), (1272, 251), (1292, 251)])
+arrow([(DX, 317), (DX, 312)], color='#8E24AA', width=2.4)
+arrow([(DX, 317), (DX, EDGE_Y - 14)], color='#8E24AA', width=2.4)
+text(1030, 334, 'ZI', size=12, weight='bold', color='#8E24AA', anchor='start')
+arrow([mid_right(colb), (1272, 280), (1272, 320), (1292, 320)])
 arrow([mid_right(edgb), mid_left(refine)])
-arrow([mid_right(refine), (1286, 320), (1286, 269), (1292, 269)])
+arrow([mid_right(refine), (1286, EDGE_Y), (1286, 338), (1292, 338)])
 arrow([mid_right(join), mid_left(img_out)])
-arrow([mid_right(zu), (850, 400), (850, 428), (FX, 428)])
+arrow([mid_right(zu), (850, 400), (850, 480), (FX, 480)])
 arrow([mid_right(imu_dec), mid_left(imu_ref)])
 arrow([mid_right(imu_ref), mid_left(imu_out)])
 
 # ---------------- phase 1: I-JEPA
-clean = node(20, 565, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
-teach = node(205, 548, 180, 94, 'p1', 'Teacher EMA', ['bản EMA của encoder', 'cặp SẠCH → LayerNorm', '= đích ở khối đích'])
-dropped(215, 646)
-loss1 = node(420, 548, 240, 94, 'loss', 'Loss I-JEPA', ['smooth L1(đoán, đích)',
-                                                       f'ảnh ½ + IMU ½ · batch {P1["batch_size"]}',
-                                                       'không VICReg · neo · Jacobian'])
-badge(574, 539, 'mới · I-JEPA')
-pred = node(705, 548, 170, 94, 'p1', 'Predictor chung',
+clean = node(20, 565 + OY, 150, 70, 'data', 'Ảnh + IMU', ['SẠCH'])
+teach = node(205, 548 + OY, 180, 94, 'p1', 'Teacher EMA', ['bản EMA của encoder', 'cặp SẠCH → LayerNorm',
+                                                        '= đích ở khối đích'])
+badge(215, 646 + OY, 'bỏ sau phase 1', color='#78909C')
+loss1 = node(420, 548 + OY, 240, 94, 'loss', 'Loss I-JEPA', ['smooth L1(đoán, đích)',
+                                                            f'ảnh ½ + IMU ½ · batch {P1["batch_size"]}',
+                                                            'không VICReg · neo · Jacobian'])
+pred = node(705, 548 + OY, 170, 94, 'p1', 'Predictor chung',
             [f'ViT hẹp · {P1["ijepa_predictor_dim"]} kênh · {P1["ijepa_predictor_depth"]} khối',
              'ngữ cảnh ảnh + IMU', '+ mask token ở vị trí đích'], title_size=15)
-dropped(715, 646)
+badge(715, 646 + OY, 'bỏ sau phase 1', color='#78909C')
 arrow([mid_right(clean), mid_left(teach)])
-arrow([mid_right(teach), mid_left(loss1)], label='đích', lx=402, ly=586)
-arrow([mid_left(pred), mid_right(loss1)], label='đoán', lx=683, ly=586)
-# The context tokens: the same online ViT, run on the noisy pair's context tokens only.
-arrow([mid_bot(zu), (760, 548)], label='ZU', lx=752, ly=500, lanchor='end')
-el.append('<path d="M 815 262 L 829 262 L 829 393 A 7 7 0 0 1 829 407 L 829 548" '
+arrow([mid_right(teach), mid_left(loss1)], label='đích', lx=402, ly=586 + OY)
+arrow([mid_left(pred), mid_right(loss1)], label='đoán', lx=683, ly=586 + OY)
+arrow([mid_bot(zu), (760, 548 + OY)], label='ZU', lx=752, ly=500 + OY, lanchor='end')
+el.append(f'<path d="M 815 262 L 829 262 L 829 393 A 7 7 0 0 1 829 407 L 829 {548 + OY}" '
           'fill="none" stroke="#455A64" stroke-width="2.2" marker-end="url(#ah)"/>')
-text(823, 470, 'ZI', size=13, color='#455A64', anchor='end', style='font-style="italic"')
-text(837, 482, 'lúc train: encoder chỉ chạy trên token NGỮ CẢNH', size=12, weight='bold', color='#455A64',
+text(823, 470 + OY, 'ZI', size=13, color='#455A64', anchor='end', style='font-style="italic"')
+text(837, 538, 'lúc train: encoder chỉ chạy trên token NGỮ CẢNH', size=12, weight='bold', color='#455A64',
      anchor='start')
-text(837, 497, 'lúc khôi phục: trên mọi token của cặp nhiễu', size=12, color='#455A64', anchor='start')
-# EMA: the teacher follows the online ViTs.
-el.append('<path d="M 470 445 L 470 522 L 375 522 L 375 548" fill="none" stroke="#F9A825" stroke-width="2" '
-          'stroke-dasharray="6 4" marker-end="url(#ah-F9A825)"/>')
-text(478, 490, f'EMA: m {P1["teacher_momentum_start"]:g} → {P1["teacher_momentum_end"]:g} (tuyến tính)'.replace('.', ','),
+text(837, 553, 'lúc khôi phục: trên mọi token của cặp nhiễu', size=12, color='#455A64', anchor='start')
+el.append(f'<path d="M 470 445 L 470 {522 + OY} L 375 {522 + OY} L 375 {548 + OY}" fill="none" stroke="#F9A825" '
+          'stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ah-F9A825)"/>')
+text(478, 490 + OY, f'EMA: m {P1["teacher_momentum_start"]:g} → {P1["teacher_momentum_end"]:g} (tuyến tính)'.replace('.', ','),
      size=12, color='#B26A00', anchor='start', style='font-style="italic"')
-
-# A real mask of the config: context (blue) and the target blocks (orange) on the 16 x 16 token grid.
 context, targets = multiblock_masks(
     (16, 16), 1, MASK_SEED, targets=P1["ijepa_targets"], target_scale=tuple(P1["ijepa_target_scale"]),
     target_aspect=tuple(P1["ijepa_target_aspect"]), context_scale=tuple(P1["ijepa_context_scale"]),
     min_keep=P1["ijepa_image_min_keep"])
 seen, hidden = set(context[0].tolist()), set(targets[0].flatten().tolist())
-GX, GY, CELL = 912, 540, 6.5
+GX, GY, CELL = 912, 540 + OY, 6.5
 for index in range(256):
     row, column = divmod(index, 16)
     fill = '#F6B26B' if index in hidden else '#9FC5E8' if index in seen else '#FFFFFF'
     el.append(f'<rect x="{GX + column * CELL}" y="{GY + row * CELL}" width="{CELL}" height="{CELL}" '
               f'fill="{fill}" stroke="#CFD8DC" stroke-width="0.5"/>')
 el.append(f'<rect x="{GX}" y="{GY}" width="{16 * CELL}" height="{16 * CELL}" fill="none" stroke="#546E7A" stroke-width="1.2"/>')
-for block in targets[0]:                        # each target block outlined: they may touch or overlap
+for block in targets[0]:
     rows, columns = (block // 16).tolist(), (block % 16).tolist()
     el.append(f'<rect x="{GX + min(columns) * CELL}" y="{GY + min(rows) * CELL}" '
               f'width="{(max(columns) - min(columns) + 1) * CELL}" height="{(max(rows) - min(rows) + 1) * CELL}" '
@@ -292,24 +291,21 @@ text(GX + 8 * CELL, GY - 6, 'mask thật · 16 × 16 token', size=11, weight='bo
 text(GX + 16 * CELL + 10, GY + 40, 'IMU: cùng cách,', size=11, color='#546E7A', anchor='start')
 text(GX + 16 * CELL + 10, GY + 54, 'đoạn trên 8 token', size=11, color='#546E7A', anchor='start')
 
-# ---------------- phase 2 losses
-LOWFREQ = float(P2.get('lowfreq_mse_weight', 0.0))
-loss2 = node(1150, 520, 350, 196 if LOWFREQ else 168, 'loss', 'Loss phase 2', [
-    'ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)',
-    'màu: L1 Cb/Cr + thống kê màu từng ảnh',
-    'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
-    'ánh sáng (H): L1 giữa J và ảnh sạch ở 32²',
-    *([f'p30 · độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ',')] if LOWFREQ else []), ''])
-# With the grid the 'ánh sáng (H)' line is the grid's L1 against the clean frame at 1/8.
-IMU_Y = 678 if LOWFREQ else 655
-text(1325, IMU_Y, 'IMU: L1 · chi tiết Haar · rung · rung thừa · gia số', size=13, color='#37474F')
-# p28's recipe against p27's: the sharpness penalties, the gradient clip and the learning rate.
-text(1325, IMU_Y + 23, (f'p28–p31: phạt nét ×{P2["split_edge_weight"] / P2_BEFORE["split_edge_weight"]:g} · cắt gradient ở '
-                 f'{P2["gradient_clip_norm"]:g}').replace('.', ',') + f' · lr {P2["learning_rate"]:.0e}'.replace('e-0', 'e-'),
-     size=12, weight='bold', color='#D81B60')
-arrow([(1325, 520), (1325, 474)], color='#D81B60', dash='6 4', width=2)
-text(1333, 498, 'train 2 decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
-text(1333, 513, '25% cuối thêm backbone', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
+# ---------------- phase 2 losses: what the config turns on
+terms = ['ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)', 'màu: L1 Cb/Cr + thống kê màu từng ảnh',
+         'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
+         'tone: L1 giữa J và ảnh sạch ở 32²' if GRID or P2.get('split_light_branch', False) else '']
+if LOWFREQ:
+    terms.append(f'độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ','))
+terms.append('IMU: L1 · chi tiết Haar · rung · rung thừa · gia số')
+terms = [t for t in terms if t]
+loss2 = node(1150, 562, 350, 30 + 17 * len(terms) + 34, 'loss', 'Loss phase 2', terms)
+recipe = (f'phạt nét ×1,5 · cắt gradient ở {P2["gradient_clip_norm"]:g} · '.replace('.', ',')
+          + f'lr {P2["learning_rate"]:.0e}'.replace('e-0', 'e-'))
+text(1325, 562 + 30 + 17 * len(terms) + 26, recipe, size=12, weight='bold', color='#D81B60')
+arrow([(1325, 562), (1325, 520)], color='#D81B60', dash='6 4', width=2)
+text(1333, 538, 'train decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
+text(1333, 553, '25% cuối thêm backbone', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'

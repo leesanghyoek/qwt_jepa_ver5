@@ -40,6 +40,10 @@ decoder bằng một U-Net khôi phục lớn). Không train trên máy người
   169 092). Đầu ra J vào nhánh màu và nhánh đường nét như J của nhánh ánh sáng; L1 giữa J và ảnh sạch ở 1/8
   (`split_tone_grid_weight`), cộng MSE tần số thấp của p30 trên ảnh cuối.
 - p31 cấu hình 16 × 16 ô × 8 mức sáng, rộng 32. Không chạy cùng nhánh ánh sáng (`split_light_branch: false`, bắt buộc).
+- Notebook: Cell 4 tìm phase 1 của p28 ở `outputs/p28_steady` trong phiên, trong archive đã giải nén, hoặc trong file
+  `p28_steady_phase*.zip` còn nguyên (Output của phiên p28 gắn làm Input — Kaggle không giải nén) và tự giải nén; không
+  thấy thì in cảnh báo và tự train phase 1 theo recipe p28 (cùng hash), không dừng lỗi. Hình đầu notebook vẽ lại cho
+  đúng p31: tầng tone (mạng hệ số → lưới → cắt lưới → J = A·[ảnh, 1]) trong vùng phase 2, J vào hai nhánh.
 - So **p31 với p30**: khác đúng nhánh ánh sáng → lưới. `brightness_probe` ở Cell 11 cho biết ảnh vốn đúng sáng còn bị
   làm tệ đi không, và ảnh bị đổi sáng tiến gần mốc oracle theo vùng (0,049) tới đâu.
 - Bằng chứng: `tests/test_bilateral.py` (cắt lưới tam tuyến: lưới hằng → hệ số hằng, lưới tăng theo x hay theo mức
