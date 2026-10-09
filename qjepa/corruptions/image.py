@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+from .halo import HALO_EFFECTS, HaloFlareBank, apply_halo, draw_halo_parameters
 from .light import (apply_light, draw_fog_parameters, draw_illumination_parameters, draw_light_parameters,
                     illumination_field, resize_channels)
 from .motion import imu_blur_kernel
@@ -30,6 +31,9 @@ IMAGE_MODES = ("full", "clean", "low_light_only", "blur_only", "sensor_noise_onl
 # Lamps and glare (light_*) are part of the lighting: every mode with the low-light
 # stage gets them, the blur-only and grain-only scenarios stay isolated.
 LIGHT_MODES = ("full", "low_light_only", "blur_low_light")
+# HALO's lens flare (halo_*) is the lens catching a light: the modes with both the optics and the
+# lighting. blur_only, low_light_only and sensor_noise_only stay isolated.
+HALO_MODES = ("full", "blur_low_light")
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,29 @@ class LowLightImageCorruptionConfig:
     # this fraction (blur and sensor noise only), so the model sees frames whose light
     # needs no fixing. Own stream ("image_clear"); at 0 nothing changes.
     env_clear_probability: float = 0.0
+    # Real lens flare from HALO (halo.py): the flare-only layer of a rendered ghost reflection, added in
+    # linear light after the lamps / uneven light / fog and before the optics, so the blur smears it and
+    # the exposure drop darkens it with the scene. A lens property: HALO_MODES, env_clear frames too.
+    # Own stream ("image_halo"); at 0 nothing is drawn and a config without these keys renders as
+    # before. The layers live in data.halo_root (a path, not hashed); halo_revision and halo_effects
+    # pin which build that folder must hold.
+    halo_probability: float = 0.0
+    halo_gain: tuple[float, float] = (0.5, 2.0)        # log-uniform, on the layer's linear light
+    halo_holdout_fraction: float = 0.1                 # of HALO's samples, whole scenes, for valid and for test each
+    halo_revision: str = ""
+    halo_effects: tuple[str, ...] = ("Reflective",)
+
+    def _validate_halo(self) -> None:
+        if not 0 <= self.halo_probability <= 1:
+            raise ValueError("halo_probability must be in [0,1]")
+        if len(self.halo_gain) != 2 or not 0 < self.halo_gain[0] <= self.halo_gain[1]:
+            raise ValueError("halo_gain must be [low, high] with 0 < low <= high")
+        if not 0 < self.halo_holdout_fraction <= 0.4:
+            raise ValueError("halo_holdout_fraction must be in (0, 0.4]: valid and test each keep that much")
+        if not self.halo_effects or not set(self.halo_effects) <= set(HALO_EFFECTS):
+            raise ValueError(f"halo_effects must list some of {list(HALO_EFFECTS)}")
+        if self.halo_probability > 0 and not (isinstance(self.halo_revision, str) and self.halo_revision):
+            raise ValueError("halo_revision must name the HF commit the HALO build came from")
 
     def _validate_light(self) -> None:
         def bounds(name: str, low_limit: float, strict: bool = False) -> None:
@@ -213,6 +240,7 @@ class LowLightImageCorruptionConfig:
         if self.motion_path_samples < 3:
             raise ValueError("motion_path_samples must be at least 3")
         self._validate_light()
+        self._validate_halo()
 
 
 def _motion_kernel(length: int, angle_radians: float) -> np.ndarray:
@@ -344,10 +372,15 @@ def brightness_stops(params: dict[str, object], height: int, width: int) -> np.n
 
 
 class LowLightImageCorruptor:
-    def __init__(self, config: LowLightImageCorruptionConfig | None = None, master_seed: int = 73128):
+    def __init__(self, config: LowLightImageCorruptionConfig | None = None, master_seed: int = 73128,
+                 halo_bank: HaloFlareBank | None = None):
         self.config = config or LowLightImageCorruptionConfig()
         self.config.validate()
         self.master_seed = master_seed
+        if self.config.halo_probability > 0 and halo_bank is None:
+            raise ValueError("corruption.image.halo_probability > 0 needs HALO's flare layers: set data.halo_root "
+                             "(config.build_corruptors builds the bank from it)")
+        self.halo_bank = halo_bank
 
     def _parameters(
         self, split: str, realization: int, trajectory: str, timestamp: float, mode: str
@@ -431,6 +464,12 @@ class LowLightImageCorruptor:
                 for key in ("light", "illumination", "fog"):
                     if key in parameters:
                         parameters[key], parameters[f"{key}_params"] = False, None
+        if cfg.halo_probability > 0:
+            # The lens, not the environment: env_clear frames keep it; a clean frame has none.
+            halo_rng = generator(self.master_seed, "image_halo", split, realization, trajectory, segment)
+            flare = not clean and mode in HALO_MODES and float(halo_rng.random()) < cfg.halo_probability
+            drawn = draw_halo_parameters(halo_rng, cfg, self.halo_bank, split)
+            parameters.update(halo=bool(flare), halo_params=drawn if flare else None)
         return parameters
 
     def __call__(
@@ -516,6 +555,10 @@ class LowLightImageCorruptor:
         if hdr:
             image = apply_light(image, params.get("light_params"), illumination=params.get("illumination_params"),
                                 fog=params.get("fog_params"))
+        # The lens flare on the light that reached the lens (lamps and fog included).
+        if params.get("halo"):
+            image = apply_halo(image, self.halo_bank, params["halo_params"])
+            hdr = True
 
         if optical and params["defocus"]:
             image = ndimage.gaussian_filter(
@@ -590,5 +633,8 @@ class LowLightImageCorruptor:
         return np.clip(image, 0.0, 1.0).astype(np.float32)
 
     def metadata(self) -> dict[str, object]:
-        return {"type": type(self).__name__, "master_seed": self.master_seed, "config": asdict(self.config)}
+        metadata = {"type": type(self).__name__, "master_seed": self.master_seed, "config": asdict(self.config)}
+        if self.halo_bank is not None:
+            metadata["halo"] = self.halo_bank.describe()
+        return metadata
 

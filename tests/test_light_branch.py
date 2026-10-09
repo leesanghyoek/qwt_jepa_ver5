@@ -121,7 +121,7 @@ def test_old_configs_build_no_light_layers_and_kaggle_light_spells_its_keys_out(
                              "kaggle_ijepa_target.yaml", "kaggle_blur.yaml",
                              "kaggle_steady.yaml", "kaggle_inputnorm.yaml",
                              "kaggle_exposure.yaml", "kaggle_bilateral.yaml",
-                             "kaggle_relight.yaml"):  # p23-p32 extend p22
+                             "kaggle_relight.yaml", "kaggle_halo.yaml"):  # p23-p33 extend p22
             assert "split_light_branch" not in load_config(path)["phase2"], path
     assert build_decoders(_config(False)).image.light is None
     glare = serializable_config(load_config("configs/kaggle_glare.yaml"))

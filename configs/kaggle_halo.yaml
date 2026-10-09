@@ -1,0 +1,32 @@
+# p33_halo: p32_relight + LOE SANG THAT cua HALO cong len anh TartanAir (qjepa/corruptions/halo.py).
+#
+# Nguoi dung (09/10/2026): "tron them anh HALO vao de model khu duoc nhieu va loe sang", va "tang xac suat de
+# trong batch co anh HALO". HALO khong co IMU, nen anh HALO KHONG thanh sample rieng: lop loe (separate.png,
+# bong ma phan xa giua cac mat thau kinh, render Blender) duoc cong vao anh TartanAir sach tren anh sang
+# tuyen tinh, truoc buoc mo va buoc thieu sang; IMU van la IMU that cua chinh frame do. Dich van la anh sach.
+#
+# halo_probability 0,5 tren moi frame (mode full va blur_low_light; ca frame "moi truong trong"): phase 1
+# batch 32 -> trung binh 16 anh co loe moi batch; phase 2 microbatch 4 x gradient_accumulation 2 = 8 anh moi
+# update -> 99,6% update co it nhat mot anh co loe (moi microbatch: 94%).
+# Valid/test dung lop loe cua scene HALO khac voi train (halo_holdout_fraction 0,1 moi ben).
+#
+# Doi `corruption` -> doi hash CA HAI phase: phase 1 phai train lai (khong dung lai phase 1 cua p28).
+# data.halo_root la duong dan (ngoai hash): notebook tu do thu muc co halo_index.csv trong /kaggle/input.
+extends: kaggle_relight.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p33_halo
+
+data:
+  halo_root: /kaggle/input/halo-reflective-1280
+
+corruption:
+  image:
+    halo_probability: 0.5
+    # log-uniform, nhan tren anh sang tuyen tinh cua lop loe. Do bang tools/halo_flare_preview.py --stats 200
+    # (40 lop loe HALO, 200 anh TartanAir, truoc chuoi nhieu): % pixel sang hon 8/255 trung vi 28, p10 6,8, p90 61;
+    # [0,5; 2,0] chi 21 / 3,9 / 55 -- 10% anh gan nhu khong thay loe. Nguoi dung muon nhieu anh co loe hon.
+    halo_gain: [1.0, 3.0]
+    halo_holdout_fraction: 0.1          # valid va test moi ben ~10% mau HALO, tron scene
+    halo_revision: d588bc94b10960f4597ddcc155eadd354cfa304e   # commit HF cua ban dung (halo_build.json)
+    halo_effects: [Reflective]

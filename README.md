@@ -12,6 +12,52 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p33_halo — nhiễu: lóe sáng thật của HALO cộng lên ảnh TartanAir** (config `configs/kaggle_halo.yaml` → OUT
+`outputs/p33_halo`). Bằng p32_relight cộng các khoá `corruption.image.halo_*` và `data.halo_root`; kiến trúc giữ nguyên.
+Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu và lóe sáng", "tăng xác suất để trong batch có ảnh HALO".
+- **Vì sao không thêm ảnh HALO thành sample.** HALO (render Blender, đi kèm UniSER, CVPR 2026) có bộ ba ảnh sạch / có
+  lóe / **chỉ lớp lóe**, nhưng không có IMU. Ghép IMU ngẫu nhiên thì dạy model nối hai tín hiệu không liên quan; bỏ
+  trống IMU thì cần cơ chế thiếu modality mà repo chưa có. Thứ TartanAir thiếu là lớp lóe, không phải cảnh. Nên lớp
+  lóe là **một bước nhiễu** trên ảnh TartanAir: IMU vẫn là IMU thật của frame, đích vẫn là ảnh sạch.
+- **Dữ liệu.** Dataset Kaggle `halo-reflective-1280`, dựng bằng `halo-flare-builder.ipynb`: 1 655 mẫu Reflective (bóng ma
+  phản xạ giữa các mặt thấu kính) của 32 scene, 1280×720, mỗi scene một tar (Kaggle giải nén thành thư mục), kèm
+  `halo_index.csv` và `halo_build.json` (commit HF `d588bc9`). `sample_id` của HALO **không duy nhất** (1 655 mẫu, 889
+  `sample_id`), nên file mang tên `sample_id_final_idx`.
+- **`qjepa/corruptions/halo.py`.** Lớp `separate.png` được cắt **giữa** theo tỉ lệ ảnh đích (tâm ảnh là trục quang, bóng
+  ma nằm trên đường qua nguồn sáng và tâm), đổi sang ánh sáng tuyến tính, thu nhỏ bằng BOX (giữ tổng ánh sáng), lật
+  ngang/dọc ngẫu nhiên, nhân `halo_gain` (log-uniform) rồi **cộng** vào cảnh trên ánh sáng tuyến tính, sau đèn / ánh
+  sáng không đều / sương và trước bước mờ: mờ kéo lóe theo, thiếu sáng làm tối lóe cùng cảnh. Đo trên một mẫu HALO: cộng
+  tuyến tính lệch 1,8/255 so với ảnh `flare` gốc (cộng trên sRGB 2,4; coi flare = sạch 3,0). Nguồn sáng không có trong
+  ảnh TartanAir: tương đương nguồn ngay ngoài khung, ngoài đời vẫn sinh bóng ma.
+- **Tần suất.** `halo_probability` 0,5, ở mode `full` và `blur_low_light` (có cả quang học lẫn ánh sáng; `blur_only`,
+  `low_light_only`, `sensor_noise_only` giữ riêng), cả frame "môi trường trong" (lóe là của ống kính), không ở frame
+  sạch. Phase 1 batch 32 → trung bình 16 ảnh có lóe mỗi batch; phase 2 microbatch 4 × tích luỹ 2 = 8 ảnh mỗi update
+  → 99,6% update có ít nhất một ảnh có lóe (mỗi microbatch 94%). Cell 5b của notebook in một batch train thật.
+  Luồng ngẫu nhiên riêng (`image_halo`): bật HALO không xê dịch tham số nhiễu nào khác.
+- **Cường độ** chọn bằng `tools/halo_flare_preview.py --stats 200` (40 lớp lóe HALO tải về máy, 200 ảnh TartanAir, trước
+  chuỗi nhiễu; % pixel sáng thêm hơn 8/255): `halo_gain` [0,5; 2,0] trung vị 21%, p10 3,9% (10% ảnh gần như không thấy
+  lóe); **[1; 3]** trung vị 28%, p10 6,8%, p90 61% — chọn cái sau vì người dùng muốn nhiều ảnh có lóe hơn.
+- **Chia theo scene HALO**: valid và test mỗi bên giữ ~10% mẫu HALO (`halo_holdout_fraction`), gồm trọn scene, nên PSNR
+  valid/test đo trên lóe chưa thấy lúc train; trên bộ đủ 1 655 mẫu: train 26 scene / 1 230 mẫu, valid 3 / 187
+  (Scene003, 017, 045), test 3 / 238 (Scene039, 049, 075). PSNR vì vậy không so thẳng với p32.
+- **Chi phí** (đo trên CPU máy này): +28 ms mỗi frame có lóe, 11,5 ms trong đó là giải mã PNG 1280×720; trung bình
+  +14 ms mỗi sample ở xác suất 0,5. Không cache cả bộ lóe (vài trăm MB mỗi worker) vì RAM đã có ngưỡng khởi động lại.
+- **Hash.** Đổi `corruption` → đổi hash **cả hai phase**: phase 1 train lại (~46 phút trên 2 × T4 như p28).
+  `data.halo_root` là đường dẫn, nằm ngoài hash như `data.root`. Mọi config cũ hash y như trước (p32: phase 1
+  `d2e4c470…`, phase 2 `602bcf1f…`, đối chiếu với code trước thay đổi). Bật HALO thì `validate_config` bắt ghi đủ mọi
+  khoá `halo_*` và có `data.halo_root`; `halo_revision` / `halo_effects` phải khớp `halo_build.json` của thư mục.
+- **Chưa đo:** từ p31, nhánh ánh sáng (trừ lớp sương tuyến tính) đã được thay bằng lưới song phương; hệ số tự do của
+  phép affine trừ được một lớp mượt, nhưng chưa biết đủ để gỡ bóng ma hay không. Xem ở Cell 12b và PSNR test.
+- Notebook: `RUN = 'p33_halo'`, gắn thêm `halo-reflective-1280`; Cell 4 tìm thư mục có `halo_index.csv` trong Input và
+  đặt `data.halo_root`.
+- Bằng chứng: `tests/test_halo_flare.py` (không khoá hoặc xác suất 0 thì ảnh và tham số giống hệt từng bit, bật HALO
+  không xê dịch tham số khác; lớp lóe là phần cắt giữa, thu nhỏ trên ánh sáng tuyến tính giữ tổng ánh sáng; tắt mọi bước
+  khác thì ảnh ra đúng bằng srgb(tuyến tính(sạch) + gain · lớp lóe), kể cả khi lật; scene HALO chia trọn vào
+  train/valid/test và mỗi split chỉ bốc lớp lóe của mình; chạy ở `full` và `blur_low_light` (cả frame môi trường trong),
+  không ở các mode khác hay frame sạch, trên ~`halo_probability` số frame; tất định, ổn định trong segment, ghi JSON
+  được; từ chối thư mục của bản dựng khác, thiếu lớp lóe hoặc không có thư mục; p33 = p32 + các khoá halo, đổi cả hai
+  hash, `data.halo_root` ngoài hash, thiếu khoá bị từ chối; train cả hai phase qua CLI với HALO bật).
+
 **p32_relight — phase 2: bản đồ stop (vùng nào tối đi bao nhiêu) đoán có giám sát, chia ra trước lưới song phương**
 (config `configs/kaggle_relight.yaml` → OUT `outputs/p32_relight`).
 Bằng p31_bilateral cộng một tầng trước lưới; hash phase 1 bằng p28 nên **dùng lại phase 1 của p28**. Người dùng, sau
