@@ -10,7 +10,10 @@ kept, and added in linear light -- with every other stage off, the noisy frame i
 srgb(linear(clean) + gain * layer), flips included; HALO's scenes are split whole into train / valid /
 test and each split draws only its own layers; the stage runs in full and blur_low_light (env_clear
 frames too) but not blur_only / low_light_only / sensor_noise_only / clean, fires on about
-halo_probability of the frames, is deterministic, segment-stable and JSON-serialisable; the bank
+halo_probability of the frames, is deterministic, segment-stable and JSON-serialisable; with
+halo_clear_probability a flared frame skips the environment (no darkness, uneven light, lamps, fog: zero
+stop map) while its camera blur, sensor noise and flare stay as drawn, and frames without the flare --
+or in the named blur_low_light scenario -- render exactly as with the switch off; the bank
 refuses a folder from another build, missing layers, or no folder at all; configs/kaggle_halo is
 p32_relight plus the halo keys and data.halo_root, changes both hashes, keeps data.halo_root out of
 them, and must spell every key out; the recipe trains both phases through the CLI with HALO on.
@@ -31,7 +34,7 @@ from PIL import Image
 from qjepa.cli import main
 from qjepa.config import HALO_KEYS, build_corruptors, load_config, serializable_config, validate_config
 from qjepa.corruptions.halo import HaloFlareBank, apply_halo, split_scenes
-from qjepa.corruptions.image import LowLightImageCorruptionConfig, LowLightImageCorruptor
+from qjepa.corruptions.image import LowLightImageCorruptionConfig, LowLightImageCorruptor, brightness_stops
 from qjepa.corruptions.light import linear_to_srgb, srgb_to_linear
 from qjepa.training.checkpoints import configuration_hash, load_checkpoint
 from test_kaggle_workflow import _write_dataset
@@ -101,7 +104,8 @@ def test_old_configs_render_and_report_exactly_as_before(tmp_path):
     assert LowLightImageCorruptionConfig().halo_probability == 0.0
     old = LowLightImageCorruptor(LowLightImageCorruptionConfig(), 73128)
     zero = _corruptor(halo_probability=0.0, clean_probability=LowLightImageCorruptionConfig().clean_probability)
-    on = _corruptor(bank, halo_probability=1.0, clean_probability=LowLightImageCorruptionConfig().clean_probability)
+    on = _corruptor(bank, halo_probability=1.0, halo_clear_probability=0.0,
+                    clean_probability=LowLightImageCorruptionConfig().clean_probability)
     image = _frame()
     for index in range(20):
         (a, pa), (b, pb), (c, pc) = (_call(x, image, index) for x in (old, zero, on))
@@ -203,6 +207,35 @@ def test_the_stage_is_deterministic_segment_stable_and_serialisable(tmp_path):
     assert len(others) > 1
 
 
+def test_flared_frames_skip_the_environment_and_the_others_are_untouched(tmp_path):
+    bank = _bank(_write_halo(tmp_path / "halo"))
+    recipe = dict(load_config("configs/kaggle_halo.yaml")["corruption"]["image"], clean_probability=0.0)
+    assert recipe["halo_clear_probability"] == 1.0 and recipe["illum_probability"] > 0
+    plain, lighter = (LowLightImageCorruptor(LowLightImageCorruptionConfig(**dict(recipe, halo_clear_probability=p)),
+                                             73128, halo_bank=bank) for p in (0.0, 1.0))
+    image = _frame()
+    camera = ("defocus", "defocus_sigma", "motion", "motion_length", "downsample", "photon_count", "read_noise_std",
+              "sensor_noise", "jpeg", "halo", "halo_params")
+    flared = darkened_before = 0
+    for index in range(60):
+        (a, pa), (b, pb) = _call(plain, image, index, trajectory=f"t{index}"), _call(lighter, image, index,
+                                                                                    trajectory=f"t{index}")
+        if pb["halo"]:
+            flared += 1
+            darkened_before += bool(pa["low_light"])
+            assert pb["halo_clear"] and pb["low_light"] is False
+            assert not pb.get("illumination") and pb.get("illumination_params") is None and not pb.get("light")
+            assert {key: pb[key] for key in camera} == {key: pa[key] for key in camera}
+            assert not brightness_stops(pb, 64, 64).any()               # nothing scaled the light
+        else:
+            assert pb.pop("halo_clear") is False and pb == pa and np.array_equal(a, b)
+    assert flared > 15 and darkened_before > 5                        # the switch did remove darkness
+    # A named scenario keeps its meaning: blur_low_light stays dark under the flare.
+    for index in range(10):
+        (a, pa), (b, pb) = (_call(c, image, index, mode="blur_low_light", trajectory=f"t{index}") for c in (plain, lighter))
+        assert pb["halo_clear"] is False and np.array_equal(a, b)
+
+
 def test_the_bank_refuses_another_build_missing_layers_and_no_folder(tmp_path):
     with pytest.raises(FileNotFoundError, match="halo_index.csv"):
         _bank(tmp_path / "nothing")
@@ -247,7 +280,8 @@ def test_kaggle_halo_is_p32_plus_the_halo_keys_and_spells_them_out(tmp_path):
     del rootless["data"]["halo_root"]
     with pytest.raises(ValueError, match="halo_root"):
         validate_config(rootless)
-    for key, value in (("halo_probability", 1.5), ("halo_gain", [0.0, 2.0]), ("halo_gain", [3.0, 1.0]),
+    for key, value in (("halo_probability", 1.5), ("halo_clear_probability", -0.1), ("halo_gain", [0.0, 2.0]),
+                       ("halo_gain", [3.0, 1.0]),
                        ("halo_holdout_fraction", 0.0), ("halo_holdout_fraction", 0.5), ("halo_effects", ["Lens"]),
                        ("halo_revision", ""), ("halo_typo", 1.0)):
         bad = copy.deepcopy(full_halo)

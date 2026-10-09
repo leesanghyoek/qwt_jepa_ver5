@@ -34,6 +34,11 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
   sạch. Phase 1 batch 32 → trung bình 16 ảnh có lóe mỗi batch; phase 2 microbatch 4 × tích luỹ 2 = 8 ảnh mỗi update
   → 99,6% update có ít nhất một ảnh có lóe (mỗi microbatch 94%). Cell 5b của notebook in một batch train thật.
   Luồng ngẫu nhiên riêng (`image_halo`): bật HALO không xê dịch tham số nhiễu nào khác.
+- **Frame có lóe được nhiễu nhẹ hơn** (`halo_clear_probability` 1). Người dùng: "ảnh HALO đã có sẵn nhiều lóe rồi, nên
+  ảnh đó nhiễu giảm, các ảnh khác nhiễu bình thường". Frame có lóe (mode `full`) bỏ các bước **môi trường** — tối,
+  sáng không đều, đèn, sương — như `env_clear`; mờ máy ảnh và hạt cảm biến giữ nguyên (bỏ thì model học "ảnh có lóe
+  luôn nét"). Frame không có lóe không đổi. Đo trên 4 000 frame của recipe: frame bị làm tối 58% → **30%**, sáng không
+  đều 53% → 27%; trong frame không có lóe vẫn 60% bị làm tối. Muốn giữ nhiều ảnh tối hơn: hạ khoá này (0 = như cũ).
 - **Cường độ** chọn bằng `tools/halo_flare_preview.py --stats 200` (40 lớp lóe HALO tải về máy, 200 ảnh TartanAir, trước
   chuỗi nhiễu; % pixel sáng thêm hơn 8/255): `halo_gain` [0,5; 2,0] trung vị 21%, p10 3,9% (10% ảnh gần như không thấy
   lóe); **[1; 3]** trung vị 28%, p10 6,8%, p90 61% — chọn cái sau vì người dùng muốn nhiều ảnh có lóe hơn.
@@ -56,7 +61,9 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
   train/valid/test và mỗi split chỉ bốc lớp lóe của mình; chạy ở `full` và `blur_low_light` (cả frame môi trường trong),
   không ở các mode khác hay frame sạch, trên ~`halo_probability` số frame; tất định, ổn định trong segment, ghi JSON
   được; từ chối thư mục của bản dựng khác, thiếu lớp lóe hoặc không có thư mục; p33 = p32 + các khoá halo, đổi cả hai
-  hash, `data.halo_root` ngoài hash, thiếu khoá bị từ chối; train cả hai phase qua CLI với HALO bật).
+  hash, `data.halo_root` ngoài hash, thiếu khoá bị từ chối; frame có lóe bỏ bước môi trường (bản đồ stop bằng 0) mà
+  giữ mờ, hạt và lóe, frame không lóe và kịch bản `blur_low_light` giống hệt khi tắt khoá; train cả hai phase qua CLI
+  với HALO bật).
 
 **p32_relight — phase 2: bản đồ stop (vùng nào tối đi bao nhiêu) đoán có giám sát, chia ra trước lưới song phương**
 (config `configs/kaggle_relight.yaml` → OUT `outputs/p32_relight`).

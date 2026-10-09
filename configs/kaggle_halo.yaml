@@ -9,6 +9,8 @@
 # batch 32 -> trung binh 16 anh co loe moi batch; phase 2 microbatch 4 x gradient_accumulation 2 = 8 anh moi
 # update -> 99,6% update co it nhat mot anh co loe (moi microbatch: 94%).
 # Valid/test dung lop loe cua scene HALO khac voi train (halo_holdout_fraction 0,1 moi ben).
+# Frame co loe nhieu nhe hon (halo_clear_probability 1): bo toi / sang khong deu / den / suong, giu mo va hat.
+# Do tren 4000 frame: frame bi lam toi 58% -> 30% tong so; frame khong loe van 60% bi lam toi.
 #
 # Doi `corruption` -> doi hash CA HAI phase: phase 1 phai train lai (khong dung lai phase 1 cua p28).
 # data.halo_root la duong dan (ngoai hash): notebook tu do thu muc co halo_index.csv trong /kaggle/input.
@@ -30,3 +32,7 @@ corruption:
     halo_holdout_fraction: 0.1          # valid va test moi ben ~10% mau HALO, tron scene
     halo_revision: d588bc94b10960f4597ddcc155eadd354cfa304e   # commit HF cua ban dung (halo_build.json)
     halo_effects: [Reflective]
+    # Nguoi dung (09/10/2026): "anh HALO da co san nhieu loe roi, nen anh do nhieu giam, cac anh khac nhieu binh
+    # thuong". Frame co loe (mode full) bo cac buoc MOI TRUONG -- toi, sang khong deu, den, suong -- nhu env_clear;
+    # mo may anh va hat cam bien giu nguyen. Frame khong co loe khong doi.
+    halo_clear_probability: 1.0

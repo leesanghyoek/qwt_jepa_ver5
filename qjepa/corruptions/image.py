@@ -149,10 +149,15 @@ class LowLightImageCorruptionConfig:
     halo_holdout_fraction: float = 0.1                 # of HALO's samples, whole scenes, for valid and for test each
     halo_revision: str = ""
     halo_effects: tuple[str, ...] = ("Reflective",)
+    # Lighter corruption where the flare already is: this fraction of the flared frames (mode "full") skips the
+    # environment -- no low-light stage, uneven light, lamps nor fog, like env_clear -- while the camera blur
+    # and the sensor noise stay as drawn. Frames without the flare are untouched. Last draw of "image_halo".
+    halo_clear_probability: float = 0.0
 
     def _validate_halo(self) -> None:
-        if not 0 <= self.halo_probability <= 1:
-            raise ValueError("halo_probability must be in [0,1]")
+        for name in ("halo_probability", "halo_clear_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0,1]")
         if len(self.halo_gain) != 2 or not 0 < self.halo_gain[0] <= self.halo_gain[1]:
             raise ValueError("halo_gain must be [low, high] with 0 < low <= high")
         if not 0 < self.halo_holdout_fraction <= 0.4:
@@ -470,6 +475,16 @@ class LowLightImageCorruptor:
             flare = not clean and mode in HALO_MODES and float(halo_rng.random()) < cfg.halo_probability
             drawn = draw_halo_parameters(halo_rng, cfg, self.halo_bank, split)
             parameters.update(halo=bool(flare), halo_params=drawn if flare else None)
+            if cfg.halo_clear_probability > 0:
+                draw = float(halo_rng.random())                 # unconditional, as everywhere in this method
+                lighter = flare and mode == "full" and draw < cfg.halo_clear_probability
+                parameters["halo_clear"] = bool(lighter)
+                if lighter:
+                    # The flare is the frame's light problem: no darkness or other lighting on top of it.
+                    parameters.update(low_light=False)
+                    for key in ("light", "illumination", "fog"):
+                        if key in parameters:
+                            parameters[key], parameters[f"{key}_params"] = False, None
         return parameters
 
     def __call__(
