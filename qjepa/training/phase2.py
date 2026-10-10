@@ -256,6 +256,16 @@ class Phase2Trainer:
                     stops_l1 = F.l1_loss(predicted, target)
                     loss = loss + float(self.phase["split_relight_weight"]) * stops_l1
                     parts["image_stops_l1"] = stops_l1
+                if "image_tone_logit" in restored and self.phase.get("split_tone_gate", False):
+                    # p35: the gate against the corruption's own answer -- was this frame's light changed?
+                    if "image_tone_label" not in batch:
+                        raise KeyError("phase2.split_tone_gate needs batch['image_tone_label'] (the training "
+                                       "dataset's tone_label)")
+                    logit, label = restored["image_tone_logit"].float(), batch["image_tone_label"].float()
+                    tone_bce = F.binary_cross_entropy_with_logits(logit, label)
+                    loss = loss + float(self.phase["split_tone_gate_weight"]) * tone_bce
+                    parts["image_tone_bce"] = tone_bce
+                    parts["image_tone_accuracy"] = ((logit > 0).float() == label).float().mean()
                 lowfreq_weight = float(self.phase.get("lowfreq_mse_weight", 0.0))
                 if lowfreq_weight > 0:
                     # p30: PSNR's own (squared) error on brightness and colour at long periods.

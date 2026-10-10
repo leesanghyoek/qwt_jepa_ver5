@@ -902,6 +902,31 @@ class OvercompleteRefiner(nn.Module):
         return detail + self.tail(self.shrink(h))
 
 
+class ToneGate(nn.Module):
+    """How much of the tone stage a frame gets: J = input + g * (tone(input) - input), g in [0, 1] per frame.
+
+    On p33's flare-free valid frames -- mild blur and grain, light untouched -- the input stood at 36.7 dB and
+    the tone stage's output at 30.2 dB (tools/halo_probe.py): it relit frames that needed none, as p31 did to
+    98% of them. Whether a frame needs relighting is in its exposure statistics (p31: a logistic fit on them
+    told the two apart at AUC 0.96), and the corruption knows the answer: g is trained only on that label
+    (binary cross-entropy, phase2.split_tone_gate_weight), and the blend reads it detached, so the image losses
+    cannot pull it towards "relight every frame a little". Inputs: the input's exposure statistics, its 8 x 8
+    luminance layout and the latent's mean. The tone stage then learns only from the frames it is let at.
+    """
+
+    def __init__(self, latent_channels: int = 128, width: int = 32) -> None:
+        super().__init__()
+        self.head = nn.Sequential(nn.Linear(EXPOSURE_FEATURES + 64 + latent_channels, width), nn.ReLU(),
+                                  nn.Linear(width, width), nn.ReLU(), nn.Linear(width, 1))
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """The logit of "this frame's light was changed", [B, 1]."""
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            layout = F.adaptive_avg_pool2d(luminance(image.float().clamp(0, 1)), 8).flatten(1)
+            features = torch.cat((exposure_statistics(image), layout, latent.float().mean(dim=(-2, -1))), dim=1)
+            return self.head(features)
+
+
 class ChromaDetail(nn.Module):
     """Full-resolution chroma: the detail of colour that the colour branch's grid cannot carry.
 
@@ -956,9 +981,13 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
         light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
-        relight: dict | None = None, chroma: dict | None = None,
+        relight: dict | None = None, chroma: dict | None = None, tone_gate: dict | None = None,
     ) -> None:
         super().__init__()
+        if tone_gate and not tone_grid:
+            raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
+        # p35 (phase2.split_tone_gate): per frame, how much of the tone stage it gets. Absent: no layers.
+        self.tone_gate = ToneGate(latent_channels, int(tone_gate["width"])) if tone_gate else None
         # p34 (phase2.split_chroma_detail): full-resolution chroma detail. Absent: no layers, p33's output.
         self.chroma = ChromaDetail(int(chroma["width"]), int(chroma["blocks"])) if chroma else None
         if light and tone_grid:
@@ -1028,10 +1057,15 @@ class SplitColorEdgeDecoder(nn.Module):
         if self.light is not None:
             image = self.light(latent, image)
             parts["image_light"] = image
+        source = image
         if self.relight is not None:
             image, parts["image_stops"] = self.relight(latent, image)
         if self.tone_grid is not None:
             image = self.tone_grid(latent, image)
+            if self.tone_gate is not None:
+                parts["image_tone_logit"] = self.tone_gate(latent, source)
+                gate = torch.sigmoid(parts["image_tone_logit"].detach())[..., None, None]
+                image = source + gate * (image - source)
             parts["image_light"] = image                       # the tone stage's output, as the light branch's
         base = upsample(self.color(latent, downsample(image, self.color_scale)), size)
         light = illumination(base, self.illumination_scale)

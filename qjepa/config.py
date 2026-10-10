@@ -149,6 +149,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_tone_grid(config)
     _validate_relight(config)
     _validate_chroma(config)
+    _validate_tone_gate(config)
     _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
@@ -753,6 +754,32 @@ def _validate_chroma(config: dict[str, Any]) -> None:
             raise ValueError(f"phase2.{key} must be an integer >= {low}")
 
 
+TONE_GATE_KEYS = ("split_tone_gate_width", "split_tone_gate_weight")
+
+
+def _validate_tone_gate(config: dict[str, Any]) -> None:
+    """p35: phase2.split_tone_gate, how much of the tone stage each frame gets, learnt from the corruption.
+
+    On, every split_tone_gate_* key must be written out (the hash reads only the config file)."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_tone_gate", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_tone_gate must be true or false")
+    if not enabled:
+        return
+    if not phase2.get("split_tone_grid", False):
+        raise ValueError("phase2.split_tone_gate blends the bilateral grid's output: set phase2.split_tone_grid: true")
+    missing = [key for key in TONE_GATE_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_tone_gate needs every split_tone_gate_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    width = phase2["split_tone_gate_width"]
+    if isinstance(width, bool) or not isinstance(width, int) or width < 4:
+        raise ValueError("phase2.split_tone_gate_width must be an integer >= 4")
+    if not _nonnegative_number(phase2["split_tone_gate_weight"]):
+        raise ValueError("phase2.split_tone_gate_weight must be a nonnegative number")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -973,6 +1000,10 @@ def build_decoders(
                 "width": int(config["phase2"]["split_chroma_width"]),
                 "blocks": int(config["phase2"]["split_chroma_blocks"]),
             } if config["phase2"].get("split_chroma_detail", False) else None,
+            # Absent before p35: every frame gets the whole tone stage.
+            "tone_gate": {
+                "width": int(config["phase2"]["split_tone_gate_width"]),
+            } if config["phase2"].get("split_tone_gate", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

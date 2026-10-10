@@ -311,6 +311,22 @@ def active_stages(params: dict[str, object]) -> tuple[bool, bool, bool]:
     return optical, low_light, sensor_noise
 
 
+# What a frame's corruption did to its light, for phase2.split_tone_gate's label and the validation's split.
+FRAME_KINDS = ("plain", "relit", "flare")
+
+
+def frame_kind(params: dict[str, object]) -> str:
+    """"flare": a HALO flare was added; "relit": the light was changed (low-light stage, uneven light, lamps,
+    fog); "plain": neither -- only blur, resolution, sensor grain and JPEG, or a clean frame. A plain frame's
+    tone needs no fixing: the tone stage should hand it on as it is."""
+    if params.get("clean"):
+        return "plain"
+    if params.get("halo"):
+        return "flare"
+    relit = active_stages(params)[1] or any(bool(params.get(key)) for key in ("illumination", "light", "fog"))
+    return "relit" if relit else "plain"
+
+
 # What the phase-1 degradation head regresses: the corruption of this frame, each
 # entry scaled to roughly [0, 1] over the configured ranges and 0 where the stage
 # did not run, so a clean frame is the zero vector.

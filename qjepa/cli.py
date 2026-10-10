@@ -42,7 +42,7 @@ from .data import (
     write_manifest,
 )
 from .data.dataset import load_rgb
-from .corruptions.image import brightness_stops, degradation_vector
+from .corruptions.image import FRAME_KINDS, brightness_stops, degradation_vector, frame_kind
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
 from .evaluation.reporting import (
@@ -129,6 +129,7 @@ def _dataset(
     hflip_probability: float = 0.0,
     full_frame: bool = False,
     brightness_target: bool = False,
+    tone_label: bool = False,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -152,6 +153,7 @@ def _dataset(
         source_size=tuple(config["data"]["source_size"]) if config["data"].get("source_size") else None,
         full_frame=full_frame,
         brightness_target=brightness_target,
+        tone_label=tone_label,
     )
 
 
@@ -168,9 +170,11 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
                         and sensitivity.get("noise_direction", "corruption") == "sensor_noise")
     # Only phase 2's relight loss reads the corruption's stop map (phase2.split_relight).
     brightness_target = phase == "phase2" and bool(config["phase2"].get("split_relight", False))
+    # Only phase 2's tone gate reads whether the corruption changed the light (phase2.split_tone_gate).
+    tone_label = phase == "phase2" and bool(config["phase2"].get("split_tone_gate", False))
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
                     hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
-                    brightness_target=brightness_target, **kwargs)
+                    brightness_target=brightness_target, tone_label=tone_label, **kwargs)
 
 
 def _loader(
@@ -371,6 +375,20 @@ class _RecentMean:
             return ""
         count = max(len(values) for values in kept.values())
         return f"| TB {count} update: " + " ".join(f"{key}={sum(v) / len(v):.4f}" for key, v in kept.items())
+
+
+KIND_LABELS = {"plain": "tot", "relit": "doi sang", "flare": "loe"}
+
+
+def kind_summary(metrics: dict[str, Any], prefix: str = "") -> str:
+    """"tot 36.71->27.85 (n=40, 98% te hon vao) | doi sang ... | loe ..." from _evaluate_with_overlap's keys."""
+    parts = []
+    for kind in FRAME_KINDS:
+        if f"{prefix}{kind}_count" in metrics:
+            parts.append(f"{KIND_LABELS[kind]} {metrics[f'{prefix}{kind}_baseline_image_psnr_db']:.2f}->"
+                         f"{metrics[f'{prefix}{kind}_image_psnr_db']:.2f} (n={int(metrics[f'{prefix}{kind}_count'])}, "
+                         f"{100 * metrics[f'{prefix}{kind}_worse_fraction']:.0f}% te hon vao)")
+    return " | ".join(parts)
 
 
 def _next_timed(batches: Iterator[Any]) -> tuple[Any, float]:
@@ -728,6 +746,9 @@ def _evaluate_with_overlap(
         key: np.full(length, np.nan, dtype=np.float64) for key, length in trajectory_lengths.items()
     }
     image_values: dict[str, list[float]] = {}
+    # PSNR in and out by what the corruption did to the light (corruptions.image.frame_kind): one mean over a
+    # mixed bank hid that p33 improved dark and flared frames while ruining plain ones by 9 dB.
+    kind_values: dict[str, list[tuple[float, float]]] = {}
     frame_rows = []
     frame_index = 0
     estimated_frames = min(len(dataset.samples), maximum_batches * getattr(loader, "batch_size", 1))
@@ -755,6 +776,9 @@ def _evaluate_with_overlap(
             ).items()})
             for key, value in metrics.items():
                 image_values.setdefault(key, []).append(value)
+            if "corruption" in raw:
+                kind = frame_kind(raw["corruption"][row]["image"])
+                kind_values.setdefault(kind, []).append((metrics["baseline_image_psnr_db"], metrics["image_psnr_db"]))
             trajectory = raw["trajectory_key"][row]
             if output is not None:
                 sample_id = raw.get("sample_id", [str(frame_index)] * restored["image"].shape[0])[row]
@@ -813,6 +837,10 @@ def _evaluate_with_overlap(
     result: dict[str, float | list[float] | int] = {
         key: float(np.mean(value)) for key, value in image_values.items()
     }
+    for kind, pairs in kind_values.items():
+        before, after = np.array(pairs).T
+        result.update({f"{kind}_baseline_image_psnr_db": float(before.mean()), f"{kind}_image_psnr_db": float(after.mean()),
+                       f"{kind}_count": len(pairs), f"{kind}_worse_fraction": float((after < before).mean())})
     result.update(
         {
             "imu_covered_unique_rows": covered_rows,
@@ -1330,6 +1358,9 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     f" | {'VUOT baseline' if beats else 'chua vuot'}"
                     f" | RSS {memory['rss_mib']:.0f}+{memory['children_rss_mib']:.0f} MiB"
                 )
+                kinds = kind_summary(validation, "validation_")
+                if kinds:
+                    print(f"  theo loai anh: {kinds}")
                 if blur_validation:
                     print(
                         f"  blur actual={blur_validation['blur_validation_active_frames']}"
@@ -1473,6 +1504,8 @@ def command_evaluate(args: argparse.Namespace) -> None:
             forward_model=runner,
             progress=True,
         )
+        if kind_summary(results[name]):
+            print(f"  {name} theo loai anh: {kind_summary(results[name])}", flush=True)
     scope = f"max-batches={args.max_batches}" if args.max_batches else (
         f"1/{args.every} frame" if args.every > 1 else "full split")
     evaluation_summary(output, results, label=f"{config.get('run_kind', 'main').upper()} | {args.split} | {scope}")

@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
-from ..corruptions.image import brightness_stops, degradation_vector
+from ..corruptions.image import brightness_stops, degradation_vector, frame_kind
 from ..corruptions.rng import derive_seed
 from .manifest import PairedSample
 from .tartanair import Trajectory
@@ -97,6 +97,7 @@ class PairedCameraImuDataset(Dataset):
         source_size: tuple[int, int] | None = None,
         full_frame: bool = False,
         brightness_target: bool = False,
+        tone_label: bool = False,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -106,6 +107,8 @@ class PairedCameraImuDataset(Dataset):
         self.sensor_reference = sensor_reference
         # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
         self.brightness_target = bool(brightness_target)
+        # phase2.split_tone_gate: 1 when the corruption changed the frame's light or added a flare, else 0.
+        self.tone_label = bool(tone_label)
         self.hflip_probability = hflip_probability
         self.samples = samples
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
@@ -229,6 +232,8 @@ class PairedCameraImuDataset(Dataset):
             item["image_noise_free"] = chw(noise_free)
         if stops is not None:
             item["image_stops"] = torch.from_numpy(np.ascontiguousarray(stops))[None]
+        if self.tone_label:
+            item["image_tone_label"] = torch.tensor([float(frame_kind(image_parameters) != "plain")])
         return item
 
 
@@ -236,7 +241,7 @@ def collate_paired(batch: list[dict[str, object]]) -> dict[str, object]:
     output: dict[str, object] = {}
     for key in ("image_clean", "image_noisy", "image_time", "imu_times", "imu_start"):
         output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
-    for key in ("image_degradation", "image_noise_free", "image_stops"):
+    for key in ("image_degradation", "image_noise_free", "image_stops", "image_tone_label"):
         if key in batch[0]:
             output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
     for key in ("imu_clean_phys", "imu_noisy_phys"):

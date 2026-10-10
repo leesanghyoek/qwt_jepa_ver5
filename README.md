@@ -12,6 +12,29 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p35_tonegate — phase 2: cổng cho tầng tone, và validation theo loại ảnh** (config `configs/kaggle_tonegate.yaml` → OUT
+`outputs/p35_tonegate`). Bằng p34_chroma cộng `phase2.split_tone_gate_*`; hash phase 1 bằng p33, chỉ train phase 2.
+- **Đo trên p33** (`halo_probe`, bảng từng tầng, bản không lóe = ảnh TỐT, chỉ mờ nhẹ + hạt): vào 36,71 dB (Y 38,65) →
+  decoder để nguyên 33,06 (lưới màu 128², p34) → **sau tầng tone 30,20** → khôi phục 27,85 (Y 29,33). Tầng tone (bản đồ
+  stop + lưới song phương) làm mất 6,5 dB trên ảnh không cần chỉnh sáng, và hỏng ở độ sáng. Nó chỉ được giám sát ở trung
+  bình khối 8×8 và không biết ảnh nào cần chỉnh, nên làm sáng "trung bình" mọi ảnh (p31: 98% ảnh không bị đổi sáng ra
+  tệ hơn vào). Thông tin để biết là có: hồi quy logistic trên thống kê ảnh vào phân biệt hai loại với AUC 0,96 (p31).
+- **`decoders.ToneGate`**: MLP nhỏ đọc thống kê phơi sáng (27 số), bố cục độ sáng 8×8 và trung bình latent, ra logit
+  "bước nhiễu đã đổi ánh sáng của ảnh này hoặc thêm lóe". J = ảnh vào + g·(tone(ảnh vào) − ảnh vào), g = sigmoid(logit)
+  đọc **detach**: chỉ BCE với nhãn thật (`corruptions.image.frame_kind` ≠ plain, `phase2.split_tone_gate_weight`) train
+  g, loss ảnh không kéo nó về "làm sáng mọi ảnh một chút" — cùng cách p32 học bản đồ stop. Tầng tone chỉ nhận gradient
+  từ những ảnh nó được cho chạm vào. Ảnh tốt: g → 0, J = ảnh vào. 8 129 tham số; update 0 vẫn là phép đồng nhất.
+- **Validation theo loại ảnh.** Một PSNR trung bình trên ngân hàng valid trộn che mất việc p33 cải thiện ảnh tối và ảnh
+  có lóe nhưng làm hỏng ảnh tốt 9 dB. `_evaluate_with_overlap` giờ ghi PSNR vào → ra, số ảnh và % ảnh ra tệ hơn vào cho
+  từng loại (`plain` / `relit` / `flare`); dòng validation và lệnh `evaluate` in `theo loai anh: tot … | doi sang … |
+  loe …`. Train log thêm `image_tone_bce` và `image_tone_accuracy`.
+- Đọc kết quả: "tot" phải không còn tệ hơn vào (p33: 36,71 → 27,85, `halo_probe`); `image_tone_accuracy` gần 1.
+- Bằng chứng: `tests/test_tone_gate.py` (`frame_kind` đúng cho ảnh sạch, chỉ mờ, chỉ hạt, môi trường trong, tối, chiếu
+  sáng không đều, đèn, sương, lóe; dataset mang nhãn chỉ khi được hỏi và nhãn khớp tham số nhiễu; cổng đóng thì tầng
+  tone không chạm được ảnh, cổng mở thì đủ tầng tone; khởi đầu là phép đồng nhất; loss ảnh không tới được cổng, BCE thì
+  tới; thiếu khoá giữ đúng các lớp của p34; giá trị sai bị từ chối; phase 2 train được, log BCE và độ chính xác, validation
+  có PSNR theo loại ảnh cộng đủ số ảnh; p35 = p34 + các khoá cổng, cùng hash phase 1 với p33).
+
 **p34_chroma — phase 2: màu ở độ phân giải đầy đủ** (config `configs/kaggle_chroma.yaml` → OUT `outputs/p34_chroma`).
 Bằng p33_halo cộng `phase2.split_chroma_*`; hash phase 1 bằng p33 nên **dùng lại phase 1 của p33**, chỉ train phase 2.
 - **Đo trên p33** (`tools/halo_probe.py`, 256 ảnh valid, mỗi ảnh có và không có lớp lóe, mọi nhiễu khác giữ nguyên):

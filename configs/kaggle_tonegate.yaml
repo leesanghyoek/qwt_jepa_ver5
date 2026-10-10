@@ -1,0 +1,22 @@
+# p35_tonegate: p34_chroma + CONG CHO TANG TONE (phase2.split_tone_gate). Chi doi phase 2: hash phase 1 bang p33 ->
+# dung lai phase 1 cua p33_halo.
+#
+# Do tren p33 (tools/halo_probe.py, 256 anh valid, ban khong loe = anh TOT, chi mo nhe + hat; Kaggle 10/10/2026):
+#   vao 36,71 dB (Y 38,65) -> decoder de nguyen 33,06 (luoi mau 128^2, p34 da sua) -> SAU TANG TONE 30,20 -> khoi phuc
+#   27,85 (Y 29,33). Tang tone (ban do stop + luoi song phuong) lam mat 6,5 dB tren anh khong can chinh sang, va hong o
+#   do sang: no lam sang "trung binh" moi anh nhu p31 (98% anh khong bi doi sang ra te hon vao). Tang tone chi duoc
+#   giam sat o trung binh khoi 8x8, va khong biet anh nao can chinh.
+# ToneGate: mot dau nho doc thong ke phoi sang (27 so), bo cuc do sang 8x8 va trung binh latent, doan xac suat g "anh nay
+# bi doi sang hoac co loe"; J = vao + g * (tone(vao) - vao). g hoc THANG bang BCE voi nhan that cua buoc nhieu
+# (corruptions.image.frame_kind != plain), phep tron doc g da detach (chi BCE train g, nhu ban do stop o p32).
+# Thong tin co san: p31 do hoi quy logistic tren thong ke anh vao phan biet hai loai AUC 0,96. 8 129 tham so.
+# Validation va evaluate in them PSNR theo loai anh (tot / doi sang / loe) va % anh te hon anh vao.
+extends: kaggle_chroma.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p35_tonegate
+
+phase2:
+  split_tone_gate: true
+  split_tone_gate_width: 32
+  split_tone_gate_weight: 0.5          # BCE ~0,69 luc dau; loss tong ~1,4-2,4
