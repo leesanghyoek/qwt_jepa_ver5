@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import csv
 import json
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -40,8 +41,6 @@ from .rng import derive_seed
 
 HALO_EFFECTS = ("Streak", "Reflective", "Glare", "Shimmer")
 SPLITS = ("train", "valid", "test")
-# Lop loe 256x256 float32 ~0,8 MB; vai lop la du cho anh lap lai trong mot segment va cho test.
-_CACHE_SIZE = 8
 # sRGB 8 bit -> tuyen tinh bang bang tra: dung bang srgb_to_linear, nhanh hon np.power ~10 lan.
 _SRGB_TO_LINEAR = srgb_to_linear(np.arange(256, dtype=np.float32) / np.float32(255))
 
@@ -96,7 +95,9 @@ class HaloFlareBank:
                              f"holdout_fraction {holdout_fraction}); can them scene")
         self.revision = revision
         self.holdout_fraction = float(holdout_fraction)
-        self._cache: dict[tuple[str, int, int], np.ndarray] = {}
+        # (uid, cao, rong) -> lop loe da thu nho, sRGB 8 bit nen zlib. Moi tien trinh (worker DataLoader) giai ma
+        # PNG 1280x720 cua mot lop dung MOT lan: do tren CPU, frame co loe 30 ms -> ~15 ms nhu frame thuong.
+        self._cache: dict[tuple[str, int, int], bytes] = {}
 
     def pick(self, split: str, rng: np.random.Generator) -> str:
         if split not in self.splits:
@@ -105,11 +106,20 @@ class HaloFlareBank:
         return uids[int(rng.integers(len(uids)))]
 
     def layer(self, uid: str, height: int, width: int) -> np.ndarray:
-        """Lop loe ``uid`` o anh sang tuyen tinh, float32 [height, width, 3]: cat giua, BOX."""
+        """Lop loe ``uid`` o anh sang tuyen tinh, float32 [height, width, 3]: cat giua, BOX.
+
+        Ban da thu nho duoc luu lai o sRGB 8 bit (cung do chinh xac voi PNG goc) va LUON doc qua ban do, ca lan
+        dau: lop loe la ham cua (uid, cao, rong), khong phu thuoc cache da co hay chua. Moi lan tra ve mang moi.
+        """
         key = (uid, int(height), int(width))
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
+        packed = self._cache.get(key)
+        if packed is None:
+            packed = zlib.compress(self._render(uid, int(height), int(width)).tobytes(), 1)
+            self._cache[key] = packed
+        return _SRGB_TO_LINEAR[np.frombuffer(zlib.decompress(packed), np.uint8).reshape(int(height), int(width), 3)]
+
+    def _render(self, uid: str, height: int, width: int) -> np.ndarray:
+        """Doc PNG, cat giua theo ti le dich, thu nho BOX tren anh sang tuyen tinh -> sRGB uint8 [h, w, 3]."""
         with Image.open(self.paths[uid]) as image:
             pixels = np.asarray(image.convert("RGB"))
         rows, cols = pixels.shape[:2]
@@ -118,11 +128,8 @@ class HaloFlareBank:
             else (round(cols * height / width), cols)
         top, left = (rows - crop_h) // 2, (cols - crop_w) // 2
         linear = _SRGB_TO_LINEAR[pixels[top:top + crop_h, left:left + crop_w]]
-        out = resize_channels(linear, (int(height), int(width)), Image.Resampling.BOX).astype(np.float32)
-        if len(self._cache) >= _CACHE_SIZE:
-            self._cache.pop(next(iter(self._cache)))
-        self._cache[key] = out
-        return out
+        out = resize_channels(linear, (height, width), Image.Resampling.BOX)
+        return np.round(np.clip(linear_to_srgb(out), 0.0, 1.0) * 255.0).astype(np.uint8)
 
     def describe(self) -> dict[str, object]:
         return {"revision": self.revision, "effects": list(self.effects), "holdout_fraction": self.holdout_fraction,

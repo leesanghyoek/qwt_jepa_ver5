@@ -6,7 +6,7 @@ TartanAir frame, whose IMU stays its own, and the target stays the clean frame.
 Pins: a config without the keys (or with halo_probability 0) renders and reports exactly what it
 did before, and turning HALO on leaves every other draw where it was; the layer is cropped about the
 image centre (the optical axis the ghosts line up on), resized in linear light with the total light
-kept, and added in linear light -- with every other stage off, the noisy frame is exactly
+kept, decoded once per process (the cache changes no value), and added in linear light -- with every other stage off, the noisy frame is exactly
 srgb(linear(clean) + gain * layer), flips included; HALO's scenes are split whole into train / valid /
 test and each split draws only its own layers; the stage runs in full and blur_low_light (env_clear
 frames too) but not blur_only / low_light_only / sensor_noise_only / clean, fires on about
@@ -132,6 +132,24 @@ def test_the_layer_is_the_centre_crop_resized_in_linear_light_with_the_light_kep
     # A 4:3 target crops the 16:9 source about its centre too; a 16:9 target keeps the whole frame.
     assert bank.layer(uid, 36, 48)[:, :2].max() == pytest.approx(background, rel=1e-3)
     assert bank.layer(uid, 36, 64)[:, :2].max() > 0.5
+
+
+def test_a_layer_is_decoded_once_per_process_and_the_cache_changes_no_value(tmp_path, monkeypatch):
+    import qjepa.corruptions.halo as halo_module
+    root = _write_halo(tmp_path / "halo")
+    bank, fresh = _bank(root), _bank(root)
+    opened = []
+    real_open = halo_module.Image.open
+    monkeypatch.setattr(halo_module.Image, "open", lambda path, *a, **k: opened.append(path) or real_open(path, *a, **k))
+    uid = bank.splits["train"][0]
+    first = bank.layer(uid, 40, 40)
+    for _ in range(5):
+        again = bank.layer(uid, 40, 40)
+        assert np.array_equal(again, first) and again is not first   # a new array each call: callers may write
+    assert len(opened) == 1                                            # the PNG is read once per process
+    assert np.array_equal(fresh.layer(uid, 40, 40), first)            # cache or not, the same layer
+    bank.layer(uid, 40, 64)
+    assert len(opened) == 3                                            # another size is another entry
 
 
 def test_with_every_other_stage_off_the_frame_is_exactly_the_flare_added_in_linear_light(tmp_path):

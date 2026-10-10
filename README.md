@@ -45,8 +45,11 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
 - **Chia theo scene HALO**: valid và test mỗi bên giữ ~10% mẫu HALO (`halo_holdout_fraction`), gồm trọn scene, nên PSNR
   valid/test đo trên lóe chưa thấy lúc train; trên bộ đủ 1 655 mẫu: train 26 scene / 1 230 mẫu, valid 3 / 187
   (Scene003, 017, 045), test 3 / 238 (Scene039, 049, 075). PSNR vì vậy không so thẳng với p32.
-- **Chi phí** (đo trên CPU máy này): +28 ms mỗi frame có lóe, 11,5 ms trong đó là giải mã PNG 1280×720; trung bình
-  +14 ms mỗi sample ở xác suất 0,5. Không cache cả bộ lóe (vài trăm MB mỗi worker) vì RAM đã có ngưỡng khởi động lại.
+- **Chi phí CPU** (đo trên máy này; phase 1 trên Kaggle vốn đã bị DataLoader ghìm: p29 hạ batch 32 → 16 thì nhanh
+  gấp đôi, GPU phần lớn thời gian ngồi chờ). Giải mã lại PNG 1280×720 mỗi lần làm frame có lóe tốn 30 ms thay vì
+  15 ms. Nên mỗi tiến trình (worker DataLoader) giải mã một lớp **một lần** rồi giữ bản đã thu nhỏ ở sRGB 8 bit nén
+  zlib (lớp thật: 77 KB, tối đa ~128 MB mỗi tiến trình cho cả 1 655 lớp); đọc lại 0,77 ms. Lớp luôn đi qua bản 8 bit
+  đó, kể cả lần đầu, nên cache không đổi giá trị nào. Cache ấm: 13,8 ms mỗi sample, p32 14,5 ms.
 - **Hash.** Đổi `corruption` → đổi hash **cả hai phase**: phase 1 train lại (~46 phút trên 2 × T4 như p28).
   `data.halo_root` là đường dẫn, nằm ngoài hash như `data.root`. Mọi config cũ hash y như trước (p32: phase 1
   `d2e4c470…`, phase 2 `602bcf1f…`, đối chiếu với code trước thay đổi). Bật HALO thì `validate_config` bắt ghi đủ mọi
@@ -56,7 +59,8 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
 - Notebook: `RUN = 'p33_halo'`, gắn thêm `halo-reflective-1280`; Cell 4 tìm thư mục có `halo_index.csv` trong Input và
   đặt `data.halo_root`.
 - Bằng chứng: `tests/test_halo_flare.py` (không khoá hoặc xác suất 0 thì ảnh và tham số giống hệt từng bit, bật HALO
-  không xê dịch tham số khác; lớp lóe là phần cắt giữa, thu nhỏ trên ánh sáng tuyến tính giữ tổng ánh sáng; tắt mọi bước
+  không xê dịch tham số khác; lớp lóe là phần cắt giữa, thu nhỏ trên ánh sáng tuyến tính giữ tổng ánh sáng, giải mã một lần mỗi tiến trình và cache
+  không đổi giá trị nào; tắt mọi bước
   khác thì ảnh ra đúng bằng srgb(tuyến tính(sạch) + gain · lớp lóe), kể cả khi lật; scene HALO chia trọn vào
   train/valid/test và mỗi split chỉ bốc lớp lóe của mình; chạy ở `full` và `blur_low_light` (cả frame môi trường trong),
   không ở các mode khác hay frame sạch, trên ~`halo_probability` số frame; tất định, ổn định trong segment, ghi JSON
