@@ -14,7 +14,8 @@ halo_probability of the frames, is deterministic, segment-stable and JSON-serial
 halo_clear_probability a flared frame skips the environment (no darkness, uneven light, lamps, fog: zero
 stop map) while its camera blur, sensor noise and flare stay as drawn, and frames without the flare --
 or in the named blur_low_light scenario -- render exactly as with the switch off; the bank
-refuses a folder from another build, missing layers, or no folder at all; configs/kaggle_halo is
+refuses a folder from another build, missing layers, or no folder at all; the notebook finds HALO
+however Kaggle mounted it (API, Output, tars left packed); configs/kaggle_halo is
 p32_relight plus the halo keys and data.halo_root, changes both hashes, keeps data.halo_root out of
 them, and must spell every key out; the recipe trains both phases through the CLI with HALO on, and
 tools/halo_probe.py scores how much of the flare a phase-2 model leaves (trained with HALO or, given
@@ -35,7 +36,7 @@ from PIL import Image
 
 from qjepa.cli import main
 from qjepa.config import HALO_KEYS, build_corruptors, load_config, serializable_config, validate_config
-from qjepa.corruptions.halo import HaloFlareBank, apply_halo, split_scenes
+from qjepa.corruptions.halo import HaloFlareBank, apply_halo, find_halo_root, split_scenes
 from qjepa.corruptions.image import LowLightImageCorruptionConfig, LowLightImageCorruptor, brightness_stops
 from qjepa.corruptions.light import linear_to_srgb, srgb_to_linear
 from qjepa.training.checkpoints import configuration_hash, load_checkpoint
@@ -277,6 +278,37 @@ def test_the_bank_refuses_another_build_missing_layers_and_no_folder(tmp_path):
         _bank(root)
     with pytest.raises(ValueError, match="halo_root"):
         LowLightImageCorruptor(LowLightImageCorruptionConfig(**dict(HALO, halo_probability=0.5)), 73128)
+
+
+def test_the_notebook_finds_halo_however_kaggle_mounted_it(tmp_path):
+    import shutil
+    import tarfile
+    # Through the API: datasets/<owner>/<slug>/halo_index.csv, scenes unpacked into folders.
+    api = _write_halo(tmp_path / "a/datasets/someone/halo-reflective-1280")
+    assert find_halo_root(tmp_path / "a") == api
+    # From a notebook's Output: one more level, still found.
+    output = _write_halo(tmp_path / "b/datasets/someone/halo-output/halo_reflective_1280")
+    assert find_halo_root(tmp_path / "b") == output
+    # A zip of the tars uploaded by hand: Kaggle unpacked the zip, not the tars -> unpacked once, then reused.
+    packed = _write_halo(tmp_path / "c/datasets/someone/halo-zip")
+    for scene in sorted(path for path in packed.iterdir() if path.is_dir()):
+        with tarfile.open(packed / f"{scene.name}.tar", "w") as bundle:
+            for file in sorted(scene.iterdir()):
+                bundle.add(file, arcname=file.name)
+        shutil.rmtree(scene)
+    unpacked = find_halo_root(tmp_path / "c", extract_to=tmp_path / "unpacked")
+    assert unpacked == tmp_path / "unpacked" and (unpacked / "halo_index.csv").is_file()
+    assert _bank(unpacked).splits == _bank(_write_halo(tmp_path / "reference")).splits
+    stamp = (unpacked / ".unpacked").stat().st_mtime_ns
+    assert find_halo_root(tmp_path / "c", extract_to=tmp_path / "unpacked") == unpacked
+    assert (unpacked / ".unpacked").stat().st_mtime_ns == stamp      # not unpacked twice
+    # Nothing mounted, or two copies: say so.
+    (tmp_path / "d/datasets/someone/tartanairshard0").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="tartanairshard0"):
+        find_halo_root(tmp_path / "d")
+    _write_halo(tmp_path / "a/datasets/other/halo-copy")
+    with pytest.raises(ValueError, match="more than once"):
+        find_halo_root(tmp_path / "a")
 
 
 def test_kaggle_halo_is_p32_plus_the_halo_keys_and_spells_them_out(tmp_path):

@@ -94,8 +94,10 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
   0,798). **`tools/halo_probe.py`** đo riêng phần lóe: mỗi ảnh valid làm nhiễu hai lần, có và không có lớp lóe, mọi
   nhiễu khác giữ nguyên, model chạy trên cả hai; *ánh sáng lóe còn lại* 0% = gỡ hết, 100% = để nguyên. Đo được cả
   checkpoint train không có HALO (p32, cần `--halo-root`), nên so p32 với p33 là phần HALO đóng góp.
-- Notebook: `RUN = 'p33_halo'`, gắn thêm `halo-reflective-1280`; Cell 4 tìm thư mục có `halo_index.csv` trong Input và
-  đặt `data.halo_root`.
+- Notebook: `RUN = 'p33_halo'`, gắn thêm `halo-reflective-1280`; Cell 4 gọi `halo.find_halo_root`: tìm thư mục có
+  `halo_index.csv` trong Input, sâu tới 6 tầng (dataset tạo từ Output lồng thêm một tầng), đúng một bản; các scene còn
+  là `<scene>.tar` (zip các tar upload tay: Kaggle giải nén zip, không giải nén tar bên trong) thì giải nén một lần
+  vào `/tmp/halo_unpacked`. Đặt `data.halo_root`.
 - Bằng chứng: `tests/test_halo_flare.py` (không khoá hoặc xác suất 0 thì ảnh và tham số giống hệt từng bit, bật HALO
   không xê dịch tham số khác; lớp lóe là phần cắt giữa, thu nhỏ trên ánh sáng tuyến tính giữ tổng ánh sáng, giải mã một lần mỗi tiến trình và cache
   không đổi giá trị nào; tắt mọi bước

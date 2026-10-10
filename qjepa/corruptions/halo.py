@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
+import tarfile
 import zlib
 from pathlib import Path
 
@@ -136,6 +138,59 @@ class HaloFlareBank:
                 "samples": {split: len(uids) for split, uids in self.splits.items()},
                 "scenes": {split: sorted(scene for scene, name in self.scene_split.items() if name == split)
                            for split in SPLITS}}
+
+
+def _scenes(root: Path) -> list[str]:
+    with (root / "halo_index.csv").open(newline="") as handle:
+        return sorted({row["scene"] for row in csv.DictReader(handle)})
+
+
+def find_halo_root(base: str | Path = "/kaggle/input", depth: int = 6,
+                   extract_to: str | Path = "/tmp/halo_unpacked") -> Path:
+    """The HALO folder under ``base``: the one holding halo_index.csv, with a folder per scene.
+
+    Searched up to ``depth`` levels down (a dataset made from a notebook's Output nests one level more than
+    one made through the API; Kaggle mounts datasets at datasets/<owner>/<slug>/). Exactly one copy may be
+    mounted. If the scenes are still <scene>.tar archives -- a zip of the tars uploaded by hand is unpacked
+    by Kaggle, the tars inside it are not -- they are unpacked once into ``extract_to``, which is returned.
+    """
+    base = Path(base)
+    found = sorted({path.parent for level in range(1, depth + 1)
+                    for path in base.glob("/".join(["*"] * level) + "/halo_index.csv")})
+    if not found:
+        mounted = sorted(str(path.relative_to(base)) for level in (1, 2, 3)
+                         for path in base.glob("/".join(["*"] * level)) if path.is_dir())[:30]
+        raise FileNotFoundError(f"No halo_index.csv within {depth} levels of {base}: attach the HALO dataset "
+                                f"(halo-reflective-1280, made by halo-flare-builder.ipynb). Mounted: {mounted}")
+    if len(found) > 1:
+        raise ValueError(f"HALO is mounted more than once: {[str(path) for path in found]}; keep one")
+    root = found[0]
+    scenes = _scenes(root)
+    if all((root / scene).is_dir() for scene in scenes):
+        return root
+    archives = {scene: next(iter(root.rglob(f"{scene}.tar")), None) for scene in scenes}
+    missing = [scene for scene, archive in archives.items() if archive is None and not (root / scene).is_dir()]
+    if missing:
+        raise FileNotFoundError(f"{root}: neither a folder nor a .tar for HALO scenes {missing[:5]}")
+    target = Path(extract_to)
+    marker = target / ".unpacked"
+    if not (marker.is_file() and marker.read_text() == str(root)):
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True)
+        for name in ("halo_index.csv", "halo_build.json"):
+            shutil.copy2(root / name, target / name)
+        for scene, archive in archives.items():
+            if archive is None:                                   # already a folder: link it as it is
+                (target / scene).symlink_to(root / scene, target_is_directory=True)
+                continue
+            (target / scene).mkdir()
+            with tarfile.open(archive) as bundle:
+                for member in bundle.getmembers():
+                    if not member.isfile() or Path(member.name).name != member.name:
+                        raise ValueError(f"{archive}: unexpected member {member.name!r} (want plain file names)")
+                    bundle.extract(member, target / scene, filter="data")
+        marker.write_text(str(root))
+    return target
 
 
 def draw_halo_parameters(rng: np.random.Generator, cfg, bank: HaloFlareBank, split: str) -> dict[str, object]:
