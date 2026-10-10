@@ -1,7 +1,8 @@
 """Training speed on 2 x T4: what the log says about it, and the IMU caches.
 
 Pins: the progress line reports the seconds per update spent waiting for data next
-to the seconds per update; both phases log data_wait_seconds per update; a dataset
+to the seconds per update, and the mean of the last 100 updates' loss next to this
+update's (one batch, so it jumps); both phases log data_wait_seconds per update; a dataset
 sizes both IMU caches to its trajectories (capped), and a corruptor that caches
 every trajectory builds each once yet returns the very windows a small cache does;
 worker memory counts every descendant process, not only direct children.
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import qjepa.cli as cli
-from qjepa.cli import _next_timed, _pace
+from qjepa.cli import _next_timed, _pace, _RecentMean
 from qjepa.corruptions import ImuCorruptionConfig, TrajectoryImuCorruptor
 from qjepa.data.dataset import MAX_CACHED_TRAJECTORIES, PairedCameraImuDataset
 
@@ -25,6 +26,19 @@ def test_the_progress_line_reports_the_wait_for_data():
     assert _pace(started, 10, 12).endswith(" s/update")                  # unchanged without a wait
     line = _pace(started, 10, 12, waited=1.0)
     assert 1.4 < float(line.split()[0]) < 1.7 and line.endswith("(cho du lieu 0.50)")
+
+
+def test_the_progress_line_carries_the_mean_of_the_last_updates():
+    recent = _RecentMean(window=4)
+    assert recent.text(("loss",)) == ""                                   # nothing yet: nothing printed
+    for value in (9.0, 1.0, 2.0, 3.0, 4.0, 5.0):
+        recent.add({"loss": value, "image_l1": value / 10}, ("loss", "image_l1"))
+    assert recent.text(("loss", "image_l1")) == "| TB 4 update: loss=3.5000 image_l1=0.3500"   # 2..5 only
+    recent.add({"loss": float("nan"), "skipped": True}, ("loss", "jepa"))   # non-finite and absent: ignored
+    assert recent.text(("loss", "jepa")) == "| TB 4 update: loss=3.5000"
+    short = _RecentMean()
+    short.add({"loss": 2.0}, ("loss",))
+    assert short.text(("loss",)) == "| TB 1 update: loss=2.0000"           # after a resume: what this process ran
 
 
 def test_next_timed_returns_the_batch_and_the_time_blocked_on_it():

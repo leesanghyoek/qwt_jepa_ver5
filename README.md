@@ -56,6 +56,14 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
   khoá `halo_*` và có `data.halo_root`; `halo_revision` / `halo_effects` phải khớp `halo_build.json` của thư mục.
 - **Chưa đo:** từ p31, nhánh ánh sáng (trừ lớp sương tuyến tính) đã được thay bằng lưới song phương; hệ số tự do của
   phép affine trừ được một lớp mượt, nhưng chưa biết đủ để gỡ bóng ma hay không. Xem ở Cell 12b và PSNR test.
+- **Đọc tiến độ phase 2.** Một dòng log là MỘT update (8 ảnh, mỗi ảnh một kiểu nhiễu: có/không lóe, tối/sáng), nên
+  loss từng dòng nhảy 0,8–2,5 và trông như không giảm. Dòng log giờ in thêm trung bình 100 update gần nhất (`TB 100
+  update`). p33 trên Kaggle, trung bình 10 dòng log: loss 2,20 (update 10–100) → 1,93 (110–200) → 1,51 (910–1000) →
+  1,44 (1910–2000) → 1,33 (2310–2400); `image_l1` 0,079 → 0,058. Thước đo quyết định là dòng validation (ngân hàng
+  valid cố định, so với ảnh vào): PSNR 21,54 → 22,28 dB ở update 1000 → 2000, ảnh vào 21,28; SSIM 0,820 → 0,827 (vào
+  0,798). **`tools/halo_probe.py`** đo riêng phần lóe: mỗi ảnh valid làm nhiễu hai lần, có và không có lớp lóe, mọi
+  nhiễu khác giữ nguyên, model chạy trên cả hai; *ánh sáng lóe còn lại* 0% = gỡ hết, 100% = để nguyên. Đo được cả
+  checkpoint train không có HALO (p32, cần `--halo-root`), nên so p32 với p33 là phần HALO đóng góp.
 - Notebook: `RUN = 'p33_halo'`, gắn thêm `halo-reflective-1280`; Cell 4 tìm thư mục có `halo_index.csv` trong Input và
   đặt `data.halo_root`.
 - Bằng chứng: `tests/test_halo_flare.py` (không khoá hoặc xác suất 0 thì ảnh và tham số giống hệt từng bit, bật HALO
@@ -67,7 +75,8 @@ Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu
   được; từ chối thư mục của bản dựng khác, thiếu lớp lóe hoặc không có thư mục; p33 = p32 + các khoá halo, đổi cả hai
   hash, `data.halo_root` ngoài hash, thiếu khoá bị từ chối; frame có lóe bỏ bước môi trường (bản đồ stop bằng 0) mà
   giữ mờ, hạt và lóe, frame không lóe và kịch bản `blur_low_light` giống hệt khi tắt khoá; train cả hai phase qua CLI
-  với HALO bật).
+  với HALO bật, và `halo_probe` chấm lóe còn lại cho model train có và không có HALO); `tests/test_training_speed.py`
+  (dòng log mang trung bình 100 update gần nhất).
 
 **p32_relight — phase 2: bản đồ stop (vùng nào tối đi bao nhiêu) đoán có giám sát, chia ra trước lưới song phương**
 (config `configs/kaggle_relight.yaml` → OUT `outputs/p32_relight`).

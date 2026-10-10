@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -344,6 +345,32 @@ def _pace(started: float, first_update: int, update: int, waited: float | None =
     updates = max(1, update - first_update)
     pace = f"{(time.perf_counter() - started) / updates:.2f} s/update"
     return pace if waited is None else f"{pace} (cho du lieu {waited / updates:.2f})"
+
+
+class _RecentMean:
+    """Trung binh ``window`` update gan nhat cua vai so do, in kem dong log.
+
+    Moi update la MOT batch (phase 2: 8 anh), moi anh mot kieu nhieu (co / khong loe HALO, toi / sang, mo), nen
+    loss cua tung dong nhay theo batch (p33: 0,8 -> 2,5 trong cung mot doan); trung binh 100 update moi cho thay
+    loss co giam hay khong. Sau khi resume, trung binh chi tinh tren nhung update da chay trong tien trinh nay.
+    """
+
+    def __init__(self, window: int = 100):
+        self.window = int(window)
+        self.values: dict[str, deque] = {}
+
+    def add(self, metrics: dict[str, Any], keys: tuple[str, ...]) -> None:
+        for key in keys:
+            value = metrics.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                self.values.setdefault(key, deque(maxlen=self.window)).append(float(value))
+
+    def text(self, keys: tuple[str, ...]) -> str:
+        kept = {key: self.values[key] for key in keys if self.values.get(key)}
+        if not kept:
+            return ""
+        count = max(len(values) for values in kept.values())
+        return f"| TB {count} update: " + " ".join(f"{key}={sum(v) / len(v):.4f}" for key, v in kept.items())
 
 
 def _next_timed(batches: Iterator[Any]) -> tuple[Any, float]:
@@ -941,6 +968,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     maximum = config["phase1"]["max_successful_updates"]
     checkpoint_every = config["runtime"]["checkpoint_every_updates"]
     started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
+    recent = _RecentMean()
     while trainer.successful_updates < maximum:
         batch, wait = _next_timed(batches)
         waited += wait
@@ -949,12 +977,14 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         log.write(metrics)
         if metrics.get("skipped"):
             raise FloatingPointError(f"Phase-1 update skipped: {metrics}")
+        recent.add(metrics, ("loss", "jepa"))
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             anchor = f" recon={metrics['reconstruction']:.6f}" if "reconstruction" in metrics else ""
             print(
                 f"phase1 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" jepa={metrics['jepa']:.6f}{anchor} {_pace(started, first_update, update, waited)}"
+                f" jepa={metrics['jepa']:.6f}{anchor} {recent.text(('loss', 'jepa'))}"
+                f" {_pace(started, first_update, update, waited)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             if not lead:
@@ -1219,6 +1249,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
             shutil.copy2(prior_best_guarded, output / "best_guarded_validation.pt")
     share_rank0_rng()                             # the guard reference drew on rank 0 only
     started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
+    recent = _RecentMean()
     while trainer.successful_updates < maximum:
         timed = [_next_timed(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
         wait = sum(seconds for _, seconds in timed)
@@ -1228,11 +1259,13 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         log.write(metrics)
         if metrics.get("skipped"):
             raise FloatingPointError(f"Phase-2 update skipped: {metrics}")
+        recent.add(metrics, ("loss", "image_l1"))
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
                 f"phase2 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" image_l1={metrics['image_l1']:.6f} {_pace(started, first_update, update, waited)}"
+                f" image_l1={metrics['image_l1']:.6f} {recent.text(('loss', 'image_l1'))}"
+                f" {_pace(started, first_update, update, waited)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
             if not lead:

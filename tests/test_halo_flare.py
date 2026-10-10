@@ -16,7 +16,9 @@ stop map) while its camera blur, sensor noise and flare stay as drawn, and frame
 or in the named blur_low_light scenario -- render exactly as with the switch off; the bank
 refuses a folder from another build, missing layers, or no folder at all; configs/kaggle_halo is
 p32_relight plus the halo keys and data.halo_root, changes both hashes, keeps data.halo_root out of
-them, and must spell every key out; the recipe trains both phases through the CLI with HALO on.
+them, and must spell every key out; the recipe trains both phases through the CLI with HALO on, and
+tools/halo_probe.py scores how much of the flare a phase-2 model leaves (trained with HALO or, given
+--halo-root, without it).
 """
 
 from __future__ import annotations
@@ -313,18 +315,48 @@ def test_kaggle_halo_is_p32_plus_the_halo_keys_and_spells_them_out(tmp_path):
     assert image_corruptor.halo_bank is not None and image_corruptor.metadata()["halo"]["samples"]["train"] > 0
 
 
-def test_the_recipe_trains_both_phases_through_the_cli(tmp_path):
-    torch.set_num_threads(1)
-    root, manifest, output = tmp_path / "dataset", tmp_path / "manifest", tmp_path / "run"
-    _write_dataset(root)
+def _train_tiny(tmp_path, name, halo_root=None):
+    """Both phases through the CLI on the smoke recipe (HALO on every frame when ``halo_root``); the phase-2 .pt."""
+    root, manifest, output = tmp_path / "dataset", tmp_path / "manifest", tmp_path / name
+    if not root.exists():
+        _write_dataset(root)
     config = _sharp_smoke()
-    config["corruption"]["image"].update(HALO, halo_probability=1.0)
-    config["data"]["halo_root"] = str(_write_halo(tmp_path / "halo"))
-    path = tmp_path / "halo.yaml"
+    if halo_root is not None:
+        config["corruption"]["image"].update(HALO, halo_probability=1.0)
+        config["data"]["halo_root"] = str(halo_root)
+    path = tmp_path / f"{name}.yaml"
     path.write_text(yaml.safe_dump(config))
     common = ["--config", str(path), "--manifest", str(manifest), "--output", str(output)]
-    main(["build-manifest", "--config", str(path), "--data-root", str(root), "--output", str(manifest)])
+    if not manifest.exists():
+        main(["build-manifest", "--config", str(path), "--data-root", str(root), "--output", str(manifest)])
     _run_until_done(["train-phase1", *common], output / "phase1/last.pt")
     last = output / "phase2/last.pt"
     _run_until_done(["train-phase2", *common, "--backbone-checkpoint", str(output / "phase1/last.pt")], last)
+    return last, manifest
+
+
+def test_the_recipe_trains_both_phases_through_the_cli_and_halo_probe_scores_the_flare_left(tmp_path):
+    import subprocess
+    import sys
+    torch.set_num_threads(1)
+    halo_root = _write_halo(tmp_path / "halo")
+    last, manifest = _train_tiny(tmp_path, "halo", halo_root)
     assert load_checkpoint(last)["successful_updates"] == 3
+    # tools/halo_probe.py: each frame with the flare and its twin without it, through the model.
+    plain, _ = _train_tiny(tmp_path, "plain")                  # trained without HALO: needs --halo-root
+    for checkpoint, extra, trained in ((last, [], True), (plain, ["--halo-root", str(halo_root)], False)):
+        report = tmp_path / f"probe_{trained}.json"
+        result = subprocess.run([sys.executable, "tools/halo_probe.py", "--checkpoint", str(checkpoint), "--manifest",
+                                 str(manifest), "--samples", "4", "--batch", "2", "--device", "cpu", "--output",
+                                 str(report), *extra], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr[-3000:]
+        table = json.loads(report.read_text())
+        assert table["trained_with_halo"] is trained and table["split"] == "valid"
+        whole = table["groups"]["tat ca"]
+        assert whole["count"] == 4 and whole["region_fraction"] > 0
+        assert whole["flare_cost_db"]["input"] > 0                # the flare does cost the input PSNR
+        assert np.isfinite(whole["flare_light_left_region"]) and np.isfinite(whole["flare_cost_kept"])
+        assert "anh sang loe con lai" in result.stdout
+    no_root = subprocess.run([sys.executable, "tools/halo_probe.py", "--checkpoint", str(plain), "--manifest",
+                              str(manifest), "--samples", "2", "--device", "cpu"], capture_output=True, text=True)
+    assert no_root.returncode != 0 and "--halo-root" in no_root.stderr + no_root.stdout
