@@ -12,6 +12,50 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p36_flareimage — ảnh lóe thật của FlareImage trong mọi batch** (config `configs/kaggle_flareimage.yaml` → OUT
+`outputs/p36_flareimage`). Bằng p35_tonegate cộng `data.flare_pairs_*`, tắt HALO; đổi dữ liệu nên **train lại cả hai phase**.
+- **Yêu cầu** (người dùng, 11/10/2026): "mỗi batch luôn có ảnh từ FlareImage". Đã chọn: cặp ảnh là **mẫu riêng**, **1/4 mỗi
+  batch**, đủ ba shard TartanAir.
+- **FlareImage** (Kaggle `buidinhkhoi/flareimage`, thư mục `flare_dataset/`): 1 053 cặp đã căn chỉnh, `train/` có lóe và
+  `gt/` sạch, kèm `metadata.csv`; không có IMU. Bốn nguồn: flare_removal 600 (chụp thật, 1440×1920 và 887×1920), halo 253
+  (render Blender, 1280×720, 4 scene), flare7k_real 100 và flare7k_synthetic 100 (512×512, bộ test của Flare7K++).
+- **Một mẫu FlareImage** (`PairedCameraImuDataset._flare_item`): một ô cắt 256 của bản thu nhỏ (`qjepa/data/flare_pairs.py`:
+  cạnh ngắn 384, BOX trên ánh sáng tuyến tính, thu một lần rồi cache trong `/tmp`). Ảnh `train/` đi qua bước nhiễu và là đầu
+  vào; ảnh `gt/` cùng ô là đích. Cửa sổ IMU sạch và nhiễu **mượn** của một mẫu TartanAir rút ngẫu nhiên, nên mọi loss vẫn so
+  một cửa sổ IMU với chính nó; chỉ riêng mẫu này ảnh và IMU không cùng một chuyển động. Mẫu bỏ bước môi trường (tối, sáng
+  không đều, đèn, sương) như frame HALO của p33 (`flare_pairs_clear_probability: 1`), giữ mờ và hạt, và không bao giờ bị
+  cộng thêm lớp HALO. `frame_kind` của nó luôn là `flare`, nên nhãn của cổng tone (p35) là 1.
+- **Mỗi batch** (`sampler.FlarePairSlots`) có max(1, round(0,25·B)) chỗ cho FlareImage: phase 1 8/32, phase 2 1/4 mỗi
+  microbatch (2 mỗi update). Các chỗ rải đều trong batch, chỗ cuối ở cuối batch, nên mỗi rank DDP nạp phần của mình. Chỉ số
+  của mỗi chỗ suy ra từ số thứ tự batch, nên resume dựng lại đúng batch cũ. Mỗi chu kỳ đi qua mọi cặp train đúng một lần, theo
+  một hoán vị mới; mỗi lần rút có ô cắt, IMU và nhiễu riêng.
+- **Chia** train / valid / test theo nhóm, riêng từng nguồn: HALO theo scene + hiệu ứng, nguồn khác theo khối 10 ảnh gốc liên
+  tiếp. valid và test mỗi bên giữ ~10% cặp của mỗi nguồn. Validation trong lúc train vẫn **chỉ TartanAir**, để so được với
+  p33–p35. `tools/flare_pairs_probe.py` đo PSNR vào → ra trên các cặp giữ lại, theo nguồn, ở hai chế độ: "chỉ lóe" (ảnh chụp
+  thật, không thêm nhiễu) và "như lúc train" (thêm mờ và hạt). Cell 11 chạy nó; chạy được cả trên checkpoint không train với
+  FlareImage (p35, cần `--flare-pairs-root`) để so.
+- **HALO tắt** (`halo_probability: 0`): dataset halo-reflective-1280 không gắn trong phiên này. 253 cặp HALO vẫn có trong
+  FlareImage dưới dạng ảnh gốc.
+- **Chưa đo**: ảnh hưởng của cạnh ngắn 384 (ô cắt 256 giữ 2/3 cạnh ngắn của khung), và ảnh hưởng của IMU mượn lên latent
+  phase 1. BOX của PIL lấy trọng số tại tâm pixel gốc: tổng ánh sáng giữ đúng khi tỉ lệ thu nhỏ là số nguyên, lệch 0,9% ở
+  trường hợp xấu (đốm sáng 8×8 trong ảnh 72×48, tỉ lệ 1,2).
+- Bằng chứng: `tests/test_flare_pairs.py`. Nó kiểm:
+  - mỗi batch có đúng số chỗ FlareImage ở đúng vị trí, ở cả batch 4, 8 và 32; resume dựng lại đúng batch cũ; hai rank DDP
+    ghép lại ra đúng batch;
+  - một cặp là ô có lóe vào và ô sạch cùng chỗ ra, với IMU, thời điểm và nhiễu IMU của mẫu cho mượn; một chu kỳ đi qua mọi
+    cặp train;
+  - mẫu TartanAir giống hệt từng bit dù có hay không có FlareImage;
+  - các lần rút nhiễu trên một cặp giữ nguyên, không có lớp HALO, "clear" bỏ bước môi trường mà giữ mờ và hạt, và
+    `frame_kind` là `flare` kể cả khi nhiễu rút ra "sạch";
+  - bank chia nguyên nhóm theo từng nguồn, mỗi nguồn có mặt ở cả ba split, thu nhỏ đúng cạnh ngắn, ở tỉ lệ nguyên giữ tổng
+    ánh sáng (0,5%, do làm tròn 8 bit), chỉ giải mã ảnh gốc một lần rồi đọc cache, và từ chối thư mục thiếu dữ liệu;
+  - notebook tìm được FlareImage dù Kaggle gắn kiểu nào;
+  - p36 = p35 + các khoá FlareImage + HALO tắt; đổi cả hai hash nhưng đường dẫn nằm ngoài hash; hash p35 và p32 giữ nguyên;
+    phải ghi đủ mọi khoá; từ chối batch không còn mẫu TartanAir;
+  - hai phase train được qua CLI có FlareImage, và hai tiến trình DDP (gloo) train ra cùng loss và gradient norm như một
+    tiến trình ở cả hai phase, kể cả khi khởi động lại;
+  - probe chấm được cặp giữ lại, cả với checkpoint không train với FlareImage.
+
 **p35_tonegate — phase 2: cổng cho tầng tone, và validation theo loại ảnh** (config `configs/kaggle_tonegate.yaml` → OUT
 `outputs/p35_tonegate`). Bằng p34_chroma cộng `phase2.split_tone_gate_*`; hash phase 1 bằng p33, chỉ train phase 2.
 - **Đo trên p33** (`halo_probe`, bảng từng tầng, bản không lóe = ảnh TỐT, chỉ mờ nhẹ + hạt): vào 36,71 dB (Y 38,65) →

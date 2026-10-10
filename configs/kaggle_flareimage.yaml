@@ -1,0 +1,37 @@
+# p36_flareimage: p35_tonegate + CAP ANH LOE THAT cua FlareImage la mau rieng trong MOI batch (qjepa/data/flare_pairs.py).
+#
+# Nguoi dung (11/10/2026): "moi batch luon co ton tai anh tu FlareImage", va chon:
+#   1. cap anh la MAU RIENG: anh train/ (co loe) la dau vao, gt/ la dich, cung mot o cat. FlareImage khong co IMU nen
+#      mau muon cua so IMU (sach + nhieu) cua mot mau TartanAir rut ngau nhien: loss IMU van dung nghia, chi rieng mau
+#      nay anh va IMU khong cung mot chuyen dong;
+#   2. 1/4 MOI batch: phase 1 8/32, phase 2 1/4 moi microbatch (2 moi update). Cho FlareImage rai deu trong batch
+#      (sampler.FlarePairSlots) nen moi rank DDP nap phan cua minh;
+#   3. du ba shard TartanAir (khong phai chi shard 0).
+# FlareImage (Kaggle buidinhkhoi/flareimage, thu muc flare_dataset/): 1053 cap -- flare_removal 600 (chup that,
+# 1440x1920 / 887x1920), halo 253 (render, 1280x720, 4 scene), flare7k_real 100 va flare7k_synthetic 100 (512x512).
+# valid va test moi ben ~10% cap cua MOI nguon, chia theo nhom canh; train dung phan con lai. Validation trong luc
+# train van chi la TartanAir (so duoc voi p33-p35); tools/flare_pairs_probe.py do rieng tren cap FlareImage giu lai.
+# HALO (halo-reflective-1280) khong gan trong phien nay: tat lop loe HALO cong len TartanAir (halo_probability 0).
+# 253 cap HALO trong FlareImage van co, duoi dang anh goc.
+# Mau FlareImage bo cac buoc MOI TRUONG (toi, sang khong deu, den, suong) nhu frame HALO cua p33 (nguoi dung
+# 09/10/2026: "anh da co san nhieu loe roi, nen nhieu giam"): flare_pairs_clear_probability 1, giu mo may anh va hat.
+# Moi cap duoc thu nho mot lan ve canh ngan 384 (BOX tren anh sang tuyen tinh) va cache trong /tmp; o cat 256 giu
+# 2/3 canh ngan cua khung (chua do anh huong cua lua chon nay).
+#
+# Doi data + corruption -> doi hash CA HAI phase: train lai phase 1 va phase 2 (khong dung lai phase 1 cua p33).
+# data.flare_pairs_root la duong dan (ngoai hash): notebook tu do thu muc co metadata.csv, gt/ va train/ trong Input.
+extends: kaggle_tonegate.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p36_flareimage
+
+data:
+  flare_pairs_root: /kaggle/input/datasets/buidinhkhoi/flareimage/flare_dataset
+  flare_pairs_fraction: 0.25
+  flare_pairs_short_side: 384
+  flare_pairs_holdout_fraction: 0.1
+  flare_pairs_clear_probability: 1.0
+
+corruption:
+  image:
+    halo_probability: 0.0

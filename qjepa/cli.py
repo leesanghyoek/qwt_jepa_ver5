@@ -33,6 +33,8 @@ from .config import (
     serializable_config,
 )
 from .data import (
+    FlarePairBank,
+    FlarePairSlots,
     ImuNormalizer,
     PairedCameraImuDataset,
     TrajectoryDiverseBatchSampler,
@@ -130,6 +132,7 @@ def _dataset(
     full_frame: bool = False,
     brightness_target: bool = False,
     tone_label: bool = False,
+    flare_pairs: FlarePairBank | None = None,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -154,7 +157,19 @@ def _dataset(
         full_frame=full_frame,
         brightness_target=brightness_target,
         tone_label=tone_label,
+        flare_pairs=flare_pairs,
+        flare_pairs_fraction=float(config["data"].get("flare_pairs_fraction", 0.0)) if flare_pairs else 0.0,
+        flare_pairs_clear_probability=float(config["data"].get("flare_pairs_clear_probability", 1.0)),
     )
+
+
+def flare_pair_bank(config: dict[str, Any]) -> FlarePairBank | None:
+    """The FlareImage pairs of data.flare_pairs_* (None when flare_pairs_fraction is absent or 0)."""
+    data = config["data"]
+    if float(data.get("flare_pairs_fraction", 0.0)) <= 0:
+        return None
+    return FlarePairBank(data["flare_pairs_root"], short_side=int(data["flare_pairs_short_side"]),
+                         holdout_fraction=float(data["flare_pairs_holdout_fraction"]))
 
 
 # Mirror half the training pairs when a phase asks for it (phase{1,2}.augment_hflip).
@@ -172,9 +187,11 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
     brightness_target = phase == "phase2" and bool(config["phase2"].get("split_relight", False))
     # Only phase 2's tone gate reads whether the corruption changed the light (phase2.split_tone_gate).
     tone_label = phase == "phase2" and bool(config["phase2"].get("split_tone_gate", False))
+    # data.flare_pairs_*: FlareImage pairs in every training batch (both phases); validation stays TartanAir.
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
                     hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
-                    brightness_target=brightness_target, tone_label=tone_label, **kwargs)
+                    brightness_target=brightness_target, tone_label=tone_label,
+                    flare_pairs=flare_pair_bank(config), **kwargs)
 
 
 def _loader(
@@ -214,7 +231,12 @@ def _training_batch_stream(
     rank: int = 0,
     world: int = 1,
 ) -> Iterator[dict[str, Any]]:
-    batches_per_epoch = len(dataset) // batch_size
+    # data.flare_pairs_*: that many slots of each batch hold a FlareImage pair; TartanAir fills the rest.
+    flare_slots = dataset.flare_pairs_per_batch(batch_size) if hasattr(dataset, "flare_pairs_per_batch") else 0
+    if flare_slots >= batch_size:
+        raise ValueError(f"{flare_slots} FlareImage slots leave no TartanAir sample in a batch of {batch_size}")
+    trajectory_batch = batch_size - flare_slots
+    batches_per_epoch = len(dataset) // trajectory_batch
     if batches_per_epoch < 1:
         raise ValueError("Dataset has fewer samples than one full training batch")
     epoch, first_batch = divmod(start_microbatch, batches_per_epoch)
@@ -226,10 +248,12 @@ def _training_batch_stream(
         trajectory_keys = [sample.trajectory_key for sample in dataset.samples]
         batch_sampler = TrajectoryDiverseBatchSampler(
             trajectory_keys,
-            batch_size,
+            trajectory_batch,
             config["data"]["minimum_trajectories_per_batch"],
             epoch_seed,
         )
+        if flare_slots:
+            batch_sampler = FlarePairSlots(batch_sampler, len(dataset.samples), flare_slots)
         sampler = _SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler
         loader = _loader(
             config,

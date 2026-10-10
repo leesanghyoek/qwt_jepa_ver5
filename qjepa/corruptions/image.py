@@ -318,7 +318,10 @@ FRAME_KINDS = ("plain", "relit", "flare")
 def frame_kind(params: dict[str, object]) -> str:
     """"flare": a HALO flare was added; "relit": the light was changed (low-light stage, uneven light, lamps,
     fog); "plain": neither -- only blur, resolution, sensor grain and JPEG, or a clean frame. A plain frame's
-    tone needs no fixing: the tone stage should hand it on as it is."""
+    tone needs no fixing: the tone stage should hand it on as it is. A FlareImage pair (data.flare_pairs_*)
+    is "flare" whatever the corruption drew: its input is a real flared photo, even when the draw is clean."""
+    if params.get("flare_pair"):
+        return "flare"
     if params.get("clean"):
         return "plain"
     if params.get("halo"):
@@ -404,7 +407,8 @@ class LowLightImageCorruptor:
         self.halo_bank = halo_bank
 
     def _parameters(
-        self, split: str, realization: int, trajectory: str, timestamp: float, mode: str
+        self, split: str, realization: int, trajectory: str, timestamp: float, mode: str,
+        flare_pair: dict[str, object] | None = None,
     ) -> dict[str, object]:
         if mode not in IMAGE_MODES:
             raise ValueError(f"Unsupported image corruption mode {mode!r}")
@@ -489,6 +493,7 @@ class LowLightImageCorruptor:
             # The lens, not the environment: env_clear frames keep it; a clean frame has none.
             halo_rng = generator(self.master_seed, "image_halo", split, realization, trajectory, segment)
             flare = not clean and mode in HALO_MODES and float(halo_rng.random()) < cfg.halo_probability
+            flare = flare and flare_pair is None        # a real flared photo gets no HALO layer on top
             drawn = draw_halo_parameters(halo_rng, cfg, self.halo_bank, split)
             parameters.update(halo=bool(flare), halo_params=drawn if flare else None)
             if cfg.halo_clear_probability > 0:
@@ -501,6 +506,16 @@ class LowLightImageCorruptor:
                     for key in ("light", "illumination", "fog"):
                         if key in parameters:
                             parameters[key], parameters[f"{key}_params"] = False, None
+        if flare_pair is not None:
+            # A FlareImage pair (data.flare_pairs_*): the input is a real photo that already holds its flare. With
+            # "clear" it skips the environment, as a HALO-flared frame does with halo_clear_probability; camera blur
+            # and sensor noise stay as drawn. Every draw above is the one it would be without the pair.
+            parameters["flare_pair"] = dict(flare_pair)
+            if flare_pair.get("clear"):
+                parameters.update(low_light=False)
+                for key in ("light", "illumination", "fog"):
+                    if key in parameters:
+                        parameters[key], parameters[f"{key}_params"] = False, None
         return parameters
 
     def __call__(
@@ -515,10 +530,12 @@ class LowLightImageCorruptor:
         mode: str = "full",
         gyro: np.ndarray | None = None,
         imu_times: np.ndarray | None = None,
+        flare_pair: dict[str, object] | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
         noisy, _, params = self._render(
             image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
             frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=False,
+            flare_pair=flare_pair,
         )
         return noisy, params
 
@@ -534,6 +551,7 @@ class LowLightImageCorruptor:
         mode: str = "full",
         gyro: np.ndarray | None = None,
         imu_times: np.ndarray | None = None,
+        flare_pair: dict[str, object] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
         """(noisy, the same frame without sensor grain, parameters).
 
@@ -546,6 +564,7 @@ class LowLightImageCorruptor:
         return self._render(
             image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
             frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=True,
+            flare_pair=flare_pair,
         )
 
     def _render(
@@ -561,6 +580,7 @@ class LowLightImageCorruptor:
         gyro: np.ndarray | None,
         imu_times: np.ndarray | None,
         reference: bool,
+        flare_pair: dict[str, object] | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None, dict[str, object]]:
         if image_clean.ndim != 3 or image_clean.shape[-1] != 3:
             raise ValueError(f"Expected image [H,W,3], got {image_clean.shape}")
@@ -573,7 +593,7 @@ class LowLightImageCorruptor:
                 "motion_from_imu is enabled but no gyro/imu_times were supplied; "
                 "pass the clean gyro window or set motion_from_imu: false"
             )
-        params = self._parameters(split, realization, trajectory, timestamp, mode)
+        params = self._parameters(split, realization, trajectory, timestamp, mode, flare_pair)
         if params["clean"]:
             clean = image_clean.astype(np.float32, copy=True)
             return clean, (clean.copy() if reference else None), params

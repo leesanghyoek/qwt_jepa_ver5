@@ -91,3 +91,31 @@ class TrajectoryDiverseBatchSampler(Sampler[list[int]]):
                 used.add(value)
             yield chosen
 
+
+class FlarePairSlots(Sampler[list[int]]):
+    """Add ``per_batch`` FlareImage slots to every batch of ``inner`` (data.flare_pairs_*), spread over the batch.
+
+    Slot j of the b-th batch of the epoch is index ``first_index + b * per_batch + j``: past the TartanAir samples,
+    so PairedCameraImuDataset reads it as its (b * per_batch + j)-th FlareImage draw of the realization. The index
+    follows from the batch number alone, so skipping batches on resume (_SkipBatches, outside) still yields the
+    batches the run would have seen. The slots sit at evenly spaced positions, last one at the end, so each DDP
+    rank's contiguous share (_RankShare) loads its part of them.
+    """
+
+    def __init__(self, inner, first_index: int, per_batch: int) -> None:
+        if per_batch < 1:
+            raise ValueError("per_batch must be at least 1")
+        self.inner, self.first_index, self.per_batch = inner, int(first_index), int(per_batch)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for number, batch in enumerate(self.inner):
+            size = len(batch) + self.per_batch
+            slots = {round((j + 1) * size / self.per_batch) - 1 for j in range(self.per_batch)}
+            draws = iter(range(self.first_index + number * self.per_batch,
+                               self.first_index + (number + 1) * self.per_batch))
+            samples = iter(batch)
+            yield [next(draws) if position in slots else next(samples) for position in range(size)]
+
+    def __len__(self) -> int:
+        return len(self.inner)
+

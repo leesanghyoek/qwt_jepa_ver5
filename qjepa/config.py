@@ -151,6 +151,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_chroma(config)
     _validate_tone_gate(config)
     _validate_source_size(config)
+    _validate_flare_pairs(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -613,6 +614,48 @@ def _validate_source_size(config: dict[str, Any]) -> None:
         raise ValueError("data.source_size must be at least data.image_size (the training crop)")
     if any(s % 16 for s in source):
         raise ValueError("data.source_size must divide by 16: the image encoder halves it four times")
+
+
+FLARE_PAIR_KEYS = ("flare_pairs_root", "flare_pairs_fraction", "flare_pairs_short_side",
+                   "flare_pairs_holdout_fraction", "flare_pairs_clear_probability")
+
+
+def _validate_flare_pairs(config: dict[str, Any]) -> None:
+    """data.flare_pairs_*: FlareImage pairs in every training batch (qjepa/data/flare_pairs.py). Absent: as before.
+
+    Bat (flare_pairs_fraction > 0) thi PHAI ghi du moi khoa (hash chi doc file config). flare_pairs_root la duong
+    dan, nam ngoai hash nhu halo_root."""
+    data = config["data"]
+    unknown = sorted(key for key in data if key.startswith("flare_pairs_") and key not in FLARE_PAIR_KEYS)
+    if unknown:
+        raise ValueError(f"data: unknown keys {unknown}; FlareImage keys are {list(FLARE_PAIR_KEYS)}")
+    fraction = data.get("flare_pairs_fraction", 0.0)
+    if not _nonnegative_number(fraction) or fraction > 0.5:
+        raise ValueError("data.flare_pairs_fraction must be a number in [0, 0.5]")
+    if fraction == 0:
+        return
+    missing = [key for key in FLARE_PAIR_KEYS if key not in data]
+    if missing:
+        raise ValueError(f"data.flare_pairs_fraction > 0 needs every flare_pairs_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    if not isinstance(data["flare_pairs_root"], str) or not data["flare_pairs_root"]:
+        raise ValueError("data.flare_pairs_root must name the FlareImage folder (metadata.csv, gt/, train/)")
+    short_side = data["flare_pairs_short_side"]
+    if isinstance(short_side, bool) or not isinstance(short_side, int) or short_side < max(data["image_size"]):
+        raise ValueError("data.flare_pairs_short_side must be an integer of at least the training crop data.image_size")
+    holdout = data["flare_pairs_holdout_fraction"]
+    if not _nonnegative_number(holdout) or not 0 < holdout <= 0.4:
+        raise ValueError("data.flare_pairs_holdout_fraction must be in (0, 0.4]: valid and test each keep that much")
+    clear = data["flare_pairs_clear_probability"]
+    if not _nonnegative_number(clear) or clear > 1:
+        raise ValueError("data.flare_pairs_clear_probability must be in [0, 1]")
+    minimum = data.get("minimum_trajectories_per_batch", 1)
+    for phase in ("phase1", "phase2"):
+        size = config[phase]["batch_size"]
+        slots = max(1, round(fraction * size))
+        if size - slots < minimum:
+            raise ValueError(f"data.flare_pairs_fraction {fraction}: {slots} of {phase}.batch_size {size} are "
+                             f"FlareImage, leaving fewer than minimum_trajectories_per_batch {minimum} TartanAir samples")
 
 
 SPLIT_LIGHT_KEYS = ("split_light_width", "split_light_scale", "split_light_levels", "split_light_weight",

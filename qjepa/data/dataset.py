@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
 from ..corruptions.image import brightness_stops, degradation_vector, frame_kind
 from ..corruptions.rng import derive_seed
+from .flare_pairs import FlarePairBank
 from .manifest import PairedSample
 from .tartanair import Trajectory
 
@@ -98,11 +99,22 @@ class PairedCameraImuDataset(Dataset):
         full_frame: bool = False,
         brightness_target: bool = False,
         tone_label: bool = False,
+        flare_pairs: FlarePairBank | None = None,
+        flare_pairs_fraction: float = 0.0,
+        flare_pairs_clear_probability: float = 1.0,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
         if not 0.0 <= hflip_probability <= 1.0:
             raise ValueError("hflip_probability must be in [0, 1]")
+        # data.flare_pairs_*: FlareImage pairs fill flare_pairs_per_batch() slots of every training batch
+        # (sampler.FlarePairSlots asks for them with indices past the TartanAir samples). None: as before.
+        if flare_pairs is not None and not 0.0 < flare_pairs_fraction < 1.0:
+            raise ValueError("flare_pairs_fraction must lie in (0, 1) when FlareImage pairs are given")
+        self.flare_bank = flare_pairs
+        self.flare_pairs_split = "train"   # tools/flare_pairs_probe.py reads the held-out pairs instead
+        self.flare_pairs_fraction = float(flare_pairs_fraction)
+        self.flare_pairs_clear_probability = float(flare_pairs_clear_probability)
         # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
         self.sensor_reference = sensor_reference
         # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
@@ -145,10 +157,13 @@ class PairedCameraImuDataset(Dataset):
         return len(self.samples)
 
     def _scenario_modes(self, sample: PairedSample) -> tuple[str, str]:
+        return self._modes(sample.sample_id)
+
+    def _modes(self, sample_id: str) -> tuple[str, str]:
         image_mode, imu_mode = self.image_mode, self.imu_mode
         if self.scenarios:
             rng = np.random.default_rng(derive_seed(
-                self.scenario_seed, "phase2_scenario", sample.sample_id, self.realization,
+                self.scenario_seed, "phase2_scenario", sample_id, self.realization,
             ))
             weights = np.asarray([float(item["weight"]) for item in self.scenarios], dtype=np.float64)
             choice = self.scenarios[int(rng.choice(len(weights), p=weights / weights.sum()))]
@@ -170,19 +185,68 @@ class PairedCameraImuDataset(Dataset):
         top, left = self.crop_origin(sample)
         return np.ascontiguousarray(frame[top:top + self.image_size[0], left:left + self.image_size[1]])
 
+    def flare_pairs_per_batch(self, batch_size: int) -> int:
+        """How many slots of a training batch of ``batch_size`` hold a FlareImage pair (0 without data.flare_pairs_*)."""
+        if self.flare_bank is None:
+            return 0
+        return max(1, round(self.flare_pairs_fraction * batch_size))
+
     def __getitem__(self, index: int) -> dict[str, object]:
+        if index >= len(self.samples):
+            # Past the TartanAir samples: the draw-th FlareImage pair of this realization (sampler.FlarePairSlots).
+            return self._flare_item(index - len(self.samples))
         sample = self.samples[index]
         image_mode, imu_mode = self._scenario_modes(sample)
-        imu_all, imu_times_all = self.cache.get(sample)
         clean_image = self._clean_frame(sample)
-        clean_imu = np.asarray(imu_all[sample.imu_start : sample.imu_end], dtype=np.float32)
-        imu_times = np.asarray(imu_times_all[sample.imu_start : sample.imu_end], dtype=np.float64)
+        return self._item(sample, sample.sample_id, sample.trajectory_key, clean_image, clean_image,
+                          image_mode, imu_mode, trajectory=sample.trajectory_key, timestamp=sample.image_time,
+                          frame_index=sample.image_index)
+
+    def _flare_item(self, draw: int) -> dict[str, object]:
+        """A FlareImage pair: its flared photo is the input, its clean photo the target, both the same crop.
+
+        The pair has no IMU, so it borrows the clean and noisy IMU window of a TartanAir sample drawn here: every
+        loss still compares an IMU window with itself, only image and IMU are not one motion. Draw ``draw`` of a
+        realization walks a fresh permutation of the training pairs per cycle, so each pair comes once per cycle.
+        """
+        pairs = self.flare_bank.pairs(self.flare_pairs_split)
+        cycle, slot = divmod(int(draw), len(pairs))
+        order = np.random.default_rng(derive_seed(
+            self.scenario_seed, "flare_pair_order", self.realization, cycle)).permutation(len(pairs))
+        pair = pairs[int(order[slot])]
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "flare_pair", self.realization, draw))
+        host = self.samples[int(rng.integers(len(self.samples)))]
+        clear = bool(rng.random() < self.flare_pairs_clear_probability)
+        gt, flared = self.flare_bank.load(pair)
+        height, width = self.image_size
+        if gt.shape[0] < height or gt.shape[1] < width:
+            raise ValueError(f"FlareImage {pair.name}: {gt.shape[1]}x{gt.shape[0]} is smaller than the crop "
+                             f"{width}x{height}; raise data.flare_pairs_short_side or use larger pairs")
+        top = int(rng.integers(0, gt.shape[0] - height + 1))
+        left = int(rng.integers(0, gt.shape[1] - width + 1))
+        crop = lambda image: np.ascontiguousarray(image[top:top + height, left:left + width], dtype=np.float32) / 255.0
+        sample_id = f"flareimage/{pair.name}#{self.realization}:{draw}"
+        image_mode, imu_mode = self._modes(sample_id)
+        return self._item(host, sample_id, f"flareimage/{pair.source}", crop(gt), crop(flared), image_mode,
+                          imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0,
+                          flare_pair={"name": pair.name, "source": pair.source, "clear": clear},
+                          imu_donor=host.sample_id)
+
+    def _item(self, host: PairedSample, sample_id: str, trajectory_key: str, clean_image: np.ndarray,
+              source_image: np.ndarray, image_mode: str, imu_mode: str, *, trajectory: str, timestamp: float,
+              frame_index: int, flare_pair: dict[str, object] | None = None,
+              imu_donor: str | None = None) -> dict[str, object]:
+        """One training/validation item: ``source_image`` through the corruption is the input, ``clean_image`` the
+        target, and the IMU window is ``host``'s. For a TartanAir sample source and target are its own frame."""
+        imu_all, imu_times_all = self.cache.get(host)
+        clean_imu = np.asarray(imu_all[host.imu_start : host.imu_end], dtype=np.float32)
+        imu_times = np.asarray(imu_times_all[host.imu_start : host.imu_end], dtype=np.float64)
         corrupt = dict(
-            split=sample.split,
+            split=host.split,
             realization=self.realization,
-            trajectory=sample.trajectory_key,
-            timestamp=sample.image_time,
-            frame_index=sample.image_index,
+            trajectory=trajectory,
+            timestamp=timestamp,
+            frame_index=frame_index,
             mode=image_mode,
             # The CLEAN gyro drives the blur: the true motion is what smears the
             # frame, while the IMU branch only ever sees a noisy measurement of
@@ -190,24 +254,26 @@ class PairedCameraImuDataset(Dataset):
             gyro=clean_imu[:, 3:6].astype(np.float64),
             imu_times=imu_times,
         )
+        if flare_pair is not None:
+            corrupt["flare_pair"] = flare_pair
         noise_free = None
         if self.sensor_reference:
             noisy_image, noise_free, image_parameters = self.image_corruptor.render_with_sensor_reference(
-                clean_image, **corrupt)
+                source_image, **corrupt)
         else:
-            noisy_image, image_parameters = self.image_corruptor(clean_image, **corrupt)
+            noisy_image, image_parameters = self.image_corruptor(source_image, **corrupt)
         noisy_imu, imu_parameters = self.imu_corruptor.window(
             imu_all,
             imu_times_all,
-            sample.imu_start,
-            sample.imu_end,
-            split=sample.split,
+            host.imu_start,
+            host.imu_end,
+            split=host.split,
             realization=self.realization,
-            trajectory=sample.trajectory_key,
+            trajectory=host.trajectory_key,
             mode=imu_mode,
         )
         stops = brightness_stops(image_parameters, *noisy_image.shape[:2]) if self.brightness_target else None
-        if mirror_draw(self.scenario_seed, sample.sample_id, self.realization, self.hflip_probability):
+        if mirror_draw(self.scenario_seed, sample_id, self.realization, self.hflip_probability):
             # After corruption: every corruption draw is mirror-symmetric in distribution,
             # and the seeds stay those of the unmirrored sample.
             clean_image, noisy_image = clean_image[:, ::-1], noisy_image[:, ::-1]
@@ -220,14 +286,16 @@ class PairedCameraImuDataset(Dataset):
             "image_noisy": chw(noisy_image),
             "imu_clean_phys": torch.from_numpy(np.ascontiguousarray(clean_imu)).float(),
             "imu_noisy_phys": torch.from_numpy(np.ascontiguousarray(noisy_imu)).float(),
-            "image_time": torch.tensor(sample.image_time, dtype=torch.float64),
+            "image_time": torch.tensor(host.image_time, dtype=torch.float64),
             "imu_times": torch.from_numpy(imu_times),
-            "imu_start": torch.tensor(sample.imu_start),
+            "imu_start": torch.tensor(host.imu_start),
             "image_degradation": torch.from_numpy(degradation_vector(image_parameters)),
-            "sample_id": sample.sample_id,
-            "trajectory_key": sample.trajectory_key,
+            "sample_id": sample_id,
+            "trajectory_key": trajectory_key,
             "corruption": {"image": image_parameters, "imu": imu_parameters},
         }
+        if imu_donor is not None:
+            item["corruption"]["imu_donor"] = imu_donor
         if noise_free is not None:
             item["image_noise_free"] = chw(noise_free)
         if stops is not None:
