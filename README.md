@@ -32,6 +32,10 @@ Bằng p33_halo cộng `phase2.split_chroma_*`; hash phase 1 bằng p33 nên **d
   sau tầng tone (bản đồ stop + lưới song phương), khôi phục, và riêng kênh Y. Bảng này cho biết phần ~9 dB còn lại do
   tầng tone hay do hai nhánh; chạy được cả trên checkpoint p33.
 - Đọc kết quả p34: bảng *PSNR qua từng tầng*, dòng "không lóe": "khôi phục" phải gần "vào" hơn p33 (27,85 so với 36,71).
+- **Xem ảnh HALO** (`tools/random_pair_preview.py --halo`, Cell 12b `PREVIEW_HALO`): `flare` chỉ lấy ảnh có lóe HALO,
+  lớp lóe từ các scene HALO dành riêng cho split (model chưa thấy); `scenes` lấy ảnh gốc của HALO, `flare.png` vào và
+  `gt.png` là đích, cắt giữa và thu nhỏ như frame TartanAir. Nguồn sáng ở trong khung, cảnh Blender model chưa từng
+  thấy; HALO không có IMU nên mỗi panel mượn IMU của một mẫu TartanAir. Bằng chứng: `tests/test_random_pair_preview.py`.
 - Bằng chứng: `tests/test_chroma_detail.py` (độ lệch RGB = độ sáng + màu, `chroma_to_rgb` không mang độ sáng; trên ảnh
   có cạnh màu mịn, lưới màu chặn trần còn cộng chi tiết màu của chính ảnh trả lại đúng ảnh; có khoá thì decoder khởi đầu
   đúng là phép đồng nhất, không có thì màu bị mờ từ update 0; hiệu chỉnh bằng 0 lúc đầu; thiếu khoá giữ đúng các lớp của

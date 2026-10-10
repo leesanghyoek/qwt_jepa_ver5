@@ -1,5 +1,8 @@
 """Random previews rotate whole paired samples across consecutive runs; --glare-config tests any
-checkpoint, one trained before the glare existed too, on frames with lamps and glare."""
+checkpoint, one trained before the glare existed too, on frames with lamps and glare; --halo flare
+shows only frames carrying a HALO flare of the split's held-out HALO scenes, and --halo scenes tests on
+HALO's own renders (flare.png in, gt.png as target) with a borrowed TartanAir IMU window -- for a
+checkpoint trained without HALO too, given --halo-root."""
 
 import numpy as np
 import pytest
@@ -95,3 +98,45 @@ def test_region_metrics_measure_the_dark_the_bright_the_halo_and_blown_pixels():
     assert measured["dark_brightness"] > 1 and measured["halo_mae255"] == pytest.approx(0.25 * 255, rel=1e-3)
     # Blown out: column 7, and the two bright halo columns clipped to 1.
     assert measured["white_fraction"] == pytest.approx(3 / 8) and measured["white_fraction_clean"] == 0
+
+
+def test_the_halo_previews_show_only_flared_frames_or_halo_s_own_renders(tmp_path):
+    from PIL import Image
+
+    from qjepa.corruptions.halo import HaloFlareBank
+    from test_halo_flare import HALO, _train_tiny, _write_halo
+
+    torch.set_num_threads(1)
+    halo_root = _write_halo(tmp_path / "halo")
+    last, manifest = _train_tiny(tmp_path, "halo", halo_root)
+    bank = HaloFlareBank(halo_root, revision=HALO["halo_revision"], effects=HALO["halo_effects"],
+                         holdout_fraction=HALO["halo_holdout_fraction"])
+    flared = preview(last, manifest, output=tmp_path / "flare", state=tmp_path / "state.json", count=2, split="test",
+                     image_mode="full", device="cpu", seed=5, halo="flare")
+    assert len(flared["items"]) == 2 and flared["halo"] == "flare"
+    for item in flared["items"]:                                   # every frame carries a test-split HALO flare
+        assert item["image_corruption"]["halo"] and item["image_corruption"]["halo_params"]["uid"] in bank.splits["test"]
+        assert (tmp_path / "flare" / item["panel"]).is_file()
+    scenes = preview(last, manifest, output=tmp_path / "scenes", state=tmp_path / "state2.json", count=2, split="test",
+                     image_mode="full", device="cpu", seed=5, halo="scenes")
+    assert {item["sample_id"] for item in scenes["items"]} <= set(bank.splits["test"])
+    for item in scenes["items"]:                                   # HALO's render: flare.png in, gt.png the target
+        uid = item["sample_id"]
+        stem = str(bank.paths[uid])[: -len(".separate.png")]
+        gt = np.asarray(Image.open(stem + ".gt.png").convert("RGB"), dtype=np.float32) / 255
+        flare = np.asarray(Image.open(stem + ".flare.png").convert("RGB"), dtype=np.float32) / 255
+        mse = float(np.square(flare - gt).mean())            # same crop and size on both: the size cancels out
+        assert item["image_corruption"]["mode"] == "halo_scene"
+        assert item["image_input_metrics"]["image_psnr_db"] < 40 and mse > 0
+        assert (tmp_path / "scenes" / item["panel"]).is_file()
+    with pytest.raises(ValueError, match="blur_only"):
+        preview(last, manifest, output=tmp_path / "blur", state=tmp_path / "state3.json", count=1,
+                image_mode="blur_only", device="cpu", seed=5, halo="flare")
+    # A checkpoint trained without HALO: the flare settings of configs/kaggle_halo.yaml, given --halo-root.
+    plain, _ = _train_tiny(tmp_path, "plain")
+    with pytest.raises(SystemExit):
+        preview(plain, manifest, output=tmp_path / "none", state=tmp_path / "state4.json", count=1,
+                image_mode="full", device="cpu", seed=5, halo="flare")
+    report = preview(plain, manifest, output=tmp_path / "plain_flare", state=tmp_path / "state5.json", count=1,
+                     image_mode="full", device="cpu", seed=5, halo="flare", halo_root=halo_root)
+    assert report["items"][0]["image_corruption"]["halo"]

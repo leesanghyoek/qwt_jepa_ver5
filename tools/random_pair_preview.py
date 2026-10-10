@@ -8,6 +8,14 @@ before the glare existed too -- on frames with lamps and glare: the light_* keys
 that config go into the checkpoint's corruption for this preview only, and the
 panels favour frames that have bright areas (lamps, windows) for the glare to come
 from. A model that never saw glare in training is being tested out of distribution.
+
+``--halo flare`` shows only frames carrying a HALO flare: every frame of the split gets one,
+drawn from the HALO scenes held out for that split (mode full or blur_low_light).
+``--halo scenes`` tests on HALO's own renders instead: input <uid>.flare.png, target
+<uid>.gt.png of the split's held-out HALO scenes, centre-cropped and resized as TartanAir
+frames are. HALO has no IMU: each panel borrows the IMU window of a random TartanAir
+sample, so its IMU traces say nothing about the scene. A checkpoint trained without HALO
+takes configs/kaggle_halo.yaml's flare settings and needs ``--halo-root``.
 """
 
 from __future__ import annotations
@@ -30,8 +38,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qjepa.cli import _dataset, _system_from_phase2
 from qjepa.config import FOG_KEYS, ILLUM_KEYS, LIGHT_KEYS, load_config
+from qjepa.corruptions.image import HALO_MODES
 from qjepa.data import read_manifest
+from qjepa.data.dataset import load_rgb
 from qjepa.evaluation.metrics import image_metrics, imu_metrics
+from tools.halo_probe import corruptors as halo_corruptors
+
+HALO_PREVIEWS = ("flare", "scenes")
 
 
 CHANNELS = ("ax", "ay", "az", "gx", "gy", "gz")
@@ -101,7 +114,7 @@ def _bright_indices(dataset, eligible: list[int], rng: np.random.Generator, want
 
 def _plot_pair(path: Path, sample: dict, restored, image_input: dict,
                image_output: dict, imu_input: dict, imu_output: dict,
-               realization: int) -> None:
+               realization: int, note: str = "") -> None:
     fig = plt.figure(figsize=(16, 10), layout="constrained")
     grid = fig.add_gridspec(3, 3, height_ratios=(2.3, 1, 1))
     images = (
@@ -134,9 +147,9 @@ def _plot_pair(path: Path, sample: dict, restored, image_input: dict,
             ax.legend(loc="best", fontsize=8)
 
     image_flags = sample["corruption"]["image"]
-    blur = "+".join(name for name in ("defocus", "motion", "downsample") if image_flags[name]) or "none"
+    blur = "+".join(name for name in ("defocus", "motion", "downsample") if image_flags.get(name)) or "none"
     fig.suptitle(
-        f"{sample['sample_id']} | realization={realization} | blur={blur}\n"
+        f"{sample['sample_id']} | realization={realization} | blur={blur}{' | ' + note if note else ''}\n"
         f"Ảnh PSNR {image_input['image_psnr_db']:.2f} → {image_output['image_psnr_db']:.2f} dB"
         f"  |  IMU accel RMSE {imu_input['accel_rmse']:.3g} → {imu_output['accel_rmse']:.3g}"
         f"  |  gyro {imu_input['gyro_rmse']:.3g} → {imu_output['gyro_rmse']:.3g}",
@@ -146,21 +159,38 @@ def _plot_pair(path: Path, sample: dict, restored, image_input: dict,
     plt.close(fig)
 
 
+def _halo_scene(bank, uid: str, dataset, donor: int, size: tuple[int, int]) -> dict:
+    """A HALO render as a sample: input its flare.png, target its gt.png; the IMU of TartanAir sample ``donor``."""
+    stem = str(bank.paths[uid])[: -len(".separate.png")]
+    borrowed = dataset[int(donor)]
+    chw = lambda path: torch.from_numpy(np.ascontiguousarray(load_rgb(path, size).transpose(2, 0, 1))).float()
+    return {**borrowed, "image_clean": chw(stem + ".gt.png"), "image_noisy": chw(stem + ".flare.png"),
+            "sample_id": uid, "imu_donor": borrowed["sample_id"],
+            "corruption": {"image": {"mode": "halo_scene", "halo_scene": uid}, "imu": borrowed["corruption"]["imu"]}}
+
+
 def preview(
     checkpoint: str | Path, manifest_path: str | Path, *, output: str | Path,
     state: str | Path, count: int = 4, split: str = "valid",
     image_mode: str = "blur_only", imu_mode: str = "full",
     device: str = "cuda", seed: int | None = None, light_scale: float = 1.0,
     glare_config: str | Path | None = None, glare_probability: float = 1.0,
+    halo: str | None = None, halo_root: str | Path | None = None,
 ) -> dict:
     if count < 1:
         raise ValueError("count must be positive")
+    if halo is not None and halo not in HALO_PREVIEWS:
+        raise ValueError(f"halo must be one of {HALO_PREVIEWS} or None")
+    if halo == "flare" and image_mode not in HALO_MODES:
+        raise ValueError(f"--halo flare: the HALO flare runs in modes {HALO_MODES}, not {image_mode!r}")
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Choose a new output directory: {output}")
     state = Path(state)
     manifest = read_manifest(manifest_path)
     system, config = _system_from_phase2(str(checkpoint), torch.device(device))
+    if halo_root is not None:
+        config["data"]["halo_root"] = str(halo_root)
     if light_scale != 1.0:
         # Brightening only the preview, never the checkpoint's own recipe: the
         # panels are for looking at, and metrics stay comparable only while the
@@ -182,7 +212,7 @@ def preview(
         print(f"[preview] thêm đèn và lóe sáng từ {glare_config} vào nhiễu, {glare_probability:.0%} ảnh "
               f"(chỉ panel này, không đổi checkpoint)")
     previous = json.loads(state.read_text()) if state.is_file() else {}
-    identity = (manifest["meta"]["manifest_hash"], split, image_mode, imu_mode, bool(glare_config))
+    identity = (manifest["meta"]["manifest_hash"], split, image_mode, imu_mode, bool(glare_config), halo or "")
     previous_ids = set(previous.get("sample_ids", [])) if tuple(previous.get("identity", ())) == identity else set()
     explicit_seed = seed is not None
     seed = int(seed) if explicit_seed else secrets.randbits(63)
@@ -194,19 +224,39 @@ def preview(
     dataset = _dataset(config, manifest, split, fixed_realization=True, image_mode=image_mode, imu_mode=imu_mode,
                        full_frame=bool(config["data"].get("source_size")))
     dataset.set_realization(realization)
-    eligible = _eligible_indices(dataset, image_mode)
-    if glare_config is not None:
-        bright = _bright_indices(dataset, eligible, rng, want=4 * count)
-        print(f"[preview] {len(bright)} frame có vùng sáng (đèn, cửa sổ) để lóe")
-        eligible = bright if len(bright) >= count else eligible
-    indices = choose_indices(
-        [sample.sample_id for sample in dataset.samples], eligible, count,
-        set() if explicit_seed else previous_ids, rng,
-    )
+    bank = None
+    if halo is not None:
+        flared = halo_corruptors(dataset, config, None if halo_root is None else str(halo_root))[0]
+        bank = flared.halo_bank
+        if halo == "flare":
+            dataset.image_corruptor = flared            # every frame of the split carries a HALO flare
+        print(f"[preview] HALO {halo}: {len(bank.splits[split])} lớp/cảnh HALO của split {split} "
+              f"(scene {', '.join(bank.describe()['scenes'][split])})")
+    if halo == "scenes":
+        uids = bank.splits[split]
+        indices = choose_indices(uids, list(range(len(uids))), count, set() if explicit_seed else previous_ids, rng)
+        donors = rng.choice(len(dataset), size=len(indices)).tolist()
+    else:
+        eligible = _eligible_indices(dataset, image_mode)
+        if glare_config is not None:
+            bright = _bright_indices(dataset, eligible, rng, want=4 * count)
+            print(f"[preview] {len(bright)} frame có vùng sáng (đèn, cửa sổ) để lóe")
+            eligible = bright if len(bright) >= count else eligible
+        indices = choose_indices(
+            [sample.sample_id for sample in dataset.samples], eligible, count,
+            set() if explicit_seed else previous_ids, rng,
+        )
     output.mkdir(parents=True)
     items = []
     for position, index in enumerate(indices):
-        sample = dataset[index]
+        note = ""
+        if halo == "scenes":
+            sample = _halo_scene(bank, uids[index], dataset, donors[position], tuple(config["data"]["image_size"]))
+            note = f"cảnh HALO: flare.png → gt.png, IMU mượn của {sample['imu_donor']}"
+        else:
+            sample = dataset[index]
+            flare = sample["corruption"]["image"].get("halo_params")
+            note = f"lóe HALO {flare['uid']} ×{flare['gain']:.2f}" if flare else ""
         with torch.no_grad():
             restored = system(
                 sample["image_noisy"].unsqueeze(0).to(device),
@@ -223,7 +273,7 @@ def preview(
             imu_output = imu_metrics(restored.imu_physical, imu_clean)
         panel_name = f"pair_{position:02d}.png"
         _plot_pair(output / panel_name, sample, restored, image_input,
-                   image_output, imu_input, imu_output, realization)
+                   image_output, imu_input, imu_output, realization, note)
         items.append({
             "sample_id": sample["sample_id"], "index": index, "panel": panel_name,
             "image_corruption": sample["corruption"]["image"],
@@ -239,7 +289,7 @@ def preview(
         "light_scale": light_scale,
         "glare_config": None if glare_config is None else str(glare_config),
         "glare_probability": glare_probability if glare_config is not None else None,
-        "seed": seed, "realization": realization, "items": items,
+        "halo": halo, "seed": seed, "realization": realization, "items": items,
     }
     (output / "preview.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -271,12 +321,15 @@ def main() -> None:
                              "lóe sáng vào nhiễu của panel, kể cả với checkpoint train trước khi có lóe")
     parser.add_argument("--glare-probability", type=float, default=1.0,
                         help="tỉ lệ ảnh có lóe khi dùng --glare-config (1.0 = mọi ảnh)")
+    parser.add_argument("--halo", choices=HALO_PREVIEWS,
+                        help="flare: chỉ ảnh có lóe HALO; scenes: ảnh gốc của HALO (flare.png → gt.png)")
+    parser.add_argument("--halo-root", help="thư mục có halo_index.csv (mặc định: data.halo_root của checkpoint)")
     args = parser.parse_args()
     preview(args.checkpoint, args.manifest, output=args.output, state=args.state,
             count=args.count, split=args.split, image_mode=args.image_mode,
             imu_mode=args.imu_mode, device=args.device, seed=args.seed,
             light_scale=args.light_scale, glare_config=args.glare_config,
-            glare_probability=args.glare_probability)
+            glare_probability=args.glare_probability, halo=args.halo, halo_root=args.halo_root)
 
 
 if __name__ == "__main__":

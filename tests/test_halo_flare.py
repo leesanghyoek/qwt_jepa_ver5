@@ -51,7 +51,8 @@ def _write_halo(root, scenes=8, per_scene=3, size=(72, 128), revision=REVISION, 
     """A HALO folder as Kaggle unpacks halo-reflective-1280: index, build info, <scene>/<uid>.separate.png.
 
     Each layer: dark, a bright square at the centre and a bright stripe on the left edge (outside the
-    centre square), so a centre crop keeps the square and drops the stripe."""
+    centre square), so a centre crop keeps the square and drops the stripe. Beside it, as in HALO, the
+    clean render (<uid>.gt.png: a colour gradient) and the flared one (<uid>.flare.png: gt + layer)."""
     rows = []
     height, width = size
     for s in range(scenes):
@@ -63,6 +64,13 @@ def _write_halo(root, scenes=8, per_scene=3, size=(72, 128), revision=REVISION, 
             pixels[height // 2 - 6:height // 2 + 6, width // 2 - 6:width // 2 + 6] = (200, 120 + 10 * k, 40)
             pixels[:, :8] = 250
             Image.fromarray(pixels).save(root / scene / f"{uid}.separate.png")
+            gt = np.zeros((height, width, 3), dtype=np.uint8)
+            gt[..., 0] = np.linspace(20, 200, width, dtype=np.uint8)[None, :]
+            gt[..., 1] = np.linspace(40, 160, height, dtype=np.uint8)[:, None]
+            gt[..., 2] = 90 + 10 * s
+            Image.fromarray(gt).save(root / scene / f"{uid}.gt.png")
+            Image.fromarray(np.clip(gt.astype(int) + pixels, 0, 255).astype(np.uint8)).save(
+                root / scene / f"{uid}.flare.png")
             rows.append({"uid": uid, "scene": scene, "effect_type": "Reflective", "effect_id": f"Reflective{k:03d}",
                          "sample_id": uid.rsplit("_", 1)[0], "final_idx": s * per_scene + k, "orig_idx": 0,
                          "shard": "shard-00000.tar", "render_dir": "x"})
