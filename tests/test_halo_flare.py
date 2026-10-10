@@ -280,6 +280,20 @@ def test_the_bank_refuses_another_build_missing_layers_and_no_folder(tmp_path):
         LowLightImageCorruptor(LowLightImageCorruptionConfig(**dict(HALO, halo_probability=0.5)), 73128)
 
 
+def test_halo_probe_rebuilds_the_relit_frame_exactly_as_the_stop_map_divides_it_out():
+    from qjepa.models.decoders import RelightStops
+    from tools.halo_probe import relit_from_stops
+    torch.manual_seed(0)
+    stage = RelightStops(16, size=16, widths=(8, 8, 8))
+    torch.nn.init.normal_(stage.out.weight, std=0.5)               # zero at initialisation: give it a map
+    torch.nn.init.constant_(stage.out.bias, 1.0)                    # about a stop, varying across the frame
+    image, latent = torch.rand(2, 3, 32, 32), torch.randn(2, 16, 4, 4)
+    with torch.no_grad():
+        relit, stops = stage(latent, image)
+    assert stops.abs().mean() > 0.5 and not torch.allclose(relit, image, atol=1e-3)
+    assert torch.allclose(relit_from_stops(image, stops), relit, atol=1e-6)
+
+
 def test_the_notebook_finds_halo_however_kaggle_mounted_it(tmp_path):
     import shutil
     import tarfile
@@ -396,11 +410,14 @@ def test_the_recipe_trains_both_phases_through_the_cli_and_halo_probe_scores_the
         assert whole["count"] == 4 and whole["region_fraction"] > 0
         assert whole["flare_cost_db"]["input"] > 0                # the flare does cost the input PSNR
         assert np.isfinite(whole["flare_light_left_region"]) and np.isfinite(whole["flare_cost_kept"])
-        assert "anh sang loe con lai" in result.stdout and "sau tang tone" in result.stdout
+        assert "anh sang loe con lai" in result.stdout and "tan thap 8x8" in result.stdout
         # Per stage: the smoke decoder (colour grid /2, no chroma detail) loses colour before it learns anything.
         good = table["stages"]["without"]
-        assert set(good) >= {"input", "identity", "restored", "y_input", "y_restored"}
-        assert good["identity"] < good["input"]
+        assert set(good) >= {"input", "identity", "restored"} and "relit" not in good   # no stop map here
+        assert all(set(row) == {"full", "low", "high", "y"} for row in good.values())
+        assert good["identity"]["full"] < good["input"]["full"]
+        # Luminance exact but for the clip to [0, 1] where blurred chroma oversaturates a pixel.
+        assert good["identity"]["y"] == pytest.approx(good["input"]["y"], abs=0.05)
     no_root = subprocess.run([sys.executable, "tools/halo_probe.py", "--checkpoint", str(plain), "--manifest",
                               str(manifest), "--samples", "2", "--device", "cpu"], capture_output=True, text=True)
     assert no_root.returncode != 0 and "--halo-root" in no_root.stderr + no_root.stdout

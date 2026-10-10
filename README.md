@@ -29,8 +29,11 @@ Bằng p33_halo cộng `phase2.split_chroma_*`; hash phase 1 bằng p33 nên **d
   độ lệch RGB nào cũng đúng bằng độ sáng của nó trên ba kênh cộng `chroma_to_rgb` của màu nó. Ở update 0 đầu ra đúng
   bằng đầu vào (94 dB, sai số float); 14 946 tham số. Thiếu khoá: decoder y như p33, checkpoint p33 nạp được.
 - **`halo_probe` có thêm bảng PSNR qua từng tầng** trên cả hai bản: ảnh vào, decoder để nguyên (đầu ra lúc chưa học gì),
-  sau tầng tone (bản đồ stop + lưới song phương), khôi phục, và riêng kênh Y. Bảng này cho biết phần ~9 dB còn lại do
-  tầng tone hay do hai nhánh; chạy được cả trên checkpoint p33.
+  sau bản đồ stop (dựng lại từ `image_stops` như `RelightStops`), sau lưới song phương (J), khôi phục; mỗi tầng có PSNR cả
+  ảnh, tần thấp (trung bình khối 8×8, mức tầng tone được giám sát), tần cao (phần còn lại) và Y. Chạy được trên p33.
+  **p33, bản không lóe (ảnh tốt):** vào 36,71 dB (Y 38,65) → decoder để nguyên 33,06 → **sau tầng tone 30,20** → khôi phục
+  27,85 (Y 29,33). Tầng tone làm mất 6,5 dB trên ảnh không cần chỉnh sáng, và hỏng chủ yếu ở độ sáng (Y). Cột tần
+  thấp / tần cao (bản probe mới) sẽ cho biết đó là đổi độ sáng theo vùng hay thêm vết, quầng.
 - Đọc kết quả p34: bảng *PSNR qua từng tầng*, dòng "không lóe": "khôi phục" phải gần "vào" hơn p33 (27,85 so với 36,71).
 - **Xem ảnh HALO** (`tools/random_pair_preview.py --halo`, Cell 12b `PREVIEW_HALO`): `flare` chỉ lấy ảnh có lóe HALO,
   lớp lóe từ các scene HALO dành riêng cho split (model chưa thấy); `scenes` lấy ảnh gốc của HALO, `flare.png` vào và
