@@ -356,7 +356,11 @@ def test_the_recipe_trains_both_phases_through_the_cli_and_halo_probe_scores_the
         assert whole["count"] == 4 and whole["region_fraction"] > 0
         assert whole["flare_cost_db"]["input"] > 0                # the flare does cost the input PSNR
         assert np.isfinite(whole["flare_light_left_region"]) and np.isfinite(whole["flare_cost_kept"])
-        assert "anh sang loe con lai" in result.stdout
+        assert "anh sang loe con lai" in result.stdout and "sau tang tone" in result.stdout
+        # Per stage: the smoke decoder (colour grid /2, no chroma detail) loses colour before it learns anything.
+        good = table["stages"]["without"]
+        assert set(good) >= {"input", "identity", "restored", "y_input", "y_restored"}
+        assert good["identity"] < good["input"]
     no_root = subprocess.run([sys.executable, "tools/halo_probe.py", "--checkpoint", str(plain), "--manifest",
                               str(manifest), "--samples", "2", "--device", "cpu"], capture_output=True, text=True)
     assert no_root.returncode != 0 and "--halo-root" in no_root.stderr + no_root.stdout

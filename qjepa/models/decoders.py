@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .blocks import Stage, Upsample, initialize_trainable, resize
-from .color_edge import color_base, compose, downsample, illumination, luminance, upsample
+from .color_edge import chroma, chroma_to_rgb, color_base, compose, downsample, illumination, luminance, upsample
 
 IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel", "split_color_edge")
 # Decoders that produce pixels; RestorationSystem.decode drives them.
@@ -902,6 +902,31 @@ class OvercompleteRefiner(nn.Module):
         return detail + self.tail(self.shrink(h))
 
 
+class ChromaDetail(nn.Module):
+    """Full-resolution chroma: the detail of colour that the colour branch's grid cannot carry.
+
+    ``compose`` takes the frame's chroma from the colour branch alone, which works at 1/color_scale. A
+    perfect model was therefore capped at 33.0 dB on clean TartanAir frames (color_scale 2; 29.2 dB at 4),
+    and the decoder did not start as the identity: its colour started blurred. On p33's valid frames
+    whose only corruption left was mild blur and grain, the input stood at 36.7 dB and the restored frame
+    at 27.9 dB (tools/halo_probe.py). This branch reads the input's own chroma detail -- its chroma minus
+    what the colour grid holds -- next to the luminance and the coarse chroma, and returns that detail plus
+    a correction. ``blocks`` residual blocks of ``width`` channels at full resolution, the last conv
+    zero-initialised: at update 0 the decoder's output is its input, chroma included.
+    """
+
+    def __init__(self, width: int = 16, blocks: int = 3) -> None:
+        super().__init__()
+        self.head = nn.Sequential(nn.Conv2d(5, width, 3, padding=1), nn.ReLU())
+        self.trunk = nn.Sequential(*[_ResidualBlock(width) for _ in range(blocks)])
+        self.tail = nn.Conv2d(width, 2, 3, padding=1)
+        nn.init.zeros_(self.tail.weight)
+        nn.init.zeros_(self.tail.bias)
+
+    def forward(self, detail: torch.Tensor, y: torch.Tensor, coarse: torch.Tensor) -> torch.Tensor:
+        return detail + self.tail(self.trunk(self.head(torch.cat((detail, y, coarse), dim=1))))
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -915,9 +940,12 @@ class SplitColorEdgeDecoder(nn.Module):
     * ``compose``: chroma from the base, luminance = illumination + detail.
     * ``light`` (optional, LightBranch): first takes the glare off and lifts the dark
       on the whole frame; both branches then read its result instead of the noisy frame.
+    * ``chroma`` (optional, ChromaDetail, p34): the chroma finer than the colour grid, at
+      full resolution, added on top with zero luminance.
 
     At initialisation both residuals are zero: the output has exactly the input's
-    luminance and the input's colour at ``color_scale`` resolution.
+    luminance and the input's colour at ``color_scale`` resolution -- or the input's colour
+    itself with ``chroma``.
     See qjepa/models/color_edge.py for why the split is exact.
     """
 
@@ -928,9 +956,11 @@ class SplitColorEdgeDecoder(nn.Module):
         edge_widths: tuple[int, ...] = (16, 24, 32, 48, 56), unet_blocks: int = 1,
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
         light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
-        relight: dict | None = None,
+        relight: dict | None = None, chroma: dict | None = None,
     ) -> None:
         super().__init__()
+        # p34 (phase2.split_chroma_detail): full-resolution chroma detail. Absent: no layers, p33's output.
+        self.chroma = ChromaDetail(int(chroma["width"]), int(chroma["blocks"])) if chroma else None
         if light and tone_grid:
             raise ValueError("The bilateral tone grid replaces the light branch: turn one of them off")
         if relight and not tone_grid:
@@ -1023,7 +1053,12 @@ class SplitColorEdgeDecoder(nn.Module):
         parts.update(image_color_base=base, image_illumination=light, image_detail=detail)
         # Flat keys: only tensors cross DataParallel's gather.
         parts.update({f"image_detail_aux{factor}": value for factor, value in aux.items()})
-        return compose(base, light, detail), parts
+        restored = compose(base, light, detail)
+        if self.chroma is not None:
+            coarse = color_base(image, self.color_scale)
+            parts["image_chroma_detail"] = self.chroma(chroma(image) - chroma(coarse), y, chroma(coarse))
+            restored = restored + chroma_to_rgb(parts["image_chroma_detail"])
+        return restored, parts
 
 
 class ImuRefiner(nn.Module):

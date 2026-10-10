@@ -148,6 +148,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_exposure(config)
     _validate_tone_grid(config)
     _validate_relight(config)
+    _validate_chroma(config)
     _validate_source_size(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
@@ -727,6 +728,31 @@ def _validate_relight(config: dict[str, Any]) -> None:
         raise ValueError("phase2.split_relight_weight must be a nonnegative number")
 
 
+CHROMA_KEYS = ("split_chroma_width", "split_chroma_blocks")
+
+
+def _validate_chroma(config: dict[str, Any]) -> None:
+    """p34: phase2.split_chroma_detail, full-resolution chroma detail on top of the colour branch.
+
+    On, every split_chroma_* key must be written out (the hash reads only the config file)."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_chroma_detail", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_chroma_detail must be true or false")
+    if not enabled:
+        return
+    if phase2.get("image_decoder") != "split_color_edge":
+        raise ValueError("phase2.split_chroma_detail adds to the split_color_edge decoder's colour branch")
+    missing = [key for key in CHROMA_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_chroma_detail needs every split_chroma_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    for key, low in (("split_chroma_width", 4), ("split_chroma_blocks", 1)):
+        value = phase2[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise ValueError(f"phase2.{key} must be an integer >= {low}")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -942,6 +968,11 @@ def build_decoders(
                 "size": int(config["phase2"]["split_relight_size"]),
                 "widths": tuple(int(width) for width in config["phase2"]["split_relight_widths"]),
             } if config["phase2"].get("split_relight", False) else None,
+            # Absent before p34: chroma only from the colour branch's grid.
+            "chroma": {
+                "width": int(config["phase2"]["split_chroma_width"]),
+                "blocks": int(config["phase2"]["split_chroma_blocks"]),
+            } if config["phase2"].get("split_chroma_detail", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

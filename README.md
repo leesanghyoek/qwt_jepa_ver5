@@ -12,6 +12,32 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p34_chroma — phase 2: màu ở độ phân giải đầy đủ** (config `configs/kaggle_chroma.yaml` → OUT `outputs/p34_chroma`).
+Bằng p33_halo cộng `phase2.split_chroma_*`; hash phase 1 bằng p33 nên **dùng lại phase 1 của p33**, chỉ train phase 2.
+- **Đo trên p33** (`tools/halo_probe.py`, 256 ảnh valid, mỗi ảnh có và không có lớp lóe, mọi nhiễu khác giữ nguyên):
+  lóe được gỡ phần lớn — ánh sáng lóe còn lại 19% trong vùng lóe (lóe mạnh 17%, nhẹ 27%), lóe làm mất 15,61 dB ở ảnh
+  vào và 4,18 dB ở ảnh khôi phục. Nhưng bản **không lóe** — chỉ còn mờ nhẹ và hạt, vì frame có lóe bỏ bước môi trường —
+  vào 36,71 dB, ra **27,85 dB**: model làm hỏng ảnh tốt ~9 dB (p31 cũng vậy: blur_only 33,8 → 26,6 dB).
+- **Một nguyên nhân nằm trong kiến trúc.** `compose` lấy **màu** của ảnh ra chỉ từ nhánh màu, ở lưới 1/`color_scale`
+  (128×128); độ sáng thì đủ 256². Trên 120 ảnh TartanAir sạch, ghép đúng từng phần của chính ảnh sạch qua nút thắt đó
+  (model hoàn hảo) chỉ đạt **33,0 dB** (p10 31,7, p90 34,7; `color_scale` 4: 29,2 dB). Và ở update 0 decoder không phải
+  phép đồng nhất như bất biến thiết kế đòi: trên decoder p33 thật, đầu ra so với đầu vào 32,6 dB, lệch tới 0,46 ở cạnh
+  màu (độ sáng thì đúng).
+- **`decoders.ChromaDetail`** (`phase2.split_chroma_detail`): đọc chi tiết màu của chính ảnh J sau tầng tone — Cb, Cr
+  của J trừ Cb, Cr của phần lưới màu giữ được — cùng Y và màu thô, ra chi tiết đó cộng một hiệu chỉnh (3 khối residual
+  16 kênh ở 256², lớp cuối khởi tạo 0). Cộng vào ảnh ra qua `color_edge.chroma_to_rgb`, một độ lệch RGB có độ sáng bằng 0:
+  độ lệch RGB nào cũng đúng bằng độ sáng của nó trên ba kênh cộng `chroma_to_rgb` của màu nó. Ở update 0 đầu ra đúng
+  bằng đầu vào (94 dB, sai số float); 14 946 tham số. Thiếu khoá: decoder y như p33, checkpoint p33 nạp được.
+- **`halo_probe` có thêm bảng PSNR qua từng tầng** trên cả hai bản: ảnh vào, decoder để nguyên (đầu ra lúc chưa học gì),
+  sau tầng tone (bản đồ stop + lưới song phương), khôi phục, và riêng kênh Y. Bảng này cho biết phần ~9 dB còn lại do
+  tầng tone hay do hai nhánh; chạy được cả trên checkpoint p33.
+- Đọc kết quả p34: bảng *PSNR qua từng tầng*, dòng "không lóe": "khôi phục" phải gần "vào" hơn p33 (27,85 so với 36,71).
+- Bằng chứng: `tests/test_chroma_detail.py` (độ lệch RGB = độ sáng + màu, `chroma_to_rgb` không mang độ sáng; trên ảnh
+  có cạnh màu mịn, lưới màu chặn trần còn cộng chi tiết màu của chính ảnh trả lại đúng ảnh; có khoá thì decoder khởi đầu
+  đúng là phép đồng nhất, không có thì màu bị mờ từ update 0; hiệu chỉnh bằng 0 lúc đầu; thiếu khoá giữ đúng các lớp của
+  p33; giá trị sai bị từ chối; phase 2 train được và hiệu chỉnh có thay đổi; `halo_probe` thấy decoder để nguyên bằng ảnh
+  vào; p34 = p33 + các khoá chroma, cùng hash phase 1).
+
 **p33_halo — nhiễu: lóe sáng thật của HALO cộng lên ảnh TartanAir** (config `configs/kaggle_halo.yaml` → OUT
 `outputs/p33_halo`). Bằng p32_relight cộng các khoá `corruption.image.halo_*` và `data.halo_root`; kiến trúc giữ nguyên.
 Người dùng: "trộn thêm ảnh HALO vào để model khử được nhiễu và lóe sáng", "tăng xác suất để trong batch có ảnh HALO".

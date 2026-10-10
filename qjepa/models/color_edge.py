@@ -40,6 +40,15 @@ def chroma(rgb: torch.Tensor) -> torch.Tensor:
     return torch.cat(((rgb[:, 2:3] - y) * 0.564, (rgb[:, 0:1] - y) * 0.713), dim=1)
 
 
+def chroma_to_rgb(cbcr: torch.Tensor) -> torch.Tensor:
+    """The RGB offset with zero luminance whose chroma is ``cbcr``: ``chroma`` inverted on Y = 0.
+
+    Any RGB offset d is exactly luminance(d) on all three channels plus chroma_to_rgb(chroma(d)).
+    """
+    blue, red = cbcr[:, 0:1] / 0.564, cbcr[:, 1:2] / 0.713
+    return torch.cat((red, -(0.299 * red + 0.114 * blue) / 0.587, blue), dim=1)
+
+
 def downsample(x: torch.Tensor, scale: int) -> torch.Tensor:
     return F.avg_pool2d(x, scale)
 

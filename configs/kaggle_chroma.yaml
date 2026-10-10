@@ -1,0 +1,20 @@
+# p34_chroma: p33_halo + MAU O DO PHAN GIAI DAY DU (phase2.split_chroma_detail). Chi doi phase 2: hash phase 1 bang
+# p33 -> dung lai phase 1 cua p33_halo.
+#
+# Do tren p33 (tools/halo_probe.py, 256 anh valid, Kaggle 10/10/2026): loe HALO duoc go phan lon (anh sang loe con
+# lai 19% trong vung loe), nhung anh vao chi con mo nhe + hat (ban khong loe) dat 36,71 dB ma anh khoi phuc chi
+# 27,85 dB -- model lam hong anh tot ~9 dB (p31 da vay: blur_only 33,8 -> 26,6 dB).
+# Mot nguyen nhan nam trong kien truc: compose() lay MAU chi tu nhanh mau o luoi 1/color_scale (128x128), nen ca model
+# hoan hao cung chi dat 33,0 dB tren anh sach (120 anh TartanAir; p10 31,7, p90 34,7; color_scale 4: 29,2 dB), va o
+# update 0 decoder chua la phep dong nhat (dau ra so dau vao 32,6 dB, lech toi 0,46 o canh mau).
+# ChromaDetail: chi tiet mau cua chinh anh (mau tru phan luoi mau giu duoc) + hieu chinh, o 256x256, lop cuoi khoi tao
+# 0 -> update 0 dau ra = dau vao (94 dB); 14 946 tham so, cong voi do sang bang 0.
+extends: kaggle_halo.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p34_chroma
+
+phase2:
+  split_chroma_detail: true
+  split_chroma_width: 16
+  split_chroma_blocks: 3

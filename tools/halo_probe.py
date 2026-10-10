@@ -13,6 +13,11 @@ Checkpoint KHONG train voi HALO (vd p32) cung do duoc: lop loe lay theo cac khoa
 configs/kaggle_halo.yaml, can --halo-root (thu muc co halo_index.csv). So p32 voi p33 cho biet train voi HALO
 giup go loe bao nhieu. PSNR tinh tung anh tren sRGB [0, 1] roi lay trung binh.
 
+Bang thu hai: PSNR qua tung tang cua decoder, tren ca hai ban -- ban khong loe chi con mo nhe va hat, tuc la anh
+TOT, model nen de gan nguyen. "decoder de nguyen" = dau ra cua decoder luc chua hoc gi (update 0): p33 mat mau mong
+o luoi 1/color_scale, p34 (split_chroma_detail) bang dung anh vao. "sau tang tone" = anh J sau ban do stop va luoi
+song phuong. "Y" = PSNR rieng kenh do sang: Y cao ma RGB thap -> loi nam o mau.
+
     python3 tools/halo_probe.py --checkpoint outputs/p33_halo/phase2/best_joint_validation.pt \\
         --manifest manifests/kaggle [--split valid] [--samples 256] [--amp] [--halo-root <thu muc HALO>] \\
         [--output halo_probe.json]
@@ -39,6 +44,7 @@ from qjepa.corruptions.halo import HaloFlareBank  # noqa: E402
 from qjepa.corruptions.image import LowLightImageCorruptor  # noqa: E402
 from qjepa.data import collate_paired  # noqa: E402
 from qjepa.execution import RestorationForward  # noqa: E402
+from qjepa.models.color_edge import compose, luminance, split_targets  # noqa: E402
 
 REGION = 0.005   # anh sang tuyen tinh ma loe them (trung binh khoi 8x8 px) de tinh la "vung loe"
 BLOCK = 8
@@ -79,6 +85,21 @@ def corruptors(dataset, config: dict, halo_root: str | None):
                              holdout_fraction=settings.halo_holdout_fraction)
     return (LowLightImageCorruptor(settings, base.master_seed, halo_bank=bank),
             WithoutFlare(settings, base.master_seed, halo_bank=bank))
+
+
+def stages(noisy: torch.Tensor, tone: torch.Tensor | None, restored: torch.Tensor, clean: torch.Tensor,
+           config: dict) -> dict[str, float | None]:
+    """PSNR of the input, of what the decoder returns before it learns anything, after the tone stage, restored."""
+    phase2 = config["phase2"]
+    identity = None
+    if phase2.get("image_decoder") == "split_color_edge":
+        identity = noisy if phase2.get("split_chroma_detail", False) else compose(
+            *split_targets(noisy[None], int(phase2.get("split_color_scale", 2)),
+                           int(phase2.get("split_illumination_scale", 8))))[0].clamp(0, 1)
+    return {"input": psnr(noisy, clean), "identity": None if identity is None else psnr(identity, clean),
+            "tone": None if tone is None else psnr(tone, clean), "restored": psnr(restored, clean),
+            "y_input": psnr(luminance(noisy[None]), luminance(clean[None])),
+            "y_restored": psnr(luminance(restored[None]), luminance(clean[None]))}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -132,8 +153,9 @@ def main() -> None:
                                                                     "imu_times")}
                 outputs = forward(batch["image_noisy"], batch["imu_noisy_phys"], batch["image_time"],
                                   batch["imu_times"])
-                renders.append((samples, collated, outputs["image"].float().clamp(0, 1).cpu()))
-            (samples, collated, out_with), (_, twin, out_without) = renders
+                tone = outputs["image_light"].float().clamp(0, 1).cpu() if "image_light" in outputs else None
+                renders.append((samples, collated, outputs["image"].float().clamp(0, 1).cpu(), tone))
+            (samples, collated, out_with, tone_with), (_, twin, out_without, tone_without) = renders
             clean, in_with, in_without = (x["image_" + key].float() for x, key in
                                           ((collated, "clean"), (collated, "noisy"), (twin, "noisy")))
             for k, sample in enumerate(samples):
@@ -142,7 +164,10 @@ def main() -> None:
                 left = (linear(out_with[k]) - linear(out_without[k])).mean(0)
                 region = F.avg_pool2d(added[None, None], BLOCK)[0, 0] > REGION
                 mask = region.repeat_interleave(BLOCK, 0).repeat_interleave(BLOCK, 1)
-                rows.append({"uid": halo["uid"], "gain": halo["gain"],
+                stage = {version: stages(noisy[k], tone[k] if tone is not None else None, out[k], clean[k], config)
+                         for version, noisy, tone, out in (("with", in_with, tone_with, out_with),
+                                                           ("without", in_without, tone_without, out_without))}
+                rows.append({"uid": halo["uid"], "gain": halo["gain"], "stage": stage,
                              "in_with": psnr(in_with[k], clean[k]), "in_without": psnr(in_without[k], clean[k]),
                              "out_with": psnr(out_with[k], clean[k]), "out_without": psnr(out_without[k], clean[k]),
                              "flare_in_region": float(added[mask].sum()), "flare_out_region": float(left[mask].sum()),
@@ -164,12 +189,26 @@ def main() -> None:
               f"{psnrs['out_with']:>14.2f} / {psnrs['out_without']:<5.2f}"
               f"{row['flare_cost_db']['input']:>12.2f} -> {row['flare_cost_db']['restored']:<6.2f}"
               f"{100 * row['flare_light_left_region']:>16.0f}% / {100 * row['flare_light_left_frame']:.0f}%")
+    stage_table = {version: {key: float(np.mean([row["stage"][version][key] for row in rows]))
+                             for key in rows[0]["stage"][version] if rows[0]["stage"][version][key] is not None}
+                   for version in ("without", "with")}
+    print(f"\nPSNR qua tung tang (dB, cao hon la tot). Ban khong loe = anh TOT (chi mo nhe + hat): model nen de gan nguyen.")
+    print(f"{'ban':<11}{'vao':>8}{'decoder de nguyen':>19}{'sau tang tone':>15}{'khoi phuc':>11}{'Y vao':>9}"
+          f"{'Y khoi phuc':>13}")
+    for version, label in (("without", "khong loe"), ("with", "co loe")):
+        row = stage_table[version]
+        cells = [row.get(key) for key in ("input", "identity", "tone", "restored", "y_input", "y_restored")]
+        print(f"{label:<11}" + "".join(f"{'-' if value is None else f'{value:.2f}':>{width}}"
+                                       for value, width in zip(cells, (8, 19, 15, 11, 9, 13))))
+    print("Doc: 'decoder de nguyen' < 'vao' -> kien truc mat truoc khi hoc gi (p33: mau o luoi 1/color_scale).\n"
+          "     'sau tang tone' << 'vao' -> tang tone (ban do stop, luoi song phuong) lam hong anh tot.\n"
+          "     'khoi phuc' << 'sau tang tone' -> nhanh mau / nhanh duong net lam hong. Y cao ma RGB thap -> loi o mau.")
     print("\nDoc: 'anh sang loe con lai' la so do chinh: gan 0% -> model go duoc loe; gan 100% -> de nguyen loe, can mot\n"
           "     buoc go loe rieng. 'loe lam mat' cua khoi phuc nho ma anh sang loe con lai cao -> loi khac (do sang, chi\n"
           "     tiet) lan at loe trong PSNR, loe van con. 'manh' con lai nhieu hon 'nhe' -> model chi go duoc loe nhat.")
     if args.output:
         Path(args.output).write_text(json.dumps({"split": args.split, "trained_with_halo": trained_with_halo,
-                                                 "groups": table}, indent=2), encoding="utf-8")
+                                                 "groups": table, "stages": stage_table}, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
