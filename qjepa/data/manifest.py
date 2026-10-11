@@ -150,8 +150,19 @@ def pair_trajectory(
     max_centre_error_in_dt: float = 1.0,
 ) -> tuple[list[PairedSample], dict[str, int | str]]:
     _, imu_times = trajectory.load_imu()
+    return _pair(trajectory, split, imu_times, window, max_relative_dt_deviation, max_centre_error_in_dt)
+
+
+def _pair(
+    trajectory: Trajectory,
+    split: str,
+    imu_times: np.ndarray,
+    window: int = 128,
+    max_relative_dt_deviation: float = 0.02,
+    max_centre_error_in_dt: float = 1.0,
+) -> tuple[list[PairedSample], dict[str, int | str]]:
     camera_times = trajectory.load_camera_times()
-    images = trajectory.image_paths()
+    images = trajectory.resolved_image_paths()     # the frame folder resolved once, not once per frame
     if len(images) != len(camera_times):
         raise ValueError(f"{trajectory.key}: {len(images)} images != {len(camera_times)} camera times")
     counters: dict[str, int | str] = {
@@ -192,7 +203,7 @@ def pair_trajectory(
                 difficulty=trajectory.difficulty,
                 trajectory_id=trajectory.trajectory_id,
                 trajectory_path=trajectory_path,
-                image_path=str(image_path.resolve()),
+                image_path=str(image_path),
                 image_index=image_index,
                 image_time=float(image_time),
                 imu_start=start,
@@ -206,28 +217,39 @@ def pair_trajectory(
     return samples, counters
 
 
+def _imu_summary(imu: np.ndarray, timestamps: np.ndarray) -> tuple[str, np.ndarray, np.ndarray, int]:
+    """What the normalization keeps of one IMU stream: its identity, sum, sum of squares and rows."""
+    identity = hashlib.sha256(imu.tobytes() + timestamps.tobytes()).hexdigest()
+    return identity, imu.sum(axis=0), np.square(imu).sum(axis=0), len(imu)
+
+
 def compute_train_normalization(
     trajectories: list[Trajectory], assignments: dict[str, str], workers: int = 1
 ) -> dict[str, object]:
+    train = [trajectory for trajectory in trajectories if assignments[trajectory.key] == "train"]
+    # Read in parallel, sum in the original order: the same floats as one thread.
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        summaries = list(pool.map(lambda trajectory: _imu_summary(*trajectory.load_imu()), train))
+    return _train_normalization([trajectory.key for trajectory in train], summaries)
+
+
+def _train_normalization(
+    keys: list[str], summaries: list[tuple[str, np.ndarray, np.ndarray, int]]
+) -> dict[str, object]:
+    """Mean and std over the unique train streams, summed in the order given (that order fixes the floats)."""
     total = np.zeros(6, dtype=np.float64)
     total_square = np.zeros(6, dtype=np.float64)
     count = 0
     used_stream_hashes: set[str] = set()
     used_trajectories: list[str] = []
-    train = [trajectory for trajectory in trajectories if assignments[trajectory.key] == "train"]
-    # Read in parallel, sum in the original order: the same floats as one thread.
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        loaded = pool.map(lambda trajectory: trajectory.load_imu(), train)
-        streams = list(zip(train, loaded))
-    for trajectory, (imu, timestamps) in streams:
-        identity = hashlib.sha256(imu.tobytes() + timestamps.tobytes()).hexdigest()
+    for key, (identity, stream_sum, stream_square, rows) in zip(keys, summaries):
         if identity in used_stream_hashes:
             continue
         used_stream_hashes.add(identity)
-        total += imu.sum(axis=0)
-        total_square += np.square(imu).sum(axis=0)
-        count += len(imu)
-        used_trajectories.append(trajectory.key)
+        total += stream_sum
+        total_square += stream_square
+        count += rows
+        used_trajectories.append(key)
     if count == 0:
         raise ValueError("No clean training IMU rows are available for normalization")
     mean = total / count
@@ -264,17 +286,31 @@ def build_manifest(
     """``workers`` threads read the trajectories: on Kaggle's /kaggle/input every file read
     and every symlink resolved waits on network storage, and one thread at a time took
     28 to 60+ minutes for the 1122 trajectories of the 640 shards. Results are collected
-    in the original order, so the manifest and its hash do not depend on ``workers``."""
+    in the original order, so the manifest and its hash do not depend on ``workers``.
+
+    Each trajectory is read once: its IMU serves both the pairing and the train
+    normalization (summed in the same order as compute_train_normalization, so the same
+    floats), its frame folder is listed once and resolved once."""
     trajectories = discover_trajectories(root)
     assignments = assign_splits(trajectories, ratios, seed, split_rule)
     samples: dict[str, list[PairedSample]] = {"train": [], "valid": [], "test": []}
     audit = []
+
+    def read(trajectory: Trajectory):
+        imu, imu_times = trajectory.load_imu()
+        split = assignments[trajectory.key]
+        paired, stats = _pair(trajectory, split, imu_times, window)
+        return paired, stats, _imu_summary(imu, imu_times) if split == "train" else None
+
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        paired_all = list(pool.map(
-            lambda trajectory: pair_trajectory(trajectory, assignments[trajectory.key], window), trajectories))
-    for trajectory, (paired, stats) in zip(trajectories, paired_all):
+        read_all = list(pool.map(read, trajectories))
+    train_keys, train_summaries = [], []
+    for trajectory, (paired, stats, summary) in zip(trajectories, read_all):
         samples[assignments[trajectory.key]].extend(paired)
         audit.append(stats)
+        if summary is not None:
+            train_keys.append(trajectory.key)
+            train_summaries.append(summary)
     meta = {
         "manifest_schema": 2,
         "root": str(Path(root).expanduser().resolve()),
@@ -287,7 +323,7 @@ def build_manifest(
             split: sorted(item.key for item in trajectories if assignments[item.key] == split)
             for split in samples
         },
-        "normalization": compute_train_normalization(trajectories, assignments, workers),
+        "normalization": _train_normalization(train_keys, train_summaries),
         "pairing_audit": audit,
     }
     meta["manifest_hash"] = manifest_hash(samples, meta["normalization"])

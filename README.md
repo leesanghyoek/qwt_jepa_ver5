@@ -12,6 +12,27 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**Manifest dựng nhanh hơn và dùng lại được từ file zip** (không đổi run nào: manifest và hash giữ nguyên từng byte).
+- **Vấn đề**: trên Kaggle, Cell 5 dựng manifest của ba shard (1 122 trajectory, 122 nghìn ảnh) mất 28 phút ở một phiên và
+  hơn 1 giờ ở phiên sau. Mỗi `stat`, mỗi lần liệt kê thư mục và mỗi lần đọc file trên `/kaggle/input` đều phải chờ ổ mạng.
+- **Đọc ổ ít hơn** (`qjepa/data/tartanair.py`, `qjepa/data/manifest.py`):
+  - mỗi ảnh từng gọi `resolve()`, khoảng 20 lệnh `stat` qua root có symlink; giờ thư mục ảnh chỉ resolve một lần, chỉ ảnh
+    nào chính nó là symlink mới resolve riêng;
+  - thư mục ảnh được liệt kê một lần thay vì tối đa năm lần glob, và bước tìm trajectory không đi vào thư mục ảnh;
+  - IMU của mỗi trajectory chỉ đọc một lần: cùng lần đọc vừa ghép cửa sổ vừa cộng thống kê chuẩn hoá, theo đúng thứ tự cũ
+    nên ra đúng các số thực cũ.
+- **Đo trên máy** (30,5 nghìn ảnh local qua root có symlink, `strace -c`): `stat` 603 823 → 24 044, `readlink` 30 823 → 320.
+  `meta.json` và ba file CSV giống hệt từng byte. Thời gian trên Kaggle chưa đo; Cell 5 giờ in số phút.
+- **Dùng lại thay vì dựng lại**: Cell 5 tìm manifest trong cả **file zip** của Input. Output của phiên trước gắn làm Input
+  vẫn giữ nguyên dạng zip, ví dụ `<run>_phase*.zip` của `export_run`. Dựng xong, cell ghi ngay
+  `/kaggle/working/manifest_kaggle_<hash>.zip` (vài MiB), không phải chờ phase 1 xong. Manifest chỉ được dùng lại khi cùng
+  dataset root, cùng cách chia, cùng cửa sổ IMU và seed, và ảnh vẫn còn.
+- Bằng chứng: `tests/test_manifest_storage.py`. Nó kiểm:
+  - manifest ra đúng bản mà cách resolve từng ảnh và đọc chuẩn hoá riêng cho ra, qua root có symlink và với một ảnh là symlink;
+  - số lệnh `stat` như nhau dù trajectory có 5 hay 40 ảnh;
+  - mỗi thư mục ảnh chỉ bị liệt kê một lần, và mỗi trajectory chỉ đọc 4 file IMU;
+  - danh sách ảnh trùng với năm lần glob cũ (phân biệt hoa thường, có cả file ẩn, thư mục không có thì rỗng).
+
 **p37_flareblur — p36 mờ hơn một chút, kèm tập test nhỏ riêng** (config `configs/kaggle_flareblur.yaml` → OUT
 `outputs/p37_flareblur`). Bằng p36_flareimage, chỉ nâng ba khoá mờ; đổi nhiễu nên **train lại cả hai phase**.
 - **Yêu cầu** (người dùng, 11/10/2026): "tăng độ nhòe của batch train lên 1 chút", "phân 1 tệp nhỏ riêng để test",

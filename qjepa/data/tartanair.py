@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 from dataclasses import dataclass
@@ -40,14 +41,39 @@ class Trajectory:
     def motion_key(self) -> str:
         return f"{self.environment}/{self.trajectory_id}"
 
+    def _image_entries(self) -> list[tuple[str, bool]]:
+        """(name, is a symlink) of the frames, sorted: ``*_lcam_front.png``, else any PNG/JPEG/WebP.
+
+        One listing of the folder, where five globs listed it up to five times: on Kaggle's
+        /kaggle/input every listing waits on network storage. Names match as pathlib's glob
+        matched them (case-sensitive, hidden files too)."""
+        try:
+            with os.scandir(self.path / IMAGE_DIRECTORY) as listing:
+                entries = {entry.name: entry.is_symlink() for entry in listing}
+        except (FileNotFoundError, NotADirectoryError):
+            entries = {}                                 # as glob: no folder, no frames
+        names = [name for name in entries if fnmatch.fnmatchcase(name, f"*_{CAMERA}.png")]
+        if not names:
+            # tools/build_tartanair640.py stores the 640x640 frames as lossless WebP.
+            names = [name for name in entries
+                     if any(fnmatch.fnmatchcase(name, f"*.{suffix}") for suffix in ("png", "jpg", "jpeg", "webp"))]
+        return [(name, entries[name]) for name in sorted(names)]
+
     def image_paths(self) -> list[Path]:
         directory = self.path / IMAGE_DIRECTORY
-        paths = list(directory.glob(f"*_{CAMERA}.png"))
-        if not paths:
-            # tools/build_tartanair640.py stores the 640x640 frames as lossless WebP.
-            paths = [*directory.glob("*.png"), *directory.glob("*.jpg"), *directory.glob("*.jpeg"),
-                     *directory.glob("*.webp")]
-        return sorted(set(paths))
+        return [directory / name for name, _ in self._image_entries()]
+
+    def resolved_image_paths(self) -> list[Path]:
+        """``[path.resolve() for path in image_paths()]``, resolving the folder once.
+
+        A frame that is not a symlink resolves to the resolved folder plus its name, so only
+        symlinked frames are resolved one by one. Per frame, resolve() cost ~20 stat calls
+        through the linked dataset root -- about 2.4 million on /kaggle/input's network storage
+        for the 122k frames of the 640 shards."""
+        directory = self.path / IMAGE_DIRECTORY
+        resolved = directory.resolve()
+        return [(directory / name).resolve() if symlink else resolved / name
+                for name, symlink in self._image_entries()]
 
     def load_imu(self) -> tuple[np.ndarray, np.ndarray]:
         directory = self.path / "imu"
@@ -79,6 +105,8 @@ def discover_trajectories(root: str | Path) -> list[Trajectory]:
     found: list[Trajectory] = []
     visited: set[Path] = set()
     for directory, child_names, _ in os.walk(root, followlinks=True):
+        # A frame folder holds no trajectory: listing its frames only waits on storage.
+        child_names[:] = [name for name in child_names if name != IMAGE_DIRECTORY]
         path = Path(directory)
         resolved = path.resolve()
         if resolved in visited:
