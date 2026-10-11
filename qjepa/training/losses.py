@@ -497,7 +497,8 @@ def phase2_reconstruction_loss(
     gyro = F.smooth_l1_loss(
         imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:], beta=beta
     )
-    total = image + 0.5 * (accel + gyro)
+    imu_total = 0.5 * (accel + gyro)
+    total = image + imu_total
     parts = {"image_l1": image, "imu_accel_smooth_l1": accel, "imu_gyro_smooth_l1": gyro}
     if detail_weight > 0 and image_coefficients is not None:
         # L1 tren pixel toi uu ve trung vi co dieu kien, ma nghiem do chinh la
@@ -515,11 +516,13 @@ def phase2_reconstruction_loss(
             image_detail = detail_band_l1(image_coefficients, image_coefficient_target, dim=2)
             parts["image_detail_l1"] = image_detail
         total = total + detail_weight * (image_detail + 0.5 * imu_detail)
+        imu_total = imu_total + detail_weight * 0.5 * imu_detail
         parts["imu_detail_l1"] = imu_detail
     if detail_energy_weight > 0 and image_coefficients is not None:
         image_energy = detail_energy_gap(image_coefficients, image_coefficient_target, dim=2)
         imu_energy = detail_energy_gap(imu_coefficients, imu_coefficient_target, dim=1)
         total = total + detail_energy_weight * (image_energy + 0.5 * imu_energy)
+        imu_total = imu_total + detail_energy_weight * 0.5 * imu_energy
         parts["image_detail_energy"] = image_energy
         parts["imu_detail_energy"] = imu_energy
     if variation_weight > 0:
@@ -530,12 +533,14 @@ def phase2_reconstruction_loss(
             imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:]
         )
         total = total + variation_weight * (accel_variation + gyro_variation)
+        imu_total = imu_total + variation_weight * (accel_variation + gyro_variation)
         parts["imu_accel_variation_l1"] = accel_variation
         parts["imu_gyro_variation_l1"] = gyro_variation
     if jitter_weight > 0:
         accel_jitter = excess_jitter(imu_restored_normalized[:, :3], imu_clean_normalized[:, :3])
         gyro_jitter = excess_jitter(imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:])
         total = total + jitter_weight * (accel_jitter + gyro_jitter)
+        imu_total = imu_total + jitter_weight * (accel_jitter + gyro_jitter)
         parts["imu_accel_jitter"] = accel_jitter
         parts["imu_gyro_jitter"] = gyro_jitter
     if increment_weight > 0:
@@ -545,8 +550,11 @@ def phase2_reconstruction_loss(
         gyro_increment = imu_increment_loss(imu_restored_normalized[:, 3:], imu_clean_normalized[:, 3:],
                                             windows, beta)
         total = total + increment_weight * (accel_increment + gyro_increment)
+        imu_total = imu_total + increment_weight * (accel_increment + gyro_increment)
         parts["imu_accel_increment"] = accel_increment
         parts["imu_gyro_increment"] = gyro_increment
+    # Everything the IMU decoder answers for: the logged loss splits into image, IMU and auxiliary heads.
+    parts["loss_imu"] = imu_total
     return total, parts
 
 

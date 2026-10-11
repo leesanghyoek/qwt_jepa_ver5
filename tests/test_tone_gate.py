@@ -155,7 +155,9 @@ def test_phase2_trains_with_it_and_validation_reports_psnr_by_kind_of_frame(tmp_
                                      for row in updates)
     validations = [row for row in rows if "validation_image_psnr_db" in row]
     kinds = [f"validation_{kind}_count" for kind in FRAME_KINDS if f"validation_{kind}_count" in validations[-1]]
-    assert kinds and sum(validations[-1][key] for key in kinds) == validations[-1]["validation_image_count"]
+    # Frames the corruption left untouched are counted apart (tests/test_untouched_frames.py).
+    assert kinds and (sum(validations[-1][key] for key in kinds) + validations[-1]["validation_untouched_count"]
+                      == validations[-1]["validation_image_count"])
     assert "theo loai anh:" in capsys.readouterr().out
     system = load_checkpoint(run / "phase2/last.pt")["system"]
     assert any(key.startswith("decoders.image.tone_gate.") for key in system)

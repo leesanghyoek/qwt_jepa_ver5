@@ -1,0 +1,28 @@
+# p38_expnorm: p37_flareblur + thong ke phoi sang CHUAN HOA cho moi dau toan cuc + cong tone hoc nhanh. CHI phase 2.
+#
+# Nguoi dung (11/10/2026), log phase 2 cua p37: loss giam rat cham (TB 100 update 2,58 -> 1,85 o update 1000,
+# image_l1 0,0785 -> 0,0719). Do tren may (GPU local, backbone ngau nhien, 8 anh/update nhu Kaggle, khong train dai):
+#  - "loss" la tong anh + IMU + hai dau phu: ~0,9 la IMU, ~0,8 la ban do stop (0,47) va cong tone (0,34); phan khoi
+#    phuc anh chi ~0,7. Log phase 2 nay in rieng loss_image / loss_imu / loss_heads.
+#  - Sau 150 update, image_l1 tren batch train BANG muc khong lam gi (0,0778 vs 0,0777) va PSNR validation (trung binh
+#    dB tung anh) TUT tu 21,68 xuong 19,2 dB: anh tot len 1-2 dB, nhung anh gan sach (37-44 dB vao) bi pha 12-17 dB.
+#    Decoder dat MOT phep sua trung binh len moi anh (phan ra RMS ra-vao: anh 43,7 dB va anh 11,3 dB bi doi gan nhu
+#    bang nhau); overfit 8 anh co dinh van pha 3 anh sach (-67..-73 dB) de sua 1 anh toi (+7,9 dB).
+#  - Goc: cac dau toan cuc (GlobalToneColor, luoi song phuong, relight, cong p35) doc thong ke phoi sang KHONG chuan
+#    hoa -- quantile/max ~0,1-1, mot o histogram ~0,06. MLP nhu cong p35 tren dau vao tho van doan "doi sang" cho
+#    moi anh sau 250 buoc (acc 0,64 = ti le lop), 0,82 sau 1000; chuan hoa: 0,82 sau 250, 0,88 sau 500.
+#  - Chuan hoa thong ke cho moi dau: 150 update -> 21,73 dB (vao 21,68); them chuan hoa bo cuc + latent cua cong va
+#    lr cong x10: 21,92 dB, anh gan sach chi mat 2-5 dB; image_l1 train 0,0716 vs 0,0765 khong lam gi (-6%).
+#    (Cong chan them nhanh mau/chroma: 21,98, khong dang them phuc tap.) README muc p38 co so lieu 500 update.
+# Hang so chuan hoa do MOT lan tren bank validation co dinh luc bat dau run phase 2 moi (nhu phase 1 hieu chuan dau vao
+# ViT), luu trong checkpoint. Kien truc, loss va du lieu giu nguyen.
+#
+# CHI doi phase 2 -> hash phase 1 bang p37: dung lai phase 1 cua p37_flareblur (notebook tu tim).
+extends: kaggle_flareblur.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p38_expnorm
+
+phase2:
+  split_exposure_standardize: true
+  split_tone_gate_lr_scale: 10

@@ -405,13 +405,17 @@ KIND_LABELS = {"plain": "tot", "relit": "doi sang", "flare": "loe"}
 
 
 def kind_summary(metrics: dict[str, Any], prefix: str = "") -> str:
-    """"tot 36.71->27.85 (n=40, 98% te hon vao) | doi sang ... | loe ..." from _evaluate_with_overlap's keys."""
+    """"tot 36.71->27.85 (n=40, 98% te hon vao) | doi sang ... | loe ... | vao da sach n=3: ra 79.28" from
+    _evaluate_with_overlap's keys. Frames the corruption left as they were sit in none of the kinds."""
     parts = []
     for kind in FRAME_KINDS:
         if f"{prefix}{kind}_count" in metrics:
             parts.append(f"{KIND_LABELS[kind]} {metrics[f'{prefix}{kind}_baseline_image_psnr_db']:.2f}->"
                          f"{metrics[f'{prefix}{kind}_image_psnr_db']:.2f} (n={int(metrics[f'{prefix}{kind}_count'])}, "
                          f"{100 * metrics[f'{prefix}{kind}_worse_fraction']:.0f}% te hon vao)")
+    if metrics.get(f"{prefix}untouched_count"):
+        parts.append(f"vao da sach n={int(metrics[f'{prefix}untouched_count'])}: ra "
+                     f"{metrics[f'{prefix}untouched_image_psnr_db']:.2f}")
     return " | ".join(parts)
 
 
@@ -773,6 +777,13 @@ def _evaluate_with_overlap(
     # PSNR in and out by what the corruption did to the light (corruptions.image.frame_kind): one mean over a
     # mixed bank hid that p33 improved dark and flared frames while ruining plain ones by 9 dB.
     kind_values: dict[str, list[tuple[float, float]]] = {}
+    # A frame the corruption happened to leave exactly as it was (no stage ran: ~2% of frames, 3 of a 128-frame
+    # bank) has an input PSNR of 120 dB, the floor of image_metrics, that no output reaches (fp16 alone: ~80 dB).
+    # Three of them raised the bank's input mean 22.76 -> 25.04 dB and the plain frames' 33.72 -> 39.00 dB, so a
+    # model looked worse than its input wherever they sat. The overall means keep them, comparable with earlier
+    # runs; the kinds and the touched_* means leave them out, and untouched_* says what the model did to them.
+    touched_pairs: list[tuple[float, float]] = []
+    untouched_psnr: list[float] = []
     frame_rows = []
     frame_index = 0
     estimated_frames = min(len(dataset.samples), maximum_batches * getattr(loader, "batch_size", 1))
@@ -800,7 +811,12 @@ def _evaluate_with_overlap(
             ).items()})
             for key, value in metrics.items():
                 image_values.setdefault(key, []).append(value)
-            if "corruption" in raw:
+            untouched = metrics["baseline_image_mae"] == 0.0
+            if untouched:
+                untouched_psnr.append(metrics["image_psnr_db"])
+            else:
+                touched_pairs.append((metrics["baseline_image_psnr_db"], metrics["image_psnr_db"]))
+            if "corruption" in raw and not untouched:
                 kind = frame_kind(raw["corruption"][row]["image"])
                 kind_values.setdefault(kind, []).append((metrics["baseline_image_psnr_db"], metrics["image_psnr_db"]))
             trajectory = raw["trajectory_key"][row]
@@ -865,6 +881,12 @@ def _evaluate_with_overlap(
         before, after = np.array(pairs).T
         result.update({f"{kind}_baseline_image_psnr_db": float(before.mean()), f"{kind}_image_psnr_db": float(after.mean()),
                        f"{kind}_count": len(pairs), f"{kind}_worse_fraction": float((after < before).mean())})
+    result["untouched_count"] = len(untouched_psnr)
+    if untouched_psnr:
+        result["untouched_image_psnr_db"] = float(np.mean(untouched_psnr))
+    if touched_pairs:
+        before, after = np.array(touched_pairs).T
+        result.update(touched_baseline_image_psnr_db=float(before.mean()), touched_image_psnr_db=float(after.mean()))
     result.update(
         {
             "imu_covered_unique_rows": covered_rows,
@@ -1121,6 +1143,24 @@ def _load_phase1_for_phase2(
     return model, payload
 
 
+def _calibrate_decoder_exposure(config: dict[str, Any], manifest: dict[str, Any], system: RestorationSystem,
+                                device: torch.device) -> dict[str, list[float]]:
+    """phase2.split_exposure_standardize: the standardisers' constants from the fixed validation bank's noisy
+    frames -- the same frames on every rank, as phase 1 calibrates its ViT inputs -- read a batch at a time."""
+    dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    batch = int(config["phase2"]["batch_size"])
+    _fixed_validation_bank(dataset, config["runtime"]["validation_batches"] * batch)
+    system.to(device)
+    chunks: dict[str, list[torch.Tensor]] = {}
+    for start in range(0, len(dataset), batch):
+        frames = collate_paired([dataset[index] for index in range(start, min(len(dataset), start + batch))])
+        rows = system.decoder_exposure_rows(*(frames[key].to(device) for key in
+                                              ("image_noisy", "imu_noisy_phys", "image_time", "imu_times")))
+        for key, value in rows.items():
+            chunks.setdefault(key, []).append(value)
+    return system.decoders.image.calibrate_exposure({key: torch.cat(values) for key, values in chunks.items()})
+
+
 def command_train_phase2(args: argparse.Namespace) -> None:
     config = load_config(_config_path(args.config))
     init_checkpoint = getattr(args, "decoder_init_checkpoint", None)
@@ -1184,6 +1224,15 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         if metadata.get("decoder_current_hash") != state_dict_hash(system.decoders):
             raise ValueError("Decoder initialization weights do not match checkpoint metadata")
         del initialized
+    if config["phase2"].get("split_exposure_standardize", False) and not args.resume and not init_checkpoint:
+        # Fresh runs only, before the decoders' initialization hash is taken; resumed and decoder-initialized
+        # runs carry the constants in their checkpoint.
+        measured = _calibrate_decoder_exposure(config, manifest, system, device)
+        if lead:
+            spread = measured["exposure_std"]
+            print(f"exposure standardization | {len(spread)} statistics, std {min(spread):.3f}-{max(spread):.3f}"
+                  + (f" | gate layout + latent std {min(measured['gate_layout_std']):.3f}-"
+                     f"{max(measured['gate_layout_std']):.3f}" if "gate_layout_std" in measured else ""))
     trainer = Phase2Trainer(
         system, config, device, str(Path(checkpoint).resolve()), manifest["meta"]["manifest_hash"]
     )
@@ -1311,12 +1360,15 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         log.write(metrics)
         if metrics.get("skipped"):
             raise FloatingPointError(f"Phase-2 update skipped: {metrics}")
-        recent.add(metrics, ("loss", "image_l1"))
+        # loss = anh + imu + phu (the stop map's and the tone gate's own losses): only the image part says how the
+        # restoration goes; IMU noise and the auxiliary heads keep the total high whatever the image does.
+        shown = ("loss", "image_l1", "loss_image", "loss_imu", "loss_heads")
+        recent.add(metrics, shown)
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
                 f"phase2 update={_progress(update, maximum)} loss={metrics['loss']:.6f}"
-                f" image_l1={metrics['image_l1']:.6f} {recent.text(('loss', 'image_l1'))}"
+                f" image_l1={metrics['image_l1']:.6f} {recent.text(shown)}"
                 f" {_pace(started, first_update, update, waited)}"
             )
         if update % checkpoint_every == 0 or update == maximum:
@@ -1375,6 +1427,9 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     f"  validation update={_progress(update, maximum)}"
                     f" | PSNR {validation['validation_image_psnr_db']:.2f}"
                     f" vs {validation['validation_baseline_image_psnr_db']:.2f}"
+                    + (f" (anh co nhieu: {validation['validation_touched_image_psnr_db']:.2f}"
+                       f" vs {validation['validation_touched_baseline_image_psnr_db']:.2f})"
+                       if validation.get("validation_untouched_count") else "") +
                     f" | SSIM {validation['validation_image_ssim']:.3f}"
                     f" vs {validation['validation_baseline_image_ssim']:.3f}"
                     f" | accel {validation['validation_accel_rmse']:.3f}"

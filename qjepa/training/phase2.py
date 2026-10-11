@@ -69,8 +69,17 @@ class Phase2Trainer:
         self.manifest_hash = manifest_hash
         self.successful_updates = 0
         self.parameters = list(self.system.decoders.parameters())
+        groups = self.parameters
+        gate = getattr(self.system.decoders.image, "tone_gate", None)
+        if "split_tone_gate_lr_scale" in self.phase and gate is not None:
+            # p38: the tone gate is a small classifier under its own cross-entropy; at the decoders' rate behind
+            # the warmup it still said "relit" for every frame hundreds of updates in, while the colour and tone
+            # branches learnt one average correction for all frames. Absent: one group, as before.
+            held = {id(parameter) for parameter in gate.parameters()}
+            groups = [{"params": [p for p in self.parameters if id(p) not in held]},
+                      {"params": list(gate.parameters()), "lr_scale": float(self.phase["split_tone_gate_lr_scale"])}]
         self.optimizer = torch.optim.AdamW(
-            self.parameters,
+            groups,
             lr=self.phase["learning_rate"],
             weight_decay=self.phase["weight_decay"],
         )
@@ -280,7 +289,15 @@ class Phase2Trainer:
                 with torch.no_grad():
                     parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                         restored["image_coefficients"], visible_coefficients)
-                loss = self.phase["reconstruction_loss_weight"] * loss
+                # The auxiliary heads' own losses: the stop map and the tone gate train on them, the image does not.
+                heads = sum((float(self.phase[weight]) * parts[name] for name, weight in (
+                    ("image_stops_l1", "split_relight_weight"), ("image_tone_bce", "split_tone_gate_weight"))
+                    if name in parts), loss.new_zeros(()))
+                weight = self.phase["reconstruction_loss_weight"]
+                loss = weight * loss
+                parts["loss_imu"] = weight * parts["loss_imu"]
+                parts["loss_heads"] = weight * heads
+                parts["loss_image"] = loss - parts["loss_imu"] - parts["loss_heads"]
                 # x world: only this rank's share carries a graph, and DDP averages over ranks.
                 self.scaler.scale(loss * self.world / expected).backward()
                 pending["loss"] = pending.get("loss", 0.0) + loss.detach() / expected

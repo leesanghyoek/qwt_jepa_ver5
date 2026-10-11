@@ -249,6 +249,17 @@ class RestorationSystem(nn.Module):
                 with_skips=self.decoders.uses_skips,
             )
 
+    @torch.no_grad()
+    def decoder_exposure_rows(self, image_noisy: torch.Tensor, imu_noisy_phys: torch.Tensor,
+                              image_time: torch.Tensor, imu_times: torch.Tensor) -> dict[str, torch.Tensor]:
+        """phase2.split_exposure_standardize: what the image decoder's standardisers read on these noisy frames --
+        the frame the decoder gets and, through the frozen encoder, ZI (SplitColorEdgeDecoder.exposure_rows)."""
+        latent = self.encode(image_noisy, imu_noisy_phys, image_time, imu_times)
+        transform = self.backbone.image_transform
+        image = (latent.image_rgb if latent.image_rgb is not None
+                 else transform.synthesis(latent.image_coefficients, latent.image_layout))
+        return self.decoders.image.exposure_rows(self.image_latent(latent), image)
+
     def image_latent(self, latent: LatentBatch) -> torch.Tensor:
         """ZI, plus the frozen predictor's clean-latent prediction when there is one."""
         if self.latent_predictor is None:

@@ -150,6 +150,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_relight(config)
     _validate_chroma(config)
     _validate_tone_gate(config)
+    _validate_exposure_standardize(config)
     _validate_source_size(config)
     _validate_flare_pairs(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
@@ -823,6 +824,28 @@ def _validate_tone_gate(config: dict[str, Any]) -> None:
         raise ValueError("phase2.split_tone_gate_weight must be a nonnegative number")
 
 
+def _validate_exposure_standardize(config: dict[str, Any]) -> None:
+    """p38: phase2.split_exposure_standardize and phase2.split_tone_gate_lr_scale. Absent: as before.
+
+    Standardisation needs a head that reads the exposure statistics (split_exposure_stats or the tone gate); the
+    gate's learning-rate scale needs the gate."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_exposure_standardize", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_exposure_standardize must be true or false")
+    if enabled and (phase2.get("image_decoder") != "split_color_edge"
+                    or not (phase2.get("split_exposure_stats", False) or phase2.get("split_tone_gate", False))):
+        raise ValueError("phase2.split_exposure_standardize standardises the exposure statistics of the "
+                         "split_color_edge decoder: set split_exposure_stats or split_tone_gate")
+    if "split_tone_gate_lr_scale" in phase2:
+        scale = phase2["split_tone_gate_lr_scale"]
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0 < scale <= 100:
+            raise ValueError("phase2.split_tone_gate_lr_scale must be a number in (0, 100]")
+        if not phase2.get("split_tone_gate", False):
+            raise ValueError("phase2.split_tone_gate_lr_scale scales the tone gate's learning rate: set "
+                             "split_tone_gate: true")
+
+
 def _validate_sharpness(config: dict[str, Any]) -> None:
     """The sharpness plan's keys. Every one is optional: absent, the run trains as before."""
     phase1, phase2 = config["phase1"], config["phase2"]
@@ -1047,6 +1070,8 @@ def build_decoders(
             "tone_gate": {
                 "width": int(config["phase2"]["split_tone_gate_width"]),
             } if config["phase2"].get("split_tone_gate", False) else None,
+            # Absent before p38: the heads read the raw exposure statistics.
+            "exposure_standardize": bool(config["phase2"].get("split_exposure_standardize", False)),
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

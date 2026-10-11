@@ -12,6 +12,79 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p38_expnorm — phase 2 không còn đặt một phép sửa trung bình lên mọi ảnh** (config `configs/kaggle_expnorm.yaml` →
+OUT `outputs/p38_expnorm`). Bằng p37 cộng `phase2.split_exposure_standardize` và `phase2.split_tone_gate_lr_scale`.
+Hash phase 1 bằng p37, nên **chỉ train phase 2** và dùng lại phase 1 của p37.
+- **Yêu cầu** (người dùng, 11/10/2026, xem log phase 2 của p37): "loss giảm rất chậm, có lẽ dữ liệu học có vấn đề hoặc kĩ
+  thuật nào đó trong kiến trúc p2 khôi phục bị lỗi".
+- **Đo trên máy** (RTX 4060 local, backbone khởi tạo ngẫu nhiên, 8 ảnh mỗi update như Kaggle, fp16, perceptual tắt vì thiếu
+  torchvision; mỗi lần chạy dưới 10 phút; PSNR là trung bình dB từng ảnh như validation):
+  - **Tổng `loss` phần lớn không phải ảnh.** Sau 80 update, trong ~2,4 có ~0,9 là IMU (có sàn do nhiễu trắng), 0,47 là bản đồ
+    stop và 0,34 là cổng tone. Hai đầu phụ đó không làm ảnh đẹp hơn; phần khôi phục ảnh chỉ ~0,7.
+  - **Ảnh không tốt lên.** Sau 150 update, L1 ảnh trên batch train bằng đúng mức "không làm gì" (0,0778 so với 0,0777), còn
+    PSNR validation tụt từ 21,68 xuống 19,2 dB. Trong 16 ảnh, một nửa tốt lên 0,7–2,3 dB, nhưng 4 ảnh gần sạch (vào
+    37–44 dB) bị phá 12–17 dB.
+  - **Decoder đặt một phép sửa trung bình lên mọi ảnh.** Phân rã RMS(ra − vào): ảnh 43,7 dB và ảnh 11,3 dB bị đổi gần như
+    bằng nhau. Độ sáng vùng thay đổi 0,025–0,035 (nhánh màu), tầng tone 0,015–0,028, đường nét 0,012–0,018. Overfit 8 ảnh cố
+    định cũng vậy: 3 ảnh đầu vào đã sạch bị phá −67 đến −73 dB để sửa 1 ảnh tối (+7,9 dB), trong khi L1 của batch vẫn giảm.
+  - **Không phải** do fp16 (fp32 giống hệt), không phải do lr (lr chia 10 chỉ làm chậm lại), cũng không phải riêng do tổ hợp
+    loss (chỉ L1, hay PSNR loss theo từng ảnh, đều còn phá ảnh sạch).
+- **Gốc: thống kê phơi sáng chưa chuẩn hoá.** Mọi đầu toàn cục (tone toàn cục của nhánh màu, lưới song phương, bản đồ stop,
+  cổng p35) đọc `exposure_statistics`: quantile và giá trị max ~0,1–1, mỗi ô histogram ~0,06. Lớp cuối của các đầu này khởi
+  tạo 0 và đứng sau warmup 250 update.
+  - Đo trên 1 600 ảnh train local: MLP như cổng p35 trên đầu vào thô vẫn đoán "bị đổi sáng" cho mọi ảnh sau 250 bước (độ
+    chính xác 0,64, đúng bằng tỉ lệ lớp), tới bước 1 000 mới đạt 0,82.
+  - Đầu vào chuẩn hoá: 0,72 sau 50 bước, 0,82 sau 250, 0,88 sau 500; lr 3e-3: 0,84 sau 50 bước.
+  - Trong lúc các đầu toàn cục chưa phân biệt được ảnh, các nhánh cục bộ học phép sửa trung bình.
+  - Latent I-JEPA không bù được: nó được train để dự đoán latent của ảnh **sạch** từ ảnh nhiễu, nên cố ý không mang thông tin
+    ảnh hỏng nặng hay nhẹ.
+- **Sửa** (`qjepa/models/decoders.py`):
+  - `FeatureStandardizer`: thống kê phơi sáng mà mọi đầu toàn cục đọc, cùng bố cục độ sáng 8×8 và trung bình latent mà cổng
+    đọc, đi qua (x − mean) / std.
+  - Mean và std đo một lần trên bank validation cố định lúc bắt đầu một run phase 2 mới (`cli._calibrate_decoder_exposure`),
+    giống hệt cách phase 1 hiệu chuẩn đầu vào ViT. Chúng là buffer trong checkpoint, nên resume và evaluate dùng đúng hằng số đó.
+  - `split_tone_gate_lr_scale: 10`: cổng có nhóm tham số riêng với lr gấp 10.
+  - Các đầu vẫn khởi tạo 0 nên update 0 vẫn là phép đồng nhất. Kiến trúc, loss và dữ liệu giữ nguyên.
+  - Thiếu khoá thì không có buffer nào mới và các đầu đọc thống kê thô như cũ.
+- **Kết quả đo trên máy** (cùng dữ liệu, cùng seed). Cột update 150 đo bằng bản thử nghiệm của cùng phép biến đổi (hằng số
+  đo trên 128 ảnh train); cột update 500 đo bằng chính code này (hằng số đo trên bank validation):
+
+  | | update 150 (16 ảnh) | update 500 (32 ảnh) | L1 train / không làm gì (500) |
+  |---|---|---|---|
+  | p37 (gốc) | 19,2 dB, vào 21,68 | 19,52 dB, vào 21,91 | −18% |
+  | chỉ chuẩn hoá thống kê | 21,73 | — | — |
+  | p38 (chuẩn hoá cả cổng, lr cổng ×10) | **21,92** | **20,63** | **−22%** |
+
+  - Ở update 150, ảnh gần sạch chỉ mất 2–5 dB thay vì 12–17. Tầng tone đổi ảnh sạch ~0,005 RMS nhưng đổi ảnh tối ~0,085: model
+    đã phân biệt được.
+  - Ở update 500, ảnh hỏng được sửa tới +8,0 dB (p37: +5,0).
+  - Cho cổng chặn thêm nhánh màu và chi tiết màu chỉ thêm 0,06 dB, nên không đưa vào.
+  - Vẫn còn ảnh gần sạch bị nhánh đường nét làm hỏng (một ảnh −13 dB ở update 500): việc này chưa sửa.
+- **Đo validation cho đúng: ảnh mà bước nhiễu để nguyên.** ~2% ảnh không bị bước nhiễu nào chạm vào: môi trường "trong", không
+  mờ, và biến thể "chỉ tối" tắt hạt. Đầu vào của chúng là đích, PSNR chặn trần 120 dB, mà không đầu ra nào đạt được (riêng
+  làm tròn fp16 đã cho ~80 dB).
+  - Bank validation 128 ảnh có 3 ảnh như vậy. Chúng đẩy PSNR đầu vào trung bình từ 22,76 lên 25,04 dB, và dòng "tot" từ 33,72
+    lên 39,00 dB.
+  - Vì vậy mọi run trước đều trông như model **tệ hơn đầu vào** ở dòng validation, kể cả con số "tot 36,71 → 27,85" của p33.
+    Việc chọn checkpoint không bị ảnh hưởng, vì nó dùng MAE.
+  - Từ nay validation và evaluate in thêm `anh co nhieu: X vs Y` (khoá `touched_*`), còn các loại ảnh không tính những ảnh
+    này. Chúng có dòng riêng `vao da sach n=…: ra …`. Trung bình tổng giữ như cũ để so được với các run trước.
+- **Log phase 2** in `loss_image`, `loss_imu` và `loss_heads` (chúng cộng lại đúng bằng `loss`); `loss_image` là số cần theo dõi.
+- **Dữ liệu FlareImage không có lỗi** (20 cặp tải về, đo ở kích thước train): không cặp nào lệch vị trí, vùng bão hoà 0–3% pixel
+  và giữ ≤ 5% sai số. Riêng `flare7k_real` có lớp loá phủ cả khung: ngoài vùng lóe, ảnh vào sáng hơn đích 1,7–2,8 lần. Đó là
+  lóe thật, thứ các đầu toàn cục phải học.
+- Bằng chứng:
+  - `tests/test_exposure_standardize.py`:
+    - thiếu khoá thì không có buffer mới; có khoá thì decoder vẫn bắt đầu là phép đồng nhất;
+    - hiệu chuẩn cho các hàng đã đo mean 0 và std 1, và các đầu thật sự đọc bản chuẩn hoá;
+    - cổng trên thống kê chuẩn hoá học nhanh hơn ở mọi seed trong 8 seed (tổng 560 so với 1 890 bước);
+    - cổng chỉ có nhóm lr riêng khi có khoá;
+    - phase 2 qua CLI hiệu chuẩn đúng một lần, resume giữ nguyên hằng số, và `loss` = `loss_image` + `loss_imu` + `loss_heads`;
+    - p38 = p37 + hai khoá, với hash phase 1 của p37;
+    - hash của p37 và p36 không đổi.
+  - `tests/test_untouched_frames.py`: các loại ảnh cộng với nhóm "vào đã sạch" ra đúng tổng số ảnh, và `touched_*` bỏ đúng các
+    ảnh 120 dB.
+
 **Manifest dựng nhanh hơn và dùng lại được từ file zip** (không đổi run nào: manifest và hash giữ nguyên từng byte).
 - **Vấn đề**: trên Kaggle, Cell 5 dựng manifest của ba shard (1 122 trajectory, 122 nghìn ảnh) mất 28 phút ở một phiên và
   hơn 1 giờ ở phiên sau. Mỗi `stat`, mỗi lần liệt kê thư mục và mỗi lần đọc file trên `/kaggle/input` đều phải chờ ổ mạng.

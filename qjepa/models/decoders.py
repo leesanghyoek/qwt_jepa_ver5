@@ -247,6 +247,39 @@ def exposure_statistics(image: torch.Tensor) -> torch.Tensor:
         return torch.cat((quantiles, histogram, x.flatten(2).amax(dim=-1)), dim=1)
 
 
+class FeatureStandardizer(nn.Module):
+    """(x - mean) / std per feature, with mean and std measured once on frames (calibrate) and kept as buffers.
+
+    phase2.split_exposure_standardize. The exposure statistics come on scales two orders apart -- quantiles and
+    maxima ~0.1-1, a histogram bin ~0.06 -- and the heads reading them start from zero-initialised layers behind
+    a learning-rate warmup. Measured on p37's noise (300 frames, local): an MLP like ToneGate on the raw features
+    still answered "relit" for every frame after 250 steps (accuracy 0.64, the share of relit frames) and reached
+    0.82 after 1000; on standardised features 0.82 after 250 steps, 0.88 after 500. Until the global heads can
+    tell frames apart, the decoder learns one average correction and puts it on every frame."""
+
+    def __init__(self, features: int, floor: float = 1e-2) -> None:
+        super().__init__()
+        self.floor = float(floor)
+        self.register_buffer("mean", torch.zeros(features))
+        self.register_buffer("std", torch.ones(features))
+
+    @torch.no_grad()
+    def calibrate(self, rows: torch.Tensor) -> None:
+        """Mean and std of ``rows`` [N, features]; a feature that barely varies keeps std ``floor``."""
+        rows = rows.float()
+        self.mean.copy_(rows.mean(dim=0))
+        self.std.copy_(rows.std(dim=0).clamp_min(self.floor) if rows.shape[0] > 1 else torch.ones_like(self.std))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self.mean.to(x.dtype)) / self.std.to(x.dtype)
+
+
+def _exposure(image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
+    """exposure_statistics(image), through ``standardize`` (phase2.split_exposure_standardize) when given."""
+    statistics = exposure_statistics(image)
+    return statistics if standardize is None else standardize(statistics)
+
+
 class GlobalToneColor(nn.Module):
     """One tone curve and one colour matrix per image, set from the whole frame.
 
@@ -277,7 +310,7 @@ class GlobalToneColor(nn.Module):
         nn.init.zeros_(self.head[-1].weight)
         nn.init.zeros_(self.head[-1].bias)
 
-    def parameters_for(self, latent: torch.Tensor, image: torch.Tensor):
+    def parameters_for(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None):
         """(exponent [B], matrix [B,3,3], bias [B,3]) for each image."""
         pooled = torch.cat((
             self.features(image).mean(dim=(-2, -1)),
@@ -285,14 +318,15 @@ class GlobalToneColor(nn.Module):
             image.mean(dim=(-2, -1)), image.flatten(2).std(dim=-1),
         ), dim=1)
         if self.exposure_stats:
-            pooled = torch.cat((pooled, exposure_statistics(image).to(pooled.dtype)), dim=1)
+            pooled = torch.cat((pooled, _exposure(image, standardize).to(pooled.dtype)), dim=1)
         raw = self.head(pooled)
         exponent = torch.exp(raw[:, 0].clamp(-1.0, 1.0))        # 0.37 .. 2.7; gamma 0.46..0.79 needs 1.3..2.2
         matrix = torch.eye(3, dtype=raw.dtype, device=raw.device) + raw[:, 1:10].view(-1, 3, 3)
         return exponent, matrix, raw[:, 10:13]
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
-        exponent, matrix, bias = self.parameters_for(latent, image)
+    def forward(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
+        exponent, matrix, bias = (self.parameters_for(latent, image) if standardize is None
+                                  else self.parameters_for(latent, image, standardize))
         curved = image.clamp_min(1e-4).pow(exponent[:, None, None, None])
         return torch.einsum("bij,bjhw->bihw", matrix, curved) + bias[:, :, None, None]
 
@@ -322,9 +356,9 @@ class ColorBranch(nn.Module):
         nn.init.zeros_(self.tail.weight)
         nn.init.zeros_(self.tail.bias)
 
-    def forward(self, latent: torch.Tensor, small: torch.Tensor) -> torch.Tensor:
+    def forward(self, latent: torch.Tensor, small: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         if self.global_tone is not None:
-            small = self.global_tone(latent, small)
+            small = self.global_tone(latent, small, standardize)
         x = self.head(small)
         z = upsample(self.latent(latent), x.shape[-2:])
         return small + self.tail(self.trunk(self.fuse(torch.cat((x, z), dim=1))))
@@ -379,7 +413,8 @@ class LightBranch(nn.Module):
         nn.init.zeros_(self.tail.weight)
         nn.init.zeros_(self.tail.bias)
 
-    def maps(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def maps(self, latent: torch.Tensor, image: torch.Tensor,
+             standardize: nn.Module | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """(veil, log gain) at 1/scale resolution."""
         small = downsample(image, self.scale)
         x = self.head(torch.cat((small, srgb_to_linear(small)), dim=1))
@@ -390,7 +425,7 @@ class LightBranch(nn.Module):
         x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
         context = x.mean(dim=(2, 3))
         if self.exposure_stats:
-            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+            context = torch.cat((context, _exposure(image, standardize).to(context.dtype)), dim=1)
         x = x + self.context(context)[:, :, None, None]
         for up, skip in zip(self.up, reversed(skips)):
             x = up(torch.cat((F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False), skip),
@@ -398,10 +433,11 @@ class LightBranch(nn.Module):
         raw = self.tail(x)
         return torch.tanh(raw[:, :3]), 3.0 * torch.tanh(raw[:, 3:] / 3.0)
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def forward(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         with torch.autocast(device_type=image.device.type, enabled=False):
             image, latent = image.float(), latent.float()
-            veil, gain = (upsample(value, image.shape[-2:]) for value in self.maps(latent, image))
+            maps = self.maps(latent, image) if standardize is None else self.maps(latent, image, standardize)
+            veil, gain = (upsample(value, image.shape[-2:]) for value in maps)
             corrected = (srgb_to_linear(image) - veil).clamp_min(0.0) * torch.exp(gain)
             return linear_to_srgb(corrected).clamp(0.0, 1.0)
 
@@ -466,14 +502,15 @@ class BilateralGridTone(nn.Module):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
 
-    def coefficients(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def coefficients(self, latent: torch.Tensor, image: torch.Tensor,
+                     standardize: nn.Module | None = None) -> torch.Tensor:
         """The grid [B, 12, bins, size, size] of (affine - identity)."""
         small = F.adaptive_avg_pool2d(image, 4 * self.size)
         x = self.splat(torch.cat((small, srgb_to_linear(small)), dim=1))
         x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
         context = self.global_features(x).mean(dim=(2, 3))
         if self.exposure_stats:
-            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+            context = torch.cat((context, _exposure(image, standardize).to(context.dtype)), dim=1)
         fused = F.relu(self.local(x) + self.global_head(context)[:, :, None, None])
         grid = self.out(fused)                                    # [B, bins * 12, size, size]
         return grid.view(grid.shape[0], self.bins, 12, self.size, self.size).transpose(1, 2)
@@ -481,10 +518,12 @@ class BilateralGridTone(nn.Module):
     def guide_map(self, image: torch.Tensor) -> torch.Tensor:
         return (luminance(image) + self.guide(image)).clamp(0.0, 1.0)
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def forward(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         with torch.autocast(device_type=image.device.type, enabled=False):
             image, latent = image.float(), latent.float()
-            sliced = slice_grid(self.coefficients(latent, image), self.guide_map(image))
+            grid = (self.coefficients(latent, image) if standardize is None
+                    else self.coefficients(latent, image, standardize))
+            sliced = slice_grid(grid, self.guide_map(image))
             return apply_affine(sliced, image).clamp(0.0, 1.0)
 
 
@@ -537,7 +576,7 @@ class RelightStops(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
-    def stops(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def stops(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         small = F.adaptive_avg_pool2d(image, self.size)
         batch, _, height, width = small.shape
         ys = (torch.arange(height, device=image.device, dtype=image.dtype) + 0.5) / height * 2.0 - 1.0
@@ -555,17 +594,18 @@ class RelightStops(nn.Module):
             skips.append(features)
         context = features.mean(dim=(2, 3))
         if self.exposure_stats:
-            context = torch.cat((context, exposure_statistics(image).to(context.dtype)), dim=1)
+            context = torch.cat((context, _exposure(image, standardize).to(context.dtype)), dim=1)
         features = features + self.global_head(context)[:, :, None, None]
         for level in reversed(range(len(self.decoders))):
             up = F.interpolate(features, size=skips[level].shape[-2:], mode="bilinear", align_corners=False)
             features = self.decoders[level](torch.cat((up, skips[level]), dim=1))
         return self.out(features)
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, latent: torch.Tensor, image: torch.Tensor,
+                standardize: nn.Module | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.autocast(device_type=image.device.type, enabled=False):
             image, latent = image.float(), latent.float()
-            stops = self.stops(latent, image)
+            stops = self.stops(latent, image) if standardize is None else self.stops(latent, image, standardize)
             gain = torch.exp2(-F.interpolate(stops.detach().clamp(*RELIGHT_STOP_RANGE), size=image.shape[-2:],
                                              mode="bilinear", align_corners=False))
             return linear_to_srgb(srgb_to_linear(image) * gain).clamp(0.0, 1.0), stops
@@ -914,17 +954,25 @@ class ToneGate(nn.Module):
     luminance layout and the latent's mean. The tone stage then learns only from the frames it is let at.
     """
 
-    def __init__(self, latent_channels: int = 128, width: int = 32) -> None:
+    def __init__(self, latent_channels: int = 128, width: int = 32, standardize: bool = False) -> None:
         super().__init__()
         self.head = nn.Sequential(nn.Linear(EXPOSURE_FEATURES + 64 + latent_channels, width), nn.ReLU(),
                                   nn.Linear(width, width), nn.ReLU(), nn.Linear(width, 1))
+        # phase2.split_exposure_standardize: the layout and the latent's mean standardised too. Absent: no buffers.
+        self.layout_norm = FeatureStandardizer(64 + latent_channels) if standardize else None
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    def layout_features(self, latent: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """[B, 64 + latent channels]: the 8 x 8 luminance layout and the latent's mean, unstandardised."""
+        layout = F.adaptive_avg_pool2d(luminance(image.float().clamp(0, 1)), 8).flatten(1)
+        return torch.cat((layout, latent.float().mean(dim=(-2, -1))), dim=1)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         """The logit of "this frame's light was changed", [B, 1]."""
         with torch.autocast(device_type=image.device.type, enabled=False):
-            layout = F.adaptive_avg_pool2d(luminance(image.float().clamp(0, 1)), 8).flatten(1)
-            features = torch.cat((exposure_statistics(image), layout, latent.float().mean(dim=(-2, -1))), dim=1)
-            return self.head(features)
+            layout = self.layout_features(latent, image)
+            if self.layout_norm is not None:
+                layout = self.layout_norm(layout)
+            return self.head(torch.cat((_exposure(image, standardize), layout), dim=1))
 
 
 class ChromaDetail(nn.Module):
@@ -967,6 +1015,9 @@ class SplitColorEdgeDecoder(nn.Module):
       on the whole frame; both branches then read its result instead of the noisy frame.
     * ``chroma`` (optional, ChromaDetail, p34): the chroma finer than the colour grid, at
       full resolution, added on top with zero luminance.
+    * ``exposure_standardize`` (optional, p38): every global head reads the exposure statistics,
+      and the tone gate its layout and latent mean, standardised (FeatureStandardizer,
+      calibrate_exposure). The heads' zero-initialised outputs are unchanged.
 
     At initialisation both residuals are zero: the output has exactly the input's
     luminance and the input's colour at ``color_scale`` resolution -- or the input's colour
@@ -982,12 +1033,19 @@ class SplitColorEdgeDecoder(nn.Module):
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
         light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
         relight: dict | None = None, chroma: dict | None = None, tone_gate: dict | None = None,
+        exposure_standardize: bool = False,
     ) -> None:
         super().__init__()
         if tone_gate and not tone_grid:
             raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
+        if exposure_standardize and not (exposure_stats or tone_gate):
+            raise ValueError("Exposure standardisation needs a head that reads the exposure statistics")
+        # p38 (phase2.split_exposure_standardize): the exposure statistics every global head reads, standardised
+        # with constants measured once (calibrate_exposure). Absent: no buffers, the raw statistics as before.
+        self.exposure_norm = FeatureStandardizer(EXPOSURE_FEATURES) if exposure_standardize else None
         # p35 (phase2.split_tone_gate): per frame, how much of the tone stage it gets. Absent: no layers.
-        self.tone_gate = ToneGate(latent_channels, int(tone_gate["width"])) if tone_gate else None
+        self.tone_gate = (ToneGate(latent_channels, int(tone_gate["width"]), standardize=exposure_standardize)
+                          if tone_gate else None)
         # p34 (phase2.split_chroma_detail): full-resolution chroma detail. Absent: no layers, p33's output.
         self.chroma = ChromaDetail(int(chroma["width"]), int(chroma["blocks"])) if chroma else None
         if light and tone_grid:
@@ -1043,6 +1101,26 @@ class SplitColorEdgeDecoder(nn.Module):
         else:
             raise ValueError("branch_arch must be resnet, unet, unet_edge or nafnet_edge")
 
+    @torch.no_grad()
+    def exposure_rows(self, latent: torch.Tensor, image: torch.Tensor) -> dict[str, torch.Tensor]:
+        """What the standardisers standardise, unstandardised, for these frames (the decoder's input and ZI)."""
+        rows = {"exposure": exposure_statistics(image.float())}
+        if self.tone_gate is not None:
+            rows["gate_layout"] = self.tone_gate.layout_features(latent, image.float())
+        return rows
+
+    @torch.no_grad()
+    def calibrate_exposure(self, rows: dict[str, torch.Tensor]) -> dict[str, list[float]]:
+        """Set the standardisers' constants from exposure_rows of the calibration frames; returns each spread."""
+        if self.exposure_norm is None:
+            raise ValueError("calibrate_exposure needs phase2.split_exposure_standardize")
+        self.exposure_norm.calibrate(rows["exposure"])
+        measured = {"exposure_std": self.exposure_norm.std.tolist()}
+        if self.tone_gate is not None:
+            self.tone_gate.layout_norm.calibrate(rows["gate_layout"])
+            measured["gate_layout_std"] = self.tone_gate.layout_norm.std.tolist()
+        return measured
+
     @property
     def uses_stages(self) -> bool:
         """Whether the edge branch takes the JEPA encoder's finer stages."""
@@ -1054,20 +1132,25 @@ class SplitColorEdgeDecoder(nn.Module):
         if size[0] % self.illumination_scale or size[1] % self.illumination_scale:
             raise ValueError(f"Image sides {tuple(size)} must divide by {self.illumination_scale}")
         parts = {}
+        standardize = self.exposure_norm                    # None: the heads read the raw statistics
         if self.light is not None:
-            image = self.light(latent, image)
+            image = self.light(latent, image, standardize)
             parts["image_light"] = image
         source = image
         if self.relight is not None:
-            image, parts["image_stops"] = self.relight(latent, image)
+            image, parts["image_stops"] = self.relight(latent, image, standardize)
         if self.tone_grid is not None:
-            image = self.tone_grid(latent, image)
+            image = self.tone_grid(latent, image, standardize)
             if self.tone_gate is not None:
-                parts["image_tone_logit"] = self.tone_gate(latent, source)
+                parts["image_tone_logit"] = self.tone_gate(latent, source, standardize)
                 gate = torch.sigmoid(parts["image_tone_logit"].detach())[..., None, None]
                 image = source + gate * (image - source)
             parts["image_light"] = image                       # the tone stage's output, as the light branch's
-        base = upsample(self.color(latent, downsample(image, self.color_scale)), size)
+        small = downsample(image, self.color_scale)
+        # Only p8's colour branch has a global tone head to read the statistics; a U-Net colour branch has none.
+        colored = (self.color(latent, small, standardize=standardize) if isinstance(self.color, ColorBranch)
+                   else self.color(latent, small))
+        base = upsample(colored, size)
         light = illumination(base, self.illumination_scale)
         y = luminance(image)
         detail_in = y - illumination(color_base(image, self.color_scale), self.illumination_scale)
