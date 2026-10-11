@@ -103,6 +103,22 @@ def test_the_selection_file_holds_unseen_samples_and_the_tool_scores_a_training_
     assert report["test"]["summary"]["FlareImage"]["count"] == 4
     assert report["test"]["summary"]["tất cả"]["count"] == len(rows)
     assert reports[1]["test"] == report["test"] and reports[1]["train"] == report["train"]
+    # Notebook Cell 12c shuffles the file's rows each run: the same set and numbers, other samples drawn.
+    import random
+    shuffled_rows = list(rows)
+    random.Random(3).shuffle(shuffled_rows)
+    shuffled = tmp_path / "shuffled.csv"
+    with shuffled.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, list(rows[0]))
+        writer.writeheader()
+        writer.writerows(shuffled_rows)
+    main(["--checkpoint", str(last), "--manifest", str(manifest_dir), "--selection", str(shuffled),
+          "--output", str(tmp_path / "view_shuffled"), "--device", "cpu", "--show", "4", "--batch", "3"])
+    again = json.loads((tmp_path / "view_shuffled/report.json").read_text())
+    for group, values in report["test"]["summary"].items():
+        assert again["test"]["summary"][group] == pytest.approx(values, rel=1e-4, abs=1e-6), group
+    drawn = lambda order: {order[k]["sample_id"] for k in pick(order, 4)}
+    assert drawn(shuffled_rows) != drawn(rows)
     # A file that no longer matches the data is refused, not silently re-chosen.
     stale = tmp_path / "stale.csv"
     stale.write_text(selection.read_text().replace(rows[0]["sample_id"], "Env__Data_easy__P999__000000"))
