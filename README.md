@@ -12,6 +12,18 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**Xem ảnh lóe thật của FlareImage qua model** (`tools/flare_image_test.py`, notebook Cell 12d; không đổi run nào).
+- Lấy các cặp của một split FlareImage. Mặc định là `test`: model chưa thấy, chia theo nhóm cảnh. Các cặp rải đều qua bốn
+  nguồn, hoặc chọn theo tên.
+- Chạy model trên **cả khung** đã thu nhỏ như lúc train (cạnh ngắn 384, mỗi cạnh cắt về bội số của 16), hoặc trên ô cắt
+  256 đúng cỡ lúc train. Vị trí sin-cos của ViT tính theo lưới token, nên khung cỡ nào cũng chạy được.
+- Hai chế độ: "chỉ lóe" (ảnh chụp thật vào thẳng model) và "như lúc train" (thêm mờ và hạt). IMU mượn của một mẫu
+  TartanAir test.
+- In PSNR và SSIM vào → ra từng cặp và theo nguồn, kèm PSNR riêng **vùng lóe**: pixel mà ảnh vào lệch ảnh sạch hơn 0,05.
+- Vẽ mỗi cặp một hình: vào | ra | sạch | |vào − sạch| | |ra − sạch|.
+- Bằng chứng: `tests/test_flare_image_test.py`. Chỉ lấy cặp của split được hỏi và từ chối tên ngoài split; khung cắt về bội
+  số của 16 quanh tâm; model chạy được trên cả khung; hai chế độ cho đầu vào khác nhau; mỗi cặp có hình và số hữu hạn.
+
 **p38_expnorm — phase 2 không còn đặt một phép sửa trung bình lên mọi ảnh** (config `configs/kaggle_expnorm.yaml` →
 OUT `outputs/p38_expnorm`). Bằng p37 cộng `phase2.split_exposure_standardize` và `phase2.split_tone_gate_lr_scale`.
 Hash phase 1 bằng p37, nên **chỉ train phase 2** và dùng lại phase 1 của p37.
