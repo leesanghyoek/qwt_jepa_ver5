@@ -12,6 +12,36 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p37_flareblur — p36 mờ hơn một chút, kèm tập test nhỏ riêng** (config `configs/kaggle_flareblur.yaml` → OUT
+`outputs/p37_flareblur`). Bằng p36_flareimage, chỉ nâng ba khoá mờ; đổi nhiễu nên **train lại cả hai phase**.
+- **Yêu cầu** (người dùng, 11/10/2026): "tăng độ nhòe của batch train lên 1 chút", "phân 1 tệp nhỏ riêng để test",
+  "1 batch train luôn phải có ảnh từ FlareImage", và một cell in batch train cùng kết quả test ảnh và IMU của model.
+- **Mờ**: lệch tiêu cự 42% → 50% ảnh, σ 0,3–0,85 → 0,3–0,95 px; mờ chuyển động 10% → 15% ảnh (dài 2–4 px như cũ); thu
+  nhỏ giữ nguyên. Mỗi tham số rút từ một số ngẫu nhiên rút vô điều kiện, nên trên cùng một frame mờ chỉ tăng: ảnh đã mờ ở p36
+  thì ở p37 vẫn mờ, σ không nhỏ hơn, mọi lần rút khác giữ nguyên. Đo trên 300 ảnh train local (CPU, không train): ảnh có
+  mờ 57% → 62%, σ trung bình 0,57 → 0,62 px; ảnh chỉ mờ 34,93 → 33,63 dB, đường nét 4–16 px so với ảnh sạch 0,749 → 0,715.
+  Bước này ngang bước p26 → p27 (33,7 → 32,4 dB). Nhiễu dùng chung cho train, valid và test, nên PSNR không so thẳng với
+  p33–p36. Mẫu FlareImage cũng qua bước mờ này.
+- **FlareImage trong mọi batch**: đã có từ p36 (`sampler.FlarePairSlots`: phase 1 8/32, phase 2 1 mỗi microbatch). Cell 5b
+  giờ assert điều đó trên batch nó in, và `tools/small_test.py` assert trên từng microbatch nó chạy.
+- **Tập test nhỏ riêng** (`tools/small_test.py`, file `outputs/<run>/small_test/small_test.csv`): 48 ảnh TartanAir của split
+  test, rải đều mọi trajectory test, cộng 48 cặp FlareImage của split test. Cell 5 chọn và ghi file **trước khi train**.
+  Không mẫu nào thuộc train hay valid (validation trong lúc train đọc TartanAir valid, `flare_pairs_probe` đọc FlareImage
+  valid); tool kiểm lại điều này mỗi lần chạy. File đã có thì dùng đúng các mẫu trong đó và kiểm từng `sample_id`, nên mọi
+  checkpoint được chấm trên cùng tập, cùng nhiễu (realization validation).
+- **Cell 12c** chạy tool trên checkpoint phase 2:
+  - batch train: đúng các microbatch CLI đưa vào model ở một update, gồm cả mẫu FlareImage;
+  - tập test nhỏ.
+  Nó in bảng từng mẫu của batch train và bảng tập test theo nhóm (TartanAir theo loại ảnh tốt / đổi sáng / lóe, FlareImage
+  theo nguồn): PSNR, SSIM, đường nét vào → ra, RMSE gia tốc và con quay vào → ra. Nó vẽ sạch | vào | ra và IMU sạch / nhiễu /
+  khôi phục.
+- Bằng chứng:
+  - `tests/test_flareblur.py`: p37 = p36 + ba khoá mờ; đổi cả hai hash, hash p36 giữ nguyên; trên 2 400 frame mờ chỉ tăng và
+    các lần rút khác không đổi; tỉ lệ lệch tiêu cự và mờ chuyển động khớp config; ảnh chỉ mờ mất PSNR ở mọi frame.
+  - `tests/test_small_test.py`: tập TartanAir phủ mọi trajectory với frame ở giữa các đoạn bằng nhau; file chỉ có frame test
+    và cặp FlareImage test, không trùng train/valid; mỗi `sample_id` khớp mẫu dataset đọc ra; tool chấm được batch train
+    (đúng số mẫu FlareImage mỗi microbatch) và mọi mẫu của file; chạy lại cho cùng số; từ chối file không còn khớp dữ liệu.
+
 **p36_flareimage — ảnh lóe thật của FlareImage trong mọi batch** (config `configs/kaggle_flareimage.yaml` → OUT
 `outputs/p36_flareimage`). Bằng p35_tonegate cộng `data.flare_pairs_*`, tắt HALO; đổi dữ liệu nên **train lại cả hai phase**.
 - **Yêu cầu** (người dùng, 11/10/2026): "mỗi batch luôn có ảnh từ FlareImage". Đã chọn: cặp ảnh là **mẫu riêng**, **1/4 mỗi

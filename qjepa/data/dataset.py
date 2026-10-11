@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
 from ..corruptions.image import brightness_stops, degradation_vector, frame_kind
 from ..corruptions.rng import derive_seed
-from .flare_pairs import FlarePairBank
+from .flare_pairs import FlarePair, FlarePairBank
 from .manifest import PairedSample
 from .tartanair import Trajectory
 
@@ -202,18 +202,23 @@ class PairedCameraImuDataset(Dataset):
                           image_mode, imu_mode, trajectory=sample.trajectory_key, timestamp=sample.image_time,
                           frame_index=sample.image_index)
 
+    def flare_pair_of_draw(self, draw: int) -> FlarePair:
+        """The pair draw ``draw`` of this realization reads, without loading it: a fresh permutation of the split's
+        pairs per cycle, so each pair comes once per cycle (tools/small_test.py lists its test pairs this way)."""
+        pairs = self.flare_bank.pairs(self.flare_pairs_split)
+        cycle, slot = divmod(int(draw), len(pairs))
+        order = np.random.default_rng(derive_seed(
+            self.scenario_seed, "flare_pair_order", self.realization, cycle)).permutation(len(pairs))
+        return pairs[int(order[slot])]
+
     def _flare_item(self, draw: int) -> dict[str, object]:
         """A FlareImage pair: its flared photo is the input, its clean photo the target, both the same crop.
 
         The pair has no IMU, so it borrows the clean and noisy IMU window of a TartanAir sample drawn here: every
         loss still compares an IMU window with itself, only image and IMU are not one motion. Draw ``draw`` of a
-        realization walks a fresh permutation of the training pairs per cycle, so each pair comes once per cycle.
+        realization reads flare_pair_of_draw(draw).
         """
-        pairs = self.flare_bank.pairs(self.flare_pairs_split)
-        cycle, slot = divmod(int(draw), len(pairs))
-        order = np.random.default_rng(derive_seed(
-            self.scenario_seed, "flare_pair_order", self.realization, cycle)).permutation(len(pairs))
-        pair = pairs[int(order[slot])]
+        pair = self.flare_pair_of_draw(draw)
         rng = np.random.default_rng(derive_seed(self.scenario_seed, "flare_pair", self.realization, draw))
         host = self.samples[int(rng.integers(len(self.samples)))]
         clear = bool(rng.random() < self.flare_pairs_clear_probability)

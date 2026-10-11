@@ -1,0 +1,24 @@
+# p37_flareblur: p36_flareimage (FlareImage 1/4 moi batch) + MO HON MOT CHUT. Kien truc va recipe giu nguyen.
+#
+# Nguoi dung (11/10/2026): "tang do nhoe cua batch train len 1 chut". Ba khoa mo cua corruption.image:
+#   lech tieu cu 42% -> 50% anh, sigma 0,3-0,85 -> 0,3-0,95 px; mo chuyen dong 10% -> 15% anh (do dai giu 2-4 px);
+#   thu nho giu nhu p27 (10%, ti le 0,82-0,97).
+# Moi tham so mo rut bang so ngau nhien rut vo dieu kien (random() < p, uniform(lo, hi)): cung mot frame, anh nao
+# da mo o p36 thi o p37 van mo va sigma khong nho hon (tests/test_flareblur.py) -- chi tang, khong doi cho khac.
+# Do tren 300 anh train local (CPU, khong train; manifests/local): anh co mo 57% -> 62%, lech tieu cu 47% -> 50% voi
+# sigma trung binh 0,57 -> 0,62 px; anh chi mo (che do blur_only, anh co mo): PSNR 34,93 -> 33,63 dB, duong net
+# 4-16 px so voi anh sach 0,749 -> 0,715. Buoc nay ngang buoc p26 -> p27 (33,7 -> 32,4 dB).
+# Corruption dung chung cho train, valid va test: valid/test cung mo hon, nen PSNR khong so thang voi p33-p36.
+# Mau FlareImage cung qua buoc mo nay (flare_pairs_clear_probability chi bo buoc moi truong).
+#
+# Doi corruption -> doi hash CA HAI phase: train lai phase 1 va phase 2.
+extends: kaggle_flareimage.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p37_flareblur
+
+corruption:
+  image:
+    defocus_probability: 0.5            # p27-p36: 0.42
+    defocus_sigma_px: [0.3, 0.95]       # p27-p36: [0.3, 0.85]
+    motion_probability: 0.15            # p26-p36: 0.1
