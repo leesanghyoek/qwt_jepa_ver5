@@ -123,7 +123,8 @@ def test_old_configs_build_no_light_layers_and_kaggle_light_spells_its_keys_out(
                              "kaggle_exposure.yaml", "kaggle_bilateral.yaml",
                              "kaggle_relight.yaml", "kaggle_halo.yaml", "kaggle_chroma.yaml", "kaggle_tonegate.yaml",
                              "kaggle_flareimage.yaml", "kaggle_flareblur.yaml",
-                             "kaggle_expnorm.yaml", "kaggle_lensflare.yaml"):  # p23-p39 extend p22
+                             "kaggle_expnorm.yaml", "kaggle_lensflare.yaml",
+                             "kaggle_flarefocus.yaml"):  # p23-p40 extend p22
             assert "split_light_branch" not in load_config(path)["phase2"], path
     assert build_decoders(_config(False)).image.light is None
     glare = serializable_config(load_config("configs/kaggle_glare.yaml"))

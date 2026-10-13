@@ -12,8 +12,25 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p40_flarefocus — một nửa mỗi batch là ảnh lóe thật FlareImage** (config `configs/kaggle_flarefocus.yaml` → OUT
+`outputs/p40_flarefocus`). Bằng p38, chỉ đổi `data.flare_pairs_fraction` 0,25 → 0,5. Đổi dữ liệu nên **train lại cả hai phase**
+(bỏ shard 2 cũng đã đổi manifest).
+- **Yêu cầu** (người dùng, 13/10/2026, khi xem p39): "đừng áp dụng lóe lên shard0 và 1 bạn vừa tạo, mà thay đổi batch train
+  có nhiều ảnh FlareImage hơn, như vậy nó sẽ tập trung học lóe". Vì vậy p39_lensflare **không train**; code lóe ống kính vẫn
+  còn trong repo, tắt khi config không có khoá `lens_*`.
+- **Batch:** phase 1 có 16/32 ảnh FlareImage (trước 8/32); phase 2 có 2/4 mỗi microbatch, 4/8 mỗi update (trước 2/8).
+  `FlarePairSlots` đặt các ô FlareImage xen kẽ, nên mỗi rank DDP nạp một nửa số đó. Ảnh TartanAir vẫn không có lóe.
+- **Đánh đổi:** khoảng 840 cặp train được dùng lại nhiều hơn: phase 1 khoảng 48 lượt mỗi cặp, phase 2 khoảng 19 lượt (ô cắt
+  256 ngẫu nhiên trong khung cạnh ngắn 384, lật ngang, nhiễu mới mỗi epoch). Phần TartanAir (khử mờ, giữ ảnh tốt) còn một
+  nửa batch. Validation trong lúc train vẫn chỉ là TartanAir: xem Cell 12d (cặp FlareImage test) để biết model học thật hay
+  học thuộc.
+- Bằng chứng: `tests/test_flarefocus.py`. p40 bằng p38 trừ đúng một khoá; hash hai phase đổi, hash p38 giữ nguyên; batch
+  32 có 16 ô FlareImage ở vị trí lẻ, microbatch 4 có 2, mỗi nửa rank DDP có một nửa; luồng batch của CLI cho cả hai phase
+  đúng một nửa FlareImage.
+
 **p39_lensflare — lóe ống kính trên ảnh TartanAir** (config `configs/kaggle_lensflare.yaml` → OUT `outputs/p39_lensflare`).
-Bằng p38 cộng các khoá `corruption.image.lens_*` và `data.lens_flare_root`. Đổi nhiễu nên **train lại cả hai phase**.
+**Không train:** người dùng đổi sang p40 trước khi chạy. Bằng p38 cộng các khoá `corruption.image.lens_*` và
+`data.lens_flare_root`. Đổi nhiễu nên **train lại cả hai phase**.
 - **Yêu cầu** (người dùng, 13/10/2026, sau p38): "các tia lóe sáng vẫn chưa được xoá sạch"; rồi "áp dụng lóe và lỗi quang học
   ống kính cho các ảnh shard0 và shard1, ảnh từ FlareImage sẵn có lóe nên k cần chỉnh".
 - **Vì sao.** Ở p38 chỉ FlareImage có lóe: 2/8 ảnh mỗi update, ~840 cặp cố định, khoảng 4 000 lượt cả run. Ảnh TartanAir

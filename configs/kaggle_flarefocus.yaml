@@ -1,0 +1,21 @@
+# p40_flarefocus: p38_expnorm + MOT NUA moi batch la cap anh loe that FlareImage (p36-p38: 1/4). Train lai ca hai phase.
+#
+# Nguoi dung (13/10/2026), sau p38 ("cac tia loa sang van chua duoc xoa sach") va khi xem p39_lensflare:
+# "dung ap dung loe len shard0 va 1 ban vua tao, ma thay doi batch train co nhieu anh FlareImage hon, nhu vay no se
+# tap trung hoc loe". p39_lensflare (loe Flare7K++ ghep len TartanAir) vi vay KHONG train; code van con, tat mac dinh.
+#
+# Mot khoa: data.flare_pairs_fraction 0.25 -> 0.5 (tran cua validate_config). Phase 1: 16/32 anh moi batch la FlareImage
+# (truoc 8/32); phase 2: 2/4 moi microbatch, 4/8 moi update (truoc 2/8). FlarePairSlots dat cac o FlareImage xen ke,
+# nen moi rank DDP nap mot nua cua chung. Anh TartanAir khong co loe nao (nhu p36-p38).
+# ~840 cap train dung lai nhieu hon: phase 1 2500 update x 16 ~ 48 luot moi cap, phase 2 4000 x 4 ~ 19 luot (o cat
+# 256 ngau nhien trong khung canh ngan 384, lat ngang, nhieu moi epoch). Validation trong luc train van chi la
+# TartanAir; xem Cell 12d (cap FlareImage test, model chua thay) de biet co hoc thuoc khong.
+#
+# Doi data -> doi hash CA HAI phase (bo shard 2 cung da doi manifest): train lai phase 1 va phase 2.
+extends: kaggle_expnorm.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p40_flarefocus
+
+data:
+  flare_pairs_fraction: 0.5           # p36-p38: 0.25
