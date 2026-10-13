@@ -43,6 +43,12 @@ def configuration_hash(config: dict[str, Any], phase: str) -> str:
         phase2 = {key: value for key, value in config["phase2"].items() if key != "backbone_checkpoint"}
         contract["phase2"] = phase2
         contract["validation_batches"] = config["runtime"]["validation_batches"]
+        if phase2.get("split_flare_pretrained", False):
+            # p42: phase 2 starts from the flare stage's layer; the recipe that trained it is part of phase 2's.
+            contract["flare"] = config["flare"]
+    elif phase == "flare":
+        # p42: the flare stage (train-flare). It reads data and corruption (its "plain" frames), not phase 1 or 2.
+        contract["flare"] = config["flare"]
     else:
         raise ValueError(f"Unknown configuration phase {phase!r}")
     encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()

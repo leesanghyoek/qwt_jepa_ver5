@@ -68,7 +68,14 @@ class Phase2Trainer:
         self.parent_checkpoint = parent_checkpoint
         self.manifest_hash = manifest_hash
         self.successful_updates = 0
-        self.parameters = list(self.system.decoders.parameters())
+        # p42 (phase2.split_flare_freeze): the flare stage's layer stays as train-flare left it -- out of the
+        # optimizer and of DDP's gradient sync; checkpoint_payload checks it never moved. Absent: every decoder trains.
+        self.frozen_flare_hash = None
+        if self.phase.get("split_flare_freeze", False):
+            flare = self.system.decoders.image.flare
+            flare.requires_grad_(False)
+            self.frozen_flare_hash = state_dict_hash(flare)
+        self.parameters = [p for p in self.system.decoders.parameters() if p.requires_grad]
         groups = self.parameters
         gate = getattr(self.system.decoders.image, "tone_gate", None)
         if "split_tone_gate_lr_scale" in self.phase and gate is not None:
@@ -152,6 +159,8 @@ class Phase2Trainer:
             raise RuntimeError("Frozen IMU normalizer changed during phase 2")
         if latent_predictor_hash(self.system) != self.latent_predictor_hash:
             raise RuntimeError("Frozen latent predictor changed during phase 2")
+        if self.frozen_flare_hash is not None and state_dict_hash(self.system.decoders.image.flare) != self.frozen_flare_hash:
+            raise RuntimeError("Frozen flare layer changed during phase 2")
 
     def step(self, raw_batches: dict[str, Any] | list[dict[str, Any]]) -> dict[str, float | bool | str]:
         microbatches = raw_batches if isinstance(raw_batches, list) else [raw_batches]
@@ -366,6 +375,7 @@ class Phase2Trainer:
                 "decoder_current_hash": state_dict_hash(self.system.decoders),
                 "configuration_hash": configuration_hash(config, "phase2"),
                 "manifest_hash": self.manifest_hash,
+                **({"frozen_flare_hash": self.frozen_flare_hash} if self.frozen_flare_hash is not None else {}),
                 "execution": execution_metadata(self.device, self.device_ids, self.world),
             },
             "system": self.system.state_dict(),

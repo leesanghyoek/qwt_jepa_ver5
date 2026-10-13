@@ -1,0 +1,68 @@
+# p42_flarestage: p41_flarelayer, nhung NHANH KHU LOE duoc TRAIN RIENG truoc (giai doan loe, lenh train-flare) tren loe
+# Flare7K++ ghep moi cho moi mau, roi DONG BANG trong phase 2. Phase 1 dung lai cua p40 (hash phase 1 bang p40).
+#
+# Nguoi dung (13/10/2026) sau p41: "no van khong khu duoc flare loe sang, gio phai lam sao"; chon cach 1 ("co the tich
+# hop no vao luong trong model ko, kieu nhu 1 nhanh nao do co the khu loe"). Ly do: p36-p41 chi day loe bang ~840 cap
+# FlareImage lap lai (~16 000 luot ca phase 2), lan nao cung chi go ~1/4-1/3 loe, ke ca tren chinh cap da thay luc
+# train. Flare7K++ train tren hang tram nghin anh, moi anh mot lop loe ghep moi.
+#
+# Luong:  anh vao -> backbone (phase 1 p40) -> decoder phase 2: [NHANH KHU LOE, da train, dong bang] -> vao - lop loe
+#         -> tone/cong -> mau + duong net -> anh ra.
+# Thu tu: phase 1 (dung lai p40) -> giai doan loe (train-flare, OUT/flare/last.pt) -> phase 2 (nap va dong bang nhanh).
+extends: kaggle_flarelayer.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p42_flarestage
+
+data:
+  # Duong dan (ngoai hash): notebook (Cell 4) tu do thu muc co Flare7K/ va Flare-R/ trong Input (khoidb/flare7k).
+  lens_flare_root: /kaggle/input/datasets/khoidb/flare7k
+
+phase2:
+  split_flare_latent: false          # nhanh chi doc anh: giai doan loe train no khong can backbone
+  split_flare_pretrained: true       # nap OUT/flare/last.pt cua giai doan loe (phai chay xong)
+  split_flare_freeze: true           # phase 2 khong doi nhanh loe
+  split_flare_widths: [32, 64, 96, 128, 192]   # = flare.widths
+  split_flare_blocks: 2                        # = flare.blocks
+  split_flare_weight: 0.0            # nhanh dong bang: image_flare_l1 chi de theo doi, khong vao loss
+
+flare:
+  widths: [32, 64, 96, 128, 192]     # U-Net 256 -> 16 (p41: [16, 32, 48, 64, 96], 1 khoi)
+  blocks: 2
+  batch_size: 16
+  max_successful_updates: 20000      # 320 000 mau, moi mau mot lan rut moi
+  learning_rate: 2.0e-4
+  minimum_lr: 1.0e-6
+  warmup_updates: 500
+  weight_decay: 1.0e-4
+  gradient_clip_norm: 1.0
+  precision: amp_fp16
+  # Ty le ba loai mau: loe ghep Flare7K++ / cap FlareImage that / anh TartanAir khong loe (dich lop loe = 0).
+  kinds: {composite: 0.6, pair: 0.2, plain: 0.2}
+  background_pair_fraction: 0.3      # nen cua anh ghep: 30% anh gt FlareImage, con lai anh TartanAir sach
+  # Mo may anh (cung mot phep cho anh vao va anh dich) va hat (chi anh vao), nhu anh vao cua phase 2.
+  blur_probability: 0.5
+  blur_sigma_px: [0.3, 1.2]
+  grain_probability: 0.7
+  photon_count: [2500.0, 15000.0]
+  lens:                              # nhu p39 (configs/kaggle_lensflare.yaml), optics 0.5
+    lens_flare_real_fraction: 0.5
+    lens_flare_holdout_fraction: 0.1
+    lens_flare_gain: [0.8, 3.0]
+    lens_flare_gamma: [1.8, 2.2]
+    lens_flare_scale: [0.8, 1.5]
+    lens_flare_shear_deg: 20.0
+    lens_flare_translate: 0.2
+    lens_flare_blur_sigma_px: [0.05, 1.5]
+    lens_flare_dc_offset: 0.02
+    lens_optics_probability: 0.5
+    lens_optics_energy: [0.05, 0.5]
+    lens_ghost_count: [2, 8]
+    lens_ghost_strength: [0.001, 0.006]
+    lens_veil: [0.005, 0.04]
+    lens_bloom: [0.005, 0.04]
+    lens_dirt: [0.0, 0.2]
+  validation_every_updates: 1000
+  validation_composites: 64          # + moi cap FlareImage valid (anh that, model chua thay)
+  checkpoint_every_updates: 1000
+  seed: 42

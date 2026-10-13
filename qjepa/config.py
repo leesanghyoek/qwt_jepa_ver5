@@ -155,6 +155,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_source_size(config)
     _validate_flare_pairs(config)
     _validate_flare_layer(config)
+    _validate_flare_stage(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -873,6 +874,86 @@ def _validate_flare_layer(config: dict[str, Any]) -> None:
         raise ValueError("phase2.split_flare_blocks must be an integer >= 1")
     if not _nonnegative_number(phase2["split_flare_weight"]):
         raise ValueError("phase2.split_flare_weight must be a nonnegative number")
+    for key in ("split_flare_latent", "split_flare_pretrained", "split_flare_freeze"):
+        if key in phase2 and not isinstance(phase2[key], bool):
+            raise ValueError(f"phase2.{key} must be true or false")
+    if phase2.get("split_flare_freeze", False) and not phase2.get("split_flare_pretrained", False):
+        raise ValueError("phase2.split_flare_freeze freezes the flare stage's layer: set split_flare_pretrained: true")
+    if phase2.get("split_flare_pretrained", False):
+        # p42: the layer comes from train-flare (<output>/flare/last.pt), which trains it without a backbone.
+        if "flare" not in config:
+            raise ValueError("phase2.split_flare_pretrained loads the flare stage's layer: add the flare section")
+        if phase2.get("split_flare_latent", True):
+            raise ValueError("phase2.split_flare_pretrained: the flare stage trains a layer without the latent; set "
+                             "split_flare_latent: false")
+        stage = config["flare"]
+        if list(phase2["split_flare_widths"]) != list(stage["widths"]) or phase2["split_flare_blocks"] != stage["blocks"]:
+            raise ValueError("phase2.split_flare_widths / split_flare_blocks must equal flare.widths / flare.blocks")
+
+
+FLARE_STAGE_KEYS = ("widths", "blocks", "batch_size", "max_successful_updates", "learning_rate", "minimum_lr",
+                    "warmup_updates", "weight_decay", "gradient_clip_norm", "precision", "kinds",
+                    "background_pair_fraction", "blur_probability", "blur_sigma_px", "grain_probability",
+                    "photon_count", "lens", "validation_every_updates", "validation_composites",
+                    "checkpoint_every_updates", "seed")
+
+
+def _validate_flare_stage(config: dict[str, Any]) -> None:
+    """p42: the flare section, the flare stage (train-flare) that trains the flare layer alone before phase 2.
+
+    Absent: no flare stage, as before. Present: every key written out (the hash reads only the config file), and
+    data.lens_flare_root (a path, out of the hash) names the Flare7K++ folder."""
+    if "flare" not in config:
+        return
+    stage = config["flare"]
+    if not isinstance(stage, dict):
+        raise ValueError("flare must be a mapping")
+    missing = [key for key in FLARE_STAGE_KEYS if key not in stage]
+    if missing:
+        raise ValueError(f"flare needs every key written out; missing: {', '.join(missing)}")
+    unknown = sorted(set(stage) - set(FLARE_STAGE_KEYS))
+    if unknown:
+        raise ValueError(f"flare: unknown keys {unknown}")
+    if not config["data"].get("lens_flare_root"):
+        raise ValueError("flare needs data.lens_flare_root: the folder holding Flare7K/ and Flare-R/ (Kaggle "
+                         "khoidb/flare7k)")
+    widths = stage["widths"]
+    if (not isinstance(widths, (list, tuple)) or len(widths) < 2
+            or any(isinstance(w, bool) or not isinstance(w, int) or w < 4 for w in widths)):
+        raise ValueError("flare.widths must list at least two integers >= 4")
+    for key, low in (("blocks", 1), ("batch_size", 1), ("max_successful_updates", 1), ("warmup_updates", 0),
+                     ("validation_every_updates", 1), ("validation_composites", 1),
+                     ("checkpoint_every_updates", 1), ("seed", 0)):
+        value = stage[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise ValueError(f"flare.{key} must be an integer >= {low}")
+    for key in ("learning_rate", "gradient_clip_norm"):
+        if not _nonnegative_number(stage[key]) or stage[key] == 0:
+            raise ValueError(f"flare.{key} must be a positive number")
+    for key in ("minimum_lr", "weight_decay"):
+        if not _nonnegative_number(stage[key]):
+            raise ValueError(f"flare.{key} must be a nonnegative number")
+    if stage["precision"] not in ("fp32", "amp_fp16"):
+        raise ValueError("flare.precision must be fp32 or amp_fp16")
+    kinds = stage["kinds"]
+    if (not isinstance(kinds, dict) or set(kinds) != {"composite", "pair", "plain"}
+            or not all(_nonnegative_number(v) for v in kinds.values()) or sum(kinds.values()) <= 0):
+        raise ValueError("flare.kinds must give composite, pair and plain nonnegative weights, not all 0")
+    for key in ("background_pair_fraction", "blur_probability", "grain_probability"):
+        if not _nonnegative_number(stage[key]) or stage[key] > 1:
+            raise ValueError(f"flare.{key} must be in [0, 1]")
+    for key, positive in (("blur_sigma_px", False), ("photon_count", True)):
+        pair = stage[key]
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2 or not all(_nonnegative_number(v) for v in pair)
+                or pair[0] > pair[1] or (positive and pair[0] <= 0)):
+            raise ValueError(f"flare.{key} must be [low, high] with 0 {'<' if positive else '<='} low <= high")
+    if (float(kinds["pair"]) > 0 or float(stage["background_pair_fraction"]) > 0) and \
+            float(config["data"].get("flare_pairs_fraction", 0.0)) <= 0:
+        raise ValueError("flare.kinds.pair and flare.background_pair_fraction read FlareImage: set data.flare_pairs_*")
+    if not isinstance(stage["lens"], dict):
+        raise ValueError("flare.lens must map lens_* keys to values")
+    from .data.flare_stage import lens_config
+    lens_config(stage["lens"])                               # unknown keys or bad ranges fail here
 
 
 def _validate_exposure_standardize(config: dict[str, Any]) -> None:
@@ -1127,6 +1208,8 @@ def build_decoders(
             "flare": {
                 "widths": tuple(int(width) for width in config["phase2"]["split_flare_widths"]),
                 "blocks": int(config["phase2"]["split_flare_blocks"]),
+                # Absent before p42: the layer reads the latent (p41).
+                "latent": bool(config["phase2"].get("split_flare_latent", True)),
             } if config["phase2"].get("split_flare_layer", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),

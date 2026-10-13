@@ -1014,12 +1014,18 @@ class FlareLayer(nn.Module):
     """
 
     def __init__(self, latent_channels: int = 128, widths: tuple[int, ...] = (16, 32, 48, 64, 96),
-                 blocks: int = 1) -> None:
+                 blocks: int = 1, uses_latent: bool = True) -> None:
         super().__init__()
-        self.net = UNetBranch(3, 3, latent_channels, tuple(widths), blocks)
+        # p42 (phase2.split_flare_latent: false): the layer reads the image alone, so the flare stage (train-flare)
+        # trains it without a backbone. The U-Net's bottom then takes a constant zero instead of ZI (its 1-channel
+        # latent conv adds only a bias). True: p41's layer and layer names.
+        self.uses_latent = bool(uses_latent)
+        self.net = UNetBranch(3, 3, latent_channels if self.uses_latent else 1, tuple(widths), blocks)
 
-    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, latent: torch.Tensor | None, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(image without the flare, the flare layer)."""
+        if not self.uses_latent:
+            latent = image.new_zeros(image.shape[0], 1, 1, 1)
         flare = self.net(latent, image, base=torch.zeros_like(image))
         return image - flare, flare
 
@@ -1063,7 +1069,8 @@ class SplitColorEdgeDecoder(nn.Module):
     ) -> None:
         super().__init__()
         # p41 (phase2.split_flare_layer): the flare layer, subtracted first. Absent: no layers, p40's decoder.
-        self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"])) if flare else None)
+        self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
+                                 uses_latent=bool(flare.get("latent", True))) if flare else None)
         if tone_gate and not tone_grid:
             raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
         if exposure_standardize and not (exposure_stats or tone_gate):

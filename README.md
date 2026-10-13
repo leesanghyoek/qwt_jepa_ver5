@@ -12,6 +12,38 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p42_flarestage — nhánh khử lóe train riêng trên lóe ghép Flare7K++, rồi đóng băng trong phase 2** (config
+`configs/kaggle_flarestage.yaml` → OUT `outputs/p42_flarestage`). Bằng p41 cộng mục `flare` (giai đoạn lóe, lệnh mới
+`train-flare`) và `phase2.split_flare_latent: false`, `split_flare_pretrained`, `split_flare_freeze`. Hash phase 1 bằng p40:
+**dùng lại phase 1 của p40**, train giai đoạn lóe rồi phase 2.
+- **Yêu cầu** (người dùng, 13/10/2026, sau p41): "nó vẫn không khử được flare lóe sáng, giờ phải làm sao"; chọn cách 1, "có
+  thể tích hợp nó vào luồng trong model ko, kiểu như 1 nhánh nào đó có thể khử lóe".
+- **Vì sao.** p36–p41 chỉ dạy lóe bằng khoảng 840 cặp FlareImage lặp lại (khoảng 16 000 lượt cả phase 2). Đổi tỉ lệ (p40) hay
+  thêm nhánh và loss riêng (p41), lần nào lóe cũng chỉ giảm khoảng 1/4–1/3, kể cả trên chính cặp đã thấy lúc train.
+  Flare7K++ train trên hàng trăm nghìn ảnh, mỗi ảnh một lớp lóe ghép mới.
+- **Luồng:** ảnh vào → backbone (phase 1) → decoder phase 2: **nhánh khử lóe** (đã train, đóng băng) → vào − lớp lóe →
+  tone/cổng → màu + đường nét → ảnh ra.
+- **Giai đoạn lóe** (`qjepa/data/flare_stage.py`, `qjepa/training/flare_stage.py`, `cli.command_train_flare`):
+  - Nhánh là `FlareLayer` không đọc latent (`uses_latent=False`): U-Net [32, 64, 96, 128, 192], 2 khối, 7,1 triệu tham số. Latent
+    I-JEPA cố ý bỏ qua lóe nên không giúp tìm lóe; bỏ nó thì nhánh train được không cần backbone.
+  - Mỗi mẫu một lần rút mới, chỉ phụ thuộc chỉ số (resume đọc lại đúng các mẫu đó), ba loại:
+    - 60% **lóe ghép**: lớp lóe Flare7K++ (một nửa tổng hợp, một nửa chụp thật Flare-R) và 50% có lỗi quang học của p39, cộng
+      trên ánh sáng tuyến tính lên ảnh sạch (70% ảnh TartanAir, 30% gt FlareImage). Ảnh đích = nền + nguồn sáng;
+    - 20% **cặp FlareImage thật**, ô cắt ngẫu nhiên, xoay và lật;
+    - 20% **ảnh TartanAir không lóe** qua đúng bước nhiễu của phase 2: lớp lóe đích bằng 0, để nhánh học để yên ảnh không lóe.
+  - Mờ máy ảnh (cùng một phép cho ảnh vào và ảnh đích) và hạt (chỉ ảnh vào). Lớp lóe đích = ảnh vào trước hạt − ảnh đích.
+  - Loss L1 trên lớp lóe; 20 000 bước × 16 ảnh, AdamW 2e-4, fp16, một GPU.
+  - Validation mỗi 1 000 bước trên lóe ghép valid (lớp lóe valid lên ảnh TartanAir valid) và trên mọi cặp FlareImage valid
+    (ảnh thật, ô giữa): PSNR vùng lóe và ngoài vùng lóe, vào → ra.
+- **Phase 2:** nạp `OUT/flare/last.pt` (phải chạy xong, cùng hash `flare`), đóng băng nhánh (ngoài optimizer và DDP; hash nhánh
+  trong metadata, checkpoint kiểm nó không đổi). Mục `flare` vào hash phase 2. `split_flare_weight: 0`: `image_flare_l1` chỉ để
+  theo dõi. Notebook: Cell 9b chạy giai đoạn lóe giữa phase 1 và phase 2.
+- Bằng chứng: `tests/test_flare_stage.py`. Mỗi loại mẫu cho đúng ảnh vào, ảnh đích và lớp lóe (lóe ghép khớp tính lại
+  từ lớp Flare7K++); mẫu là hàm của chỉ số và ba loại theo đúng tỉ lệ; validation chỉ dùng lớp lóe và cặp giữ lại;
+  `train-flare` train và validate, run bị ngắt rồi resume ra đúng trọng số của run chạy thẳng; phase 2 nạp đúng nhánh và
+  không đổi nó, từ chối khi chưa có hoặc chưa xong giai đoạn lóe; p42 là p41 cộng mục `flare` và các khoá `split_flare_*` mới, cùng hash
+  phase 1 với p40, hash p40 và p41 giữ nguyên; cài sai thì báo lỗi.
+
 **p41_flarelayer — lớp lóe riêng, trừ khỏi ảnh trước mọi tầng khác** (config `configs/kaggle_flarelayer.yaml` → OUT
 `outputs/p41_flarelayer`). Bằng p40 cộng bốn khoá `phase2.split_flare_*`. Chỉ đổi phase 2: hash phase 1 bằng p40, nên
 **dùng lại phase 1 của p40** và chỉ train phase 2.

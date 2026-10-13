@@ -67,6 +67,7 @@ from .training.losses import jepa_fine_loss, jepa_latent_loss
 from .training.ijepa import IJEPATrainer, ijepa_loss
 from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
 from .training.phase2 import Phase2Trainer, latent_predictor_hash
+from .training.flare_stage import FlareStageTrainer, build_flare_layer, validate_flare_stage, validation_text
 
 
 def _config_path(value: str | None) -> Path:
@@ -1166,6 +1167,112 @@ def _calibrate_decoder_exposure(config: dict[str, Any], manifest: dict[str, Any]
     return system.decoders.image.calibrate_exposure({key: torch.cat(values) for key, values in chunks.items()})
 
 
+def flare_stage_checkpoint(config: dict[str, Any], output: str | Path | None) -> Path:
+    """The flare stage's checkpoint of a run: <output>/flare/last.pt (train-flare writes it, train-phase2 reads it)."""
+    return Path(output or config["runtime"]["output_dir"]) / "flare" / "last.pt"
+
+
+def command_train_flare(args: argparse.Namespace) -> None:
+    """p42: the flare stage -- the flare layer alone, on Flare7K++ flares composited afresh for every sample.
+
+    One GPU: the layer is small next to phase 2 and the CPU composites the frames. Resumes from its own last.pt."""
+    from .corruptions.lens_flare import LensFlareBank
+    from .data.flare_stage import FlareStageDataset, collate_flare_stage, held_out_pairs, lens_config
+    config = load_config(_config_path(args.config))
+    if "flare" not in config:
+        raise ValueError("train-flare needs the flare section (configs/kaggle_flarestage.yaml)")
+    stage = config["flare"]
+    manifest, _ = _manifest(config, args.manifest)
+    manifest_hash = manifest["meta"]["manifest_hash"]
+    device = resolve_device(args.device or config["runtime"]["device"])
+    output = Path(args.output or config["runtime"]["output_dir"]) / "flare"
+    seed_everything(int(stage["seed"]))
+    trainer = FlareStageTrainer(build_flare_layer(stage), stage, device)
+    if args.resume:
+        payload = load_checkpoint(args.resume, device)
+        metadata = payload.get("metadata", {})
+        if metadata.get("phase") != "flare_stage":
+            raise ValueError("Resume checkpoint is not a flare-stage checkpoint")
+        if metadata.get("configuration_hash") != configuration_hash(config, "flare"):
+            raise ValueError("Flare-stage resume config changes training semantics")
+        if metadata.get("manifest_hash") != manifest_hash:
+            raise ValueError("Flare-stage resume manifest differs from training data")
+        trainer.model.load_state_dict(payload["model"], strict=True)
+        trainer.optimizer.load_state_dict(payload["optimizer"])
+        if trainer.amp and payload.get("scaler"):
+            trainer.scaler.load_state_dict(payload["scaler"])
+        trainer.successful_updates = int(payload["successful_updates"])
+        del payload
+    _prepare_run(output, args.resume, trainer.successful_updates)
+    _write_resolved(config, output)
+    lens = lens_config(stage["lens"])
+    lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction)
+    pairs = flare_pair_bank(config)
+    batch_size, maximum = int(stage["batch_size"]), int(stage["max_successful_updates"])
+    train_set = FlareStageDataset(_dataset(config, manifest, "train", fixed_realization=False), lens_bank=lens_bank,
+                                  flare_pairs=pairs, section=stage, split="train", length=maximum * batch_size,
+                                  seed=int(stage["seed"]))
+    valid_set = FlareStageDataset(_dataset(config, manifest, "valid", fixed_realization=True), lens_bank=lens_bank,
+                                  flare_pairs=pairs, section=stage, split="valid",
+                                  length=int(stage["validation_composites"]), seed=int(stage["seed"]))
+    real = held_out_pairs(pairs, "valid", tuple(config["data"]["image_size"])) if pairs is not None else []
+    common = {"num_workers": int(config["data"]["num_workers"]), "collate_fn": collate_flare_stage,
+              "pin_memory": bool(config["data"]["pin_memory"]) and device.type == "cuda"}
+    # Sample i of the run is always draw i: a resumed run reads the very samples it would have.
+    start = trainer.successful_updates * batch_size
+    loader = DataLoader(train_set, batch_size=batch_size, drop_last=True,
+                        sampler=range(start, len(train_set)), **common)
+    valid_loader = DataLoader(valid_set, batch_size=batch_size, **common)
+    print(f"flare stage | layer {sum(p.numel() for p in trainer.model.parameters()) / 1e6:.2f} M params | "
+          f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)} | device {device}"
+          f" | {'fp16' if trainer.amp else 'fp32'}", flush=True)
+    log = _Jsonl(output / "train.jsonl")
+    recent = _RecentMean()
+    keys = ("loss", "flare_l1_composite", "flare_size_composite", "flare_l1_pair", "flare_size_pair",
+            "flare_l1_plain")
+    started, first = time.perf_counter(), trainer.successful_updates
+    waited = 0.0
+    batches = iter(loader)
+    while trainer.successful_updates < maximum:
+        batch, wait = _next_timed(batches)
+        waited += wait
+        metrics = trainer.step(batch)
+        update = trainer.successful_updates
+        metrics["data_wait_seconds"] = wait
+        log.write(metrics)
+        recent.add(metrics, keys)
+        if update % 50 == 0 or update == first + 1:
+            print(f"flare update={_progress(update, maximum)} loss={metrics['loss']:.5f} {recent.text(keys)} "
+                  f"{_pace(started, first, update, waited)}", flush=True)
+        if update % int(stage["validation_every_updates"]) == 0 or update == maximum:
+            report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+            log.write({"successful_updates": update, "validation": report})
+            print(f"  validation update={_progress(update, maximum)} | {validation_text(report)}", flush=True)
+        if update % int(stage["checkpoint_every_updates"]) == 0 or update == maximum:
+            metadata = {"pipeline_version": 3, "phase": "flare_stage", "successful_updates": update,
+                        "configuration_hash": configuration_hash(config, "flare"), "manifest_hash": manifest_hash,
+                        "layer_hash": state_dict_hash(trainer.model)}
+            atomic_torch_save(trainer.payload(metadata, serializable_config(config)), output / "last.pt")
+
+
+def _load_flare_stage(config: dict[str, Any], system: RestorationSystem, output: str | Path | None) -> str:
+    """p42 (phase2.split_flare_pretrained): the flare layer of a complete flare stage into the split decoder."""
+    path = flare_stage_checkpoint(config, output)
+    if not path.is_file():
+        raise ValueError(f"phase2.split_flare_pretrained needs the flare stage's {path}: run train-flare first")
+    payload = load_checkpoint(path, "cpu")
+    metadata = payload.get("metadata", {})
+    if metadata.get("phase") != "flare_stage" or metadata.get("configuration_hash") != configuration_hash(config, "flare"):
+        raise ValueError(f"{path} is not this config's flare stage (flare section or data changed)")
+    if int(metadata.get("successful_updates", 0)) != int(config["flare"]["max_successful_updates"]):
+        raise ValueError(f"{path} is an unfinished flare stage ({metadata.get('successful_updates')}/"
+                         f"{config['flare']['max_successful_updates']} updates): finish train-flare first")
+    system.decoders.image.flare.load_state_dict(payload["model"], strict=True)
+    if state_dict_hash(system.decoders.image.flare) != metadata.get("layer_hash"):
+        raise ValueError(f"{path}: weights do not match their recorded hash")
+    return metadata["layer_hash"]
+
+
 def command_train_phase2(args: argparse.Namespace) -> None:
     config = load_config(_config_path(args.config))
     init_checkpoint = getattr(args, "decoder_init_checkpoint", None)
@@ -1229,6 +1336,9 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         if metadata.get("decoder_current_hash") != state_dict_hash(system.decoders):
             raise ValueError("Decoder initialization weights do not match checkpoint metadata")
         del initialized
+    if config["phase2"].get("split_flare_pretrained", False) and not args.resume and not init_checkpoint:
+        # p42: a fresh run starts from the flare stage's layer; resumed runs carry it in their checkpoint.
+        _load_flare_stage(config, system, args.output)
     if config["phase2"].get("split_exposure_standardize", False) and not args.resume and not init_checkpoint:
         # Fresh runs only, before the decoders' initialization hash is taken; resumed and decoder-initialized
         # runs carry the constants in their checkpoint.
@@ -1261,6 +1371,11 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         trainer.successful_updates = int(payload["successful_updates"])
         trainer.prepare_backbone_finetune()
         system.load_state_dict(payload["system"], strict=True)
+        if trainer.frozen_flare_hash is not None:
+            # p42: the trainer hashed the layer before these weights loaded; the checkpoint names the frozen one.
+            trainer.frozen_flare_hash = state_dict_hash(system.decoders.image.flare)
+            if payload["metadata"].get("frozen_flare_hash") != trainer.frozen_flare_hash:
+                raise ValueError("Phase-2 resume checkpoint has a different frozen flare layer")
         trainer.assert_backbone_frozen()             # also the predictor it just loaded
         trainer.decoder_initialization_hash = payload["metadata"]["decoder_initialization_hash"]
         trainer.optimizer.load_state_dict(payload["optimizer"])
@@ -1843,6 +1958,14 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--mode", choices=("full", "clean", "low_light_only", "blur_only", "sensor_noise_only"), default="full")
     preview.add_argument("--realization", type=int, default=0)
     preview.set_defaults(function=command_preview_corruption)
+
+    flare = subparsers.add_parser("train-flare", help="p42: train the flare layer alone on composited Flare7K++ flares")
+    flare.add_argument("--config")
+    flare.add_argument("--manifest")
+    flare.add_argument("--output")
+    flare.add_argument("--device")
+    flare.add_argument("--resume")
+    flare.set_defaults(function=command_train_flare)
 
     smoke = subparsers.add_parser("smoke", help="Run one synthetic update in each phase")
     smoke.add_argument("--config")
