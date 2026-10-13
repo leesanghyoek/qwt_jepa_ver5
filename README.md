@@ -32,7 +32,8 @@ IMU là decoder hệ số Haar.
     - 20% **cặp FlareImage thật**, ô cắt ngẫu nhiên, xoay và lật;
     - 20% **ảnh TartanAir không lóe** qua đúng bước nhiễu của phase 2: lớp lóe đích bằng 0, để nhánh học để yên ảnh không lóe.
   - Mờ máy ảnh (cùng một phép cho ảnh vào và ảnh đích) và hạt (chỉ ảnh vào). Lớp lóe đích = ảnh vào trước hạt − ảnh đích.
-  - Loss L1 trên lớp lóe; 20 000 bước × 16 ảnh, AdamW 2e-4, fp16, một GPU.
+  - Loss L1 trên lớp lóe; 12 000 bước × 16 ảnh (người dùng 14/10/2026: 20 000 → 12 000; notebook đổi được bằng
+    `FLARE_UPDATES` ở Cell 1), AdamW 2e-4, fp16, một GPU.
   - Validation mỗi 1 000 bước trên lóe ghép valid (lớp lóe valid lên ảnh TartanAir valid) và trên mọi cặp FlareImage valid
     (ảnh thật, ô giữa): PSNR vùng lóe và ngoài vùng lóe, vào → ra.
 - **Phase 2:** nạp `OUT/flare/last.pt` (phải chạy xong, cùng hash `flare`), đóng băng nhánh (ngoài optimizer và DDP; hash nhánh

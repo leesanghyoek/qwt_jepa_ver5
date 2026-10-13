@@ -30,7 +30,7 @@ flare:
   widths: [32, 64, 96, 128, 192]     # U-Net 256 -> 16 (p41: [16, 32, 48, 64, 96], 1 khoi)
   blocks: 2
   batch_size: 16
-  max_successful_updates: 20000      # 320 000 mau, moi mau mot lan rut moi
+  max_successful_updates: 12000      # 192 000 mau, moi mau mot lan rut moi (notebook: FLARE_UPDATES o Cell 1)
   learning_rate: 2.0e-4
   minimum_lr: 1.0e-6
   warmup_updates: 500
