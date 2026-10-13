@@ -377,8 +377,16 @@ def frame_kind(params: dict[str, object]) -> str:
         return "plain"
     if params.get("halo") or params.get("lens_flare"):
         return "flare"
-    relit = active_stages(params)[1] or any(bool(params.get(key)) for key in ("illumination", "light", "fog"))
-    return "relit" if relit else "plain"
+    return "relit" if light_changed(params) else "plain"
+
+
+def light_changed(params: dict[str, object]) -> bool:
+    """Whether the corruption changed the frame's light -- low-light stage, uneven light, lamps, fog -- a flare
+    aside. phase2.split_flare_layer (p41) labels a FlareImage pair's tone gate with this: its flare is the flare
+    layer's to take off, and a "clear" pair, whose environment the corruption skipped, needs no relighting."""
+    if params.get("clean"):
+        return False
+    return bool(active_stages(params)[1] or any(bool(params.get(key)) for key in ("illumination", "light", "fog")))
 
 
 # What the phase-1 degradation head regresses: the corruption of this frame, each

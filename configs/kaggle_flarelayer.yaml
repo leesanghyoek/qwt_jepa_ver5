@@ -1,0 +1,27 @@
+# p41_flarelayer: p40_flarefocus + LOP LOE RIENG (phase2.split_flare_layer). Chi doi phase 2: hash phase 1 bang p40 ->
+# dung lai phase 1 cua p40 (notebook PHASE1_FROM), chi train phase 2.
+#
+# Nguoi dung (13/10/2026) sau p40: "no giam duoc nhung tia flare nhung chi 5% thoi"; "xem co nen lam huong p41 ko,
+# neu co va no chac se tot thi trien khai". Do tren checkpoint p40 (tools/flare_image_test.py, Cell 12d; khong train):
+#   - vung loe (pixel vao lech sach > 0,05): sai so giam ~25% (cap test) va ~30% (cap TRAIN, o 256) -> chinh cap da
+#     thay luc train cung chi go ~1/3: khong phai hoc thuoc, ma model/loss khong lam duoc;
+#   - NGOAI vung loe PSNR GIAM: 8/8 cap test, 15/16 cap train (chi_loe, trung vi -4,8 dB), 14/16 cap train voi mo + hat
+#     nhu luc train (-4,2 dB): model doi ca khung moi khi thay loe. Cong tone mo het cho moi cap FlareImage (nhan "flare")
+#     va cac tang nhin ca khung (ban do stop, luoi song phuong, mau 128x128) khong giu duoc phep sua trong mot vet loe.
+#
+# Sua (qjepa/models/decoders.py FlareLayer, chi phase 2):
+#   - mot lop loe RGB o 256x256 (U-Net, day nhan latent), tru khoi anh vao TRUOC moi tang khac;
+#   - loss rieng: lop loe so voi (anh loe - anh sach) cua cap FlareImage, = 0 tren anh TartanAir;
+#   - nhan cong tone cua cap FlareImage chi con "anh sang bi doi khong" (light_changed): cap "clear" -> 0, cong dong,
+#     tang tone khong dung vao anh loe nua.
+# Lop cuoi khoi tao 0: update 0 decoder bang dung p40.
+extends: kaggle_flarefocus.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p41_flarelayer
+
+phase2:
+  split_flare_layer: true
+  split_flare_widths: [16, 32, 48, 64, 96]   # 256 -> 16: day U-Net dung luoi latent ZI
+  split_flare_blocks: 1
+  split_flare_weight: 3.0                    # nhu reconstruction_detail_weight; L1 lop loe ~0,04 luc dau

@@ -1000,6 +1000,30 @@ class ChromaDetail(nn.Module):
         return detail + self.tail(self.trunk(self.head(torch.cat((detail, y, coarse), dim=1))))
 
 
+class FlareLayer(nn.Module):
+    """p41 (phase2.split_flare_layer): the flare as a layer of its own, subtracted from the frame before anything else.
+
+    p40's decoder took about a quarter to a third of the flare off FlareImage pairs -- on the very pairs it was
+    trained on too -- and changed the rest of the frame: outside the flare (pixels where input and clean differ
+    by <= 0.05) PSNR fell on 15 of 16 training pairs, median -4.8 dB (tools/flare_image_test.py). Its stages
+    that see a whole frame -- stop map, bilateral grid, colour at 128x128 -- cannot keep a fix inside a streak.
+    This branch writes an RGB layer at full resolution, a U-Net (UNetBranch) whose bottom takes the latent, and
+    the decoder goes on from ``image - flare``. The layer has its own target, the FlareImage pair's flared photo
+    minus its clean photo (zero on every other frame), so it learns where the flare is, not one correction for
+    every flared frame. Zero-initialised last conv: at update 0 the layer is 0 and the decoder is p40's.
+    """
+
+    def __init__(self, latent_channels: int = 128, widths: tuple[int, ...] = (16, 32, 48, 64, 96),
+                 blocks: int = 1) -> None:
+        super().__init__()
+        self.net = UNetBranch(3, 3, latent_channels, tuple(widths), blocks)
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(image without the flare, the flare layer)."""
+        flare = self.net(latent, image, base=torch.zeros_like(image))
+        return image - flare, flare
+
+
 class SplitColorEdgeDecoder(nn.Module):
     """Restore colour and edges apart, then put them back together.
 
@@ -1018,6 +1042,8 @@ class SplitColorEdgeDecoder(nn.Module):
     * ``exposure_standardize`` (optional, p38): every global head reads the exposure statistics,
       and the tone gate its layout and latent mean, standardised (FeatureStandardizer,
       calibrate_exposure). The heads' zero-initialised outputs are unchanged.
+    * ``flare`` (optional, FlareLayer, p41): a full-resolution flare layer subtracted from the
+      input first; every stage above reads the frame without it.
 
     At initialisation both residuals are zero: the output has exactly the input's
     luminance and the input's colour at ``color_scale`` resolution -- or the input's colour
@@ -1033,9 +1059,11 @@ class SplitColorEdgeDecoder(nn.Module):
         color_global: bool = False, naf: dict | None = None, refiner: dict | None = None,
         light: dict | None = None, exposure_stats: bool = False, tone_grid: dict | None = None,
         relight: dict | None = None, chroma: dict | None = None, tone_gate: dict | None = None,
-        exposure_standardize: bool = False,
+        exposure_standardize: bool = False, flare: dict | None = None,
     ) -> None:
         super().__init__()
+        # p41 (phase2.split_flare_layer): the flare layer, subtracted first. Absent: no layers, p40's decoder.
+        self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"])) if flare else None)
         if tone_gate and not tone_grid:
             raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
         if exposure_standardize and not (exposure_stats or tone_gate):
@@ -1133,6 +1161,9 @@ class SplitColorEdgeDecoder(nn.Module):
             raise ValueError(f"Image sides {tuple(size)} must divide by {self.illumination_scale}")
         parts = {}
         standardize = self.exposure_norm                    # None: the heads read the raw statistics
+        if self.flare is not None:
+            image, parts["image_flare"] = self.flare(latent, image)
+            parts["image_deflared"] = image
         if self.light is not None:
             image = self.light(latent, image, standardize)
             parts["image_light"] = image

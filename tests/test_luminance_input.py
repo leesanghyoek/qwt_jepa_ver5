@@ -133,7 +133,7 @@ def test_old_configs_build_rgb_and_the_key_changes_both_hashes():
                              "kaggle_relight.yaml", "kaggle_halo.yaml", "kaggle_chroma.yaml", "kaggle_tonegate.yaml",
                              "kaggle_flareimage.yaml", "kaggle_flareblur.yaml",
                              "kaggle_expnorm.yaml", "kaggle_lensflare.yaml",
-                             "kaggle_flarefocus.yaml"):  # p21-p40 extend p20
+                             "kaggle_flarefocus.yaml", "kaggle_flarelayer.yaml"):  # p21-p41 extend p20
             assert "image_input" not in load_config(path)["model"], path
     plain, grey = _config(), _config("luminance")
     assert build_backbone(plain).image_transform.coeff_channels == 48

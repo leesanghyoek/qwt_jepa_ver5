@@ -154,6 +154,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_exposure_standardize(config)
     _validate_source_size(config)
     _validate_flare_pairs(config)
+    _validate_flare_layer(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -841,6 +842,39 @@ def _validate_tone_gate(config: dict[str, Any]) -> None:
         raise ValueError("phase2.split_tone_gate_weight must be a nonnegative number")
 
 
+FLARE_LAYER_KEYS = ("split_flare_widths", "split_flare_blocks", "split_flare_weight")
+
+
+def _validate_flare_layer(config: dict[str, Any]) -> None:
+    """p41: phase2.split_flare_layer, a full-resolution flare layer the split decoder subtracts first.
+
+    On, every split_flare_* key must be written out (the hash reads only the config file). Its target comes from
+    the FlareImage pairs, so data.flare_pairs_fraction must be on."""
+    phase2 = config["phase2"]
+    enabled = phase2.get("split_flare_layer", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("phase2.split_flare_layer must be true or false")
+    if not enabled:
+        return
+    if phase2.get("image_decoder") != "split_color_edge":
+        raise ValueError("phase2.split_flare_layer is a stage of the split_color_edge decoder")
+    if float(config["data"].get("flare_pairs_fraction", 0.0)) <= 0:
+        raise ValueError("phase2.split_flare_layer learns from FlareImage pairs: set data.flare_pairs_fraction")
+    missing = [key for key in FLARE_LAYER_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.split_flare_layer needs every split_flare_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    widths = phase2["split_flare_widths"]
+    if (not isinstance(widths, (list, tuple)) or len(widths) < 2
+            or any(isinstance(w, bool) or not isinstance(w, int) or w < 4 for w in widths)):
+        raise ValueError("phase2.split_flare_widths must list at least two integers >= 4")
+    blocks = phase2["split_flare_blocks"]
+    if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < 1:
+        raise ValueError("phase2.split_flare_blocks must be an integer >= 1")
+    if not _nonnegative_number(phase2["split_flare_weight"]):
+        raise ValueError("phase2.split_flare_weight must be a nonnegative number")
+
+
 def _validate_exposure_standardize(config: dict[str, Any]) -> None:
     """p38: phase2.split_exposure_standardize and phase2.split_tone_gate_lr_scale. Absent: as before.
 
@@ -1089,6 +1123,11 @@ def build_decoders(
             } if config["phase2"].get("split_tone_gate", False) else None,
             # Absent before p38: the heads read the raw exposure statistics.
             "exposure_standardize": bool(config["phase2"].get("split_exposure_standardize", False)),
+            # Absent before p41: no flare layer.
+            "flare": {
+                "widths": tuple(int(width) for width in config["phase2"]["split_flare_widths"]),
+                "blocks": int(config["phase2"]["split_flare_blocks"]),
+            } if config["phase2"].get("split_flare_layer", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
                 "blocks": int(config["phase2"].get("split_edge_refiner_blocks", 0)),

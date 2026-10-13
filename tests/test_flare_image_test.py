@@ -49,6 +49,13 @@ def test_a_checkpoint_restores_whole_held_out_frames_pair_by_pair(tmp_path):
             assert row["width"] % 16 == 0 and row["height"] % 16 == 0
             assert np.isfinite(row["psnr_in"]) and np.isfinite(row["psnr_out"]) and 0 <= row["flare_fraction"] <= 1
             assert (output / row["panel"]).stat().st_size > 1000
+            # Inside and outside the flare split the frame's squared error by their pixel shares.
+            if 0 < row["flare_fraction"] < 1:
+                mse = lambda db: 10 ** (-db / 10)
+                for side in ("in", "out"):
+                    whole = (row["flare_fraction"] * mse(row[f"flare_psnr_{side}"])
+                             + (1 - row["flare_fraction"]) * mse(row[f"rest_psnr_{side}"]))
+                    assert whole == pytest.approx(mse(row[f"psnr_{side}"]), rel=1e-3)
         assert json.loads((output / "report.json").read_text())["summary"]["tat ca"]["count"] == 4
     # "chi loe" feeds the photo itself; the training corruption changes the input.
     assert any(a["psnr_in"] != b["psnr_in"] for a, b in zip(reports["chi_loe"]["rows"],

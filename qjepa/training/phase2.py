@@ -275,6 +275,15 @@ class Phase2Trainer:
                     loss = loss + float(self.phase["split_tone_gate_weight"]) * tone_bce
                     parts["image_tone_bce"] = tone_bce
                     parts["image_tone_accuracy"] = ((logit > 0).float() == label).float().mean()
+                if "image_flare" in restored and self.phase.get("split_flare_layer", False):
+                    # p41: the flare layer against the pair's own flare (flared photo - clean photo), 0 on every
+                    # frame without one -- where the flare is, and that the rest of the frame keeps its light.
+                    if "image_flare_target" not in batch:
+                        raise KeyError("phase2.split_flare_layer needs batch['image_flare_target'] (the training "
+                                       "dataset's flare_layer)")
+                    flare_l1 = F.l1_loss(restored["image_flare"].float(), batch["image_flare_target"].float())
+                    loss = loss + float(self.phase["split_flare_weight"]) * flare_l1
+                    parts["image_flare_l1"] = flare_l1
                 lowfreq_weight = float(self.phase.get("lowfreq_mse_weight", 0.0))
                 if lowfreq_weight > 0:
                     # p30: PSNR's own (squared) error on brightness and colour at long periods.

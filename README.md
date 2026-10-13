@@ -12,6 +12,39 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p41_flarelayer — lớp lóe riêng, trừ khỏi ảnh trước mọi tầng khác** (config `configs/kaggle_flarelayer.yaml` → OUT
+`outputs/p41_flarelayer`). Bằng p40 cộng bốn khoá `phase2.split_flare_*`. Chỉ đổi phase 2: hash phase 1 bằng p40, nên
+**dùng lại phase 1 của p40** và chỉ train phase 2.
+- **Yêu cầu** (người dùng, 13/10/2026, sau p40): "nó giảm được những tia flare nhưng chỉ 5% thôi"; "xem có nên làm hướng p41
+  ko, nếu có và nó chắc sẽ tốt thì triển khai".
+- **Đo trên checkpoint p40** (`tools/flare_image_test.py`, Cell 12d, không train). Vùng lóe là pixel mà ảnh vào lệch ảnh
+  sạch hơn 0,05:
+
+  | | vùng lóe: sai số giảm | ngoài vùng lóe |
+  |---|---|---|
+  | 8 cặp test, cả khung | ~25% (15,47 → 17,99 dB) | hỏng ở 8/8 cặp, tới −12,4 dB |
+  | 16 cặp **train**, ô 256, ảnh thật | ~30% | hỏng ở 15/16 cặp, trung vị −4,8 dB |
+  | 16 cặp train, thêm mờ + hạt như lúc train | ~30% | hỏng ở 14/16 cặp, trung vị −4,2 dB |
+
+  - Chính các cặp đã thấy lúc train cũng chỉ gỡ được ~1/3 lóe: đây không phải học thuộc, nên thêm dữ liệu không đủ.
+  - Model đổi **cả khung** mỗi khi thấy lóe. Cổng tone mở hết cho mọi cặp FlareImage (nhãn "flare"), và các tầng nhìn cả
+    khung (bản đồ stop, lưới song phương, màu 128²) không giữ được phép sửa trong một vệt lóe.
+- **Sửa** (`qjepa/models/decoders.py` `FlareLayer`):
+  - Một lớp lóe RGB ở 256² (U-Net `split_flare_widths` [16, 32, 48, 64, 96], đáy nhận latent) được trừ khỏi ảnh vào
+    **trước** mọi tầng; các tầng sau đọc ảnh đã bỏ lóe. Lớp cuối khởi tạo 0: ở update 0 decoder đúng bằng p40.
+  - Loss riêng `image_flare_l1` (trọng số `split_flare_weight` 3): lớp lóe so với **ảnh lóe trừ ảnh sạch** của cặp
+    FlareImage (cùng ô cắt, xoay, lật), và bằng 0 trên mọi ảnh TartanAir. Model học lóe nằm ở đâu, không học một phép sửa
+    chung cho mọi ảnh có lóe.
+  - Với khoá này, nhãn cổng tone của cặp FlareImage chỉ còn "ánh sáng có bị đổi không" (`light_changed`): cặp "clear"
+    (mọi cặp, vì `flare_pairs_clear_probability` 1) nhãn 0, nên tầng tone không đụng vào ảnh lóe nữa.
+- Cell 12d in thêm cột **ngoài lóe vào→ra**: số cần xem cùng vùng lóe. p41 tốt khi vùng lóe lên mà ngoài lóe không còn tụt.
+- Bằng chứng: `tests/test_flare_layer.py`. Thiếu khoá thì không có lớp mới và mọi item như cũ; có khoá thì decoder bắt đầu
+  đúng bằng p40, các tầng đọc ảnh trừ lớp lóe và loss tới được lớp lóe; đích của cặp là ô lóe trừ ô sạch, xoay và lật cùng
+  cặp, đích của ảnh TartanAir bằng 0 và mọi khoá khác giữ nguyên; nhãn tone cặp "clear" là 0 khi có khoá, 1 khi không;
+  phase 2 qua CLI train được trên phase 1 train không có khoá và ghi `image_flare_l1`; p41 là p40 cộng bốn khoá, cùng hash
+  phase 1, hash p40 giữ nguyên; cài sai thì báo lỗi. `tests/test_flare_image_test.py`: vùng lóe và ngoài lóe chia đúng sai
+  số cả khung.
+
 **p40_flarefocus — một nửa mỗi batch là ảnh lóe thật FlareImage, xoay và lật** (config `configs/kaggle_flarefocus.yaml` → OUT
 `outputs/p40_flarefocus`). Bằng p38, đổi `data.flare_pairs_fraction` 0,25 → 0,5 và thêm `data.flare_pairs_augment: dihedral`. Đổi dữ liệu nên **train lại cả hai phase**
 (bỏ shard 2 cũng đã đổi manifest).

@@ -12,7 +12,8 @@ FlareImage luc train (PairedCameraImuDataset._item, "clear" theo data.flare_pair
 FlareImage khong co IMU: moi cap muon cua so IMU cua mot mau TartanAir test, co dinh theo ten cap.
 
 In bang tung cap va theo nguon: PSNR va SSIM vao -> ra, va PSNR rieng VUNG LOE -- pixel ma anh vao lech anh sach hon
-0,05 (trung binh 3 kenh), noi model phai go loe. Ve moi cap mot hinh: vao | ra | sach | |vao - sach| | |ra - sach|.
+0,05 (trung binh 3 kenh), noi model phai go loe -- va PSNR NGOAI vung loe, noi model phai de nguyen (p40 lam
+hong o day, trung vi -4 dB). Ve moi cap mot hinh: vao | ra | sach | |vao - sach| | |ra - sach|.
 
     python3 tools/flare_image_test.py --checkpoint outputs/p38_expnorm/phase2/best_joint_validation.pt \\
         --manifest manifests/kaggle --output outputs/p38_expnorm/flare_image_test/<gio> [--count 8] \\
@@ -117,7 +118,8 @@ def panel(path: Path, noisy: torch.Tensor, restored: torch.Tensor, clean: torch.
 
 
 def summarize(rows):
-    keys = ("psnr_in", "psnr_out", "ssim_in", "ssim_out", "flare_psnr_in", "flare_psnr_out")
+    keys = ("psnr_in", "psnr_out", "ssim_in", "ssim_out", "flare_psnr_in", "flare_psnr_out", "rest_psnr_in",
+            "rest_psnr_out")
     summary = {"count": len(rows)}
     for key in keys:
         values = np.array([row[key] for row in rows], dtype=float)
@@ -161,7 +163,7 @@ def main(argv: list[str] | None = None) -> dict:
     clear_probability = float(config["data"].get("flare_pairs_clear_probability", 1.0))
     rows = []
     print(f"FlareImage {args.split}: {len(pairs)} cặp | chế độ {args.mode} | khung {args.frame} | {bank.root}")
-    print(f"  {'nguồn':18s} {'cặp':11s} {'cỡ':>9s} {'PSNR vào→ra':>16s} {'SSIM vào→ra':>14s} {'vùng lóe: % | vào→ra':>26s}")
+    print(f"  {'nguồn':18s} {'cặp':11s} {'cỡ':>9s} {'PSNR vào→ra':>16s} {'SSIM vào→ra':>14s} {'vùng lóe: % | vào→ra':>26s} {'ngoài lóe vào→ra':>17s}")
     for number, pair in enumerate(pairs):
         gt, flared = bank.load(pair)
         gt, flared = (frame_of(array, args.frame, size).astype(np.float32) / 255.0 for array in (gt, flared))
@@ -184,21 +186,28 @@ def main(argv: list[str] | None = None) -> dict:
                "imu_donor": host.sample_id, "psnr_in": before["image_psnr_db"], "psnr_out": after["image_psnr_db"],
                "ssim_in": before["image_ssim"], "ssim_out": after["image_ssim"],
                "flare_fraction": float(mask.float().mean()), "flare_psnr_in": psnr(noisy[0], clean[0], mask),
-               "flare_psnr_out": psnr(restored[0], clean[0], mask), "panel": f"pair_{number:02d}.png"}
+               "flare_psnr_out": psnr(restored[0], clean[0], mask),
+               # Ngoai vung loe: noi model phai de nguyen (p40 lam hong o day 4-13 dB).
+               "rest_psnr_in": psnr(noisy[0], clean[0], ~mask), "rest_psnr_out": psnr(restored[0], clean[0], ~mask),
+               "panel": f"pair_{number:02d}.png"}
         rows.append(row)
         panel(output / row["panel"], noisy[0], restored[0], clean[0], row)
         flare = (f"{100 * row['flare_fraction']:5.1f}% | {row['flare_psnr_in']:5.2f} → {row['flare_psnr_out']:5.2f}"
                  if np.isfinite(row["flare_psnr_in"]) else "—")
+        rest = (f"{row['rest_psnr_in']:6.2f} → {row['rest_psnr_out']:6.2f}" if np.isfinite(row["rest_psnr_in"])
+                else "—")
         print(f"  {pair.source:18s} {pair.name:11s} {str(row['width']) + 'x' + str(row['height']):>9s}"
               f" {row['psnr_in']:6.2f} → {row['psnr_out']:6.2f} {row['ssim_in']:6.3f} → {row['ssim_out']:.3f}"
-              f" {flare:>26s}", flush=True)
+              f" {flare:>26s} {rest:>17s}", flush=True)
     sources = sorted({row["source"] for row in rows})
     summary = {"tat ca": summarize(rows), **{source: summarize([r for r in rows if r["source"] == source])
                                             for source in sources}}
-    print(f"\n  {'nhóm':18s} {'số':>4s} {'PSNR vào→ra':>16s} {'ra > vào':>9s} {'vùng lóe vào→ra':>18s}")
+    print(f"\n  {'nhóm':18s} {'số':>4s} {'PSNR vào→ra':>16s} {'ra > vào':>9s} {'vùng lóe vào→ra':>18s}"
+          f" {'ngoài lóe vào→ra':>18s}")
     for name, values in summary.items():
         print(f"  {name:18s} {values['count']:>4d} {values['psnr_in']:6.2f} → {values['psnr_out']:6.2f}"
-              f" {100 * values['better_fraction']:8.0f}% {values['flare_psnr_in']:7.2f} → {values['flare_psnr_out']:.2f}")
+              f" {100 * values['better_fraction']:8.0f}% {values['flare_psnr_in']:7.2f} → {values['flare_psnr_out']:6.2f}"
+              f" {values['rest_psnr_in']:8.2f} → {values['rest_psnr_out']:6.2f}")
     report = {"checkpoint": str(args.checkpoint), "split": args.split, "mode": args.mode, "frame": args.frame,
               "rows": rows, "summary": summary}
     (output / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")

@@ -133,6 +133,7 @@ def _dataset(
     brightness_target: bool = False,
     tone_label: bool = False,
     flare_pairs: FlarePairBank | None = None,
+    flare_layer: bool = False,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -161,6 +162,7 @@ def _dataset(
         flare_pairs_fraction=float(config["data"].get("flare_pairs_fraction", 0.0)) if flare_pairs else 0.0,
         flare_pairs_clear_probability=float(config["data"].get("flare_pairs_clear_probability", 1.0)),
         flare_pairs_augment=str(config["data"].get("flare_pairs_augment", "none")),
+        flare_layer=flare_layer,
     )
 
 
@@ -188,11 +190,13 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
     brightness_target = phase == "phase2" and bool(config["phase2"].get("split_relight", False))
     # Only phase 2's tone gate reads whether the corruption changed the light (phase2.split_tone_gate).
     tone_label = phase == "phase2" and bool(config["phase2"].get("split_tone_gate", False))
+    # Only phase 2's flare layer reads the pairs' flare and tone labels without the flare (phase2.split_flare_layer).
+    flare_layer = phase == "phase2" and bool(config["phase2"].get("split_flare_layer", False))
     # data.flare_pairs_*: FlareImage pairs in every training batch (both phases); validation stays TartanAir.
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
                     hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
                     brightness_target=brightness_target, tone_label=tone_label,
-                    flare_pairs=flare_pair_bank(config), **kwargs)
+                    flare_pairs=flare_pair_bank(config), flare_layer=flare_layer, **kwargs)
 
 
 def _loader(

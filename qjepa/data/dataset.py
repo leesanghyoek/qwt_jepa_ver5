@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
-from ..corruptions.image import brightness_stops, degradation_vector, frame_kind
+from ..corruptions.image import brightness_stops, degradation_vector, frame_kind, light_changed
 from ..corruptions.rng import derive_seed
 from .flare_pairs import FlarePair, FlarePairBank
 from .manifest import PairedSample
@@ -103,6 +103,7 @@ class PairedCameraImuDataset(Dataset):
         flare_pairs_fraction: float = 0.0,
         flare_pairs_clear_probability: float = 1.0,
         flare_pairs_augment: str = "none",
+        flare_layer: bool = False,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -129,6 +130,10 @@ class PairedCameraImuDataset(Dataset):
         self.brightness_target = bool(brightness_target)
         # phase2.split_tone_gate: 1 when the corruption changed the frame's light or added a flare, else 0.
         self.tone_label = bool(tone_label)
+        # phase2.split_flare_layer (p41): each item carries "image_flare_target", a FlareImage pair's flared photo
+        # minus its clean photo (zero for a TartanAir frame), and a pair's tone label says only whether the
+        # corruption changed its light: the flare is the flare layer's. False: as before.
+        self.flare_layer = bool(flare_layer)
         self.hflip_probability = hflip_probability
         self.samples = samples
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
@@ -251,12 +256,13 @@ class PairedCameraImuDataset(Dataset):
         image_mode, imu_mode = self._modes(sample_id)
         return self._item(host, sample_id, f"flareimage/{pair.source}", gt_crop, flared_crop, image_mode,
                           imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0,
-                          flare_pair=info, imu_donor=host.sample_id)
+                          flare_pair=info, imu_donor=host.sample_id,
+                          flare_target=flared_crop - gt_crop if self.flare_layer else None)
 
     def _item(self, host: PairedSample, sample_id: str, trajectory_key: str, clean_image: np.ndarray,
               source_image: np.ndarray, image_mode: str, imu_mode: str, *, trajectory: str, timestamp: float,
               frame_index: int, flare_pair: dict[str, object] | None = None,
-              imu_donor: str | None = None) -> dict[str, object]:
+              imu_donor: str | None = None, flare_target: np.ndarray | None = None) -> dict[str, object]:
         """One training/validation item: ``source_image`` through the corruption is the input, ``clean_image`` the
         target, and the IMU window is ``host``'s. For a TartanAir sample source and target are its own frame."""
         imu_all, imu_times_all = self.cache.get(host)
@@ -298,12 +304,15 @@ class PairedCameraImuDataset(Dataset):
             mode=imu_mode,
         )
         stops = brightness_stops(image_parameters, *noisy_image.shape[:2]) if self.brightness_target else None
+        if self.flare_layer and flare_target is None:
+            flare_target = np.zeros_like(noisy_image, dtype=np.float32)       # no flare to take off
         if mirror_draw(self.scenario_seed, sample_id, self.realization, self.hflip_probability):
             # After corruption: every corruption draw is mirror-symmetric in distribution,
             # and the seeds stay those of the unmirrored sample.
             clean_image, noisy_image = clean_image[:, ::-1], noisy_image[:, ::-1]
             stops = None if stops is None else stops[:, ::-1]
             noise_free = None if noise_free is None else noise_free[:, ::-1]
+            flare_target = None if flare_target is None else flare_target[:, ::-1]
             clean_imu, noisy_imu = mirror_imu(clean_imu), mirror_imu(noisy_imu)
         chw = lambda value: torch.from_numpy(np.ascontiguousarray(value.transpose(2, 0, 1))).float()
         item = {
@@ -325,8 +334,13 @@ class PairedCameraImuDataset(Dataset):
             item["image_noise_free"] = chw(noise_free)
         if stops is not None:
             item["image_stops"] = torch.from_numpy(np.ascontiguousarray(stops))[None]
+        if flare_target is not None:
+            item["image_flare_target"] = chw(flare_target)
         if self.tone_label:
-            item["image_tone_label"] = torch.tensor([float(frame_kind(image_parameters) != "plain")])
+            changed = frame_kind(image_parameters) != "plain"
+            if self.flare_layer and image_parameters.get("flare_pair"):
+                changed = light_changed(image_parameters)
+            item["image_tone_label"] = torch.tensor([float(changed)])
         return item
 
 
@@ -334,7 +348,7 @@ def collate_paired(batch: list[dict[str, object]]) -> dict[str, object]:
     output: dict[str, object] = {}
     for key in ("image_clean", "image_noisy", "image_time", "imu_times", "imu_start"):
         output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
-    for key in ("image_degradation", "image_noise_free", "image_stops", "image_tone_label"):
+    for key in ("image_degradation", "image_noise_free", "image_stops", "image_tone_label", "image_flare_target"):
         if key in batch[0]:
             output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
     for key in ("imu_clean_phys", "imu_noisy_phys"):
