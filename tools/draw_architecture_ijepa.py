@@ -1,4 +1,4 @@
-"""Architecture figure of the run the notebook trains (configs/kaggle_relight.yaml, p32_relight;
+"""Architecture figure of the run the notebook trains (configs/kaggle_flarestage.yaml, p42_flarestage;
 qwt-jaco-jepa-ijepa.ipynb), as plain SVG.
 
 Drawn from the config: phase 1 is I-JEPA alone -- ONE ViT over the image's and the IMU's wavelet
@@ -14,6 +14,11 @@ light branch (veil V, log gain g). With phase2.split_relight (p32) a U-Net first
 divided by 2^S in linear light before the grid, which the panel then draws as one box. The loss box lists
 the terms the config turns on.
 
+Later keys, each drawn only when the config turns it on: the tone gate (p35, phase2.split_tone_gate), full-resolution
+chroma detail (p34), FlareImage pairs in every batch (p36+, data.flare_pairs_fraction), the flare layer subtracted
+before the tone stage (p41, phase2.split_flare_layer) and, with a flare section (p42), the flare stage that trains it
+alone (band 4, train-flare) before phase 2 loads and freezes it.
+
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
 import sys
@@ -26,7 +31,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_relight.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_flarestage.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -34,11 +39,18 @@ GRID = bool(P2.get("split_tone_grid", False))
 RELIGHT = bool(P2.get("split_relight", False))
 EXPOSURE = bool(P2.get("split_exposure_stats", False))
 LOWFREQ = float(P2.get("lowfreq_mse_weight", 0.0))
+GATE = bool(P2.get("split_tone_gate", False))
+CHROMA = bool(P2.get("split_chroma_detail", False))
+PAIRS = float(CONFIG["data"].get("flare_pairs_fraction", 0.0))
+FLARE = bool(P2.get("split_flare_layer", False))
+STAGE = CONFIG.get("flare") if FLARE and P2.get("split_flare_pretrained", False) else None
+DY = 40 if FLARE else 0                  # room above phase 2 for the flare layer on the input line
+BAND = 190 if STAGE else 0               # band 4: the flare stage
 # A typical draw (context 40% of the tokens; median 42%, p10-p90 33-51% over 400 draws) whose four
 # target blocks barely overlap (6%; median 32%), so each block can be seen.
 MASK_SEED = 382
 
-W, H = 1520, 790
+W, H = 1520, 790 + DY + BAND
 FONT = "Segoe UI, Roboto, 'Noto Sans', Helvetica, Arial, sans-serif"
 C = {  # fill, stroke
     'data':   ('#F5F5F5', '#616161'),
@@ -50,6 +62,7 @@ C = {  # fill, stroke
     'edge':   ('#E8F5E9', '#2E7D32'),
     'out':    ('#E0F2F1', '#00897B'),
     'loss':   ('#FCE4EC', '#D81B60'),
+    'flare':  ('#FFEBEE', '#C62828'),
 }
 el = []
 
@@ -107,12 +120,15 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 
 # ---------------- header
 text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA (backbone ViT trên hệ số wavelet) · phase 2 khôi phục'
-     f'{" với bản đồ stop + lưới song phương" if RELIGHT else " với tầng tone lưới song phương" if GRID else ""}',
+     f'{" với nhánh khử lóe + " if FLARE else " với "}'
+     f'{"bản đồ stop + lưới song phương" if RELIGHT else "tầng tone lưới song phương" if GRID else "nhánh ánh sáng"}'
+     f'{" · ④ giai đoạn lóe" if STAGE else ""}',
      size=16, weight='bold', color='#D81B60', anchor='start')
 text(20, 48, 'MỘT ViT chung cho ảnh và IMU (attention giữa hai loại token là fusion) · ngữ cảnh NHIỄU, teacher EMA SẠCH'
      ' · khôi phục đọc ĐẦU RA CONTEXT ENCODER (đóng băng, mọi token nhiễu) · teacher + predictor bỏ sau phase 1',
      size=12, color='#AD1457', anchor='start')
 
+el.append(f'<g transform="translate(0,{DY})">')
 # ---------------- regions
 region(190, 150, 490, 320, 'bb', '① Context encoder — học ở phase 1, đóng băng ở phase 2')
 region(842, 88, 663, 432, 'edge', '③ Phase 2 — khôi phục (backbone đóng băng)', right=RELIGHT)   # ảnh nhiễu rơi ở x 1113
@@ -120,7 +136,9 @@ OY = 60                                                   # phase 1 sits below p
 region(190, 505 + OY, 940, 200, 'p1', '② Phase 1 — I-JEPA')
 
 # ---------------- inputs and backbone
-img_in = node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu, tối theo vùng'])
+img_in = (node(20, 192, 150, 96, 'data', 'Ảnh vào', ['3 × 256 × 256', 'mờ, tối, hạt', f'+ {PAIRS:g} batch'.replace('.', ','),
+                                                       'là ảnh lóe thật'])
+          if PAIRS else node(20, 200, 150, 80, 'data', 'Ảnh mờ + tối', ['3 × 256 × 256', 'nhiễu, tối theo vùng']))
 imu_in = node(20, 365, 150, 70, 'data', 'IMU nhiễu', ['6 × 128'])
 qwt = node(210, 205, 135, 70, 'tf', 'QWT Hilbert', ['kênh sáng Y', '16 × 128 × 128'])
 haar = node(210, 365, 135, 70, 'tf', 'Haar', ['12 × 64'])
@@ -153,7 +171,11 @@ el.append('<rect x="856" y="116" width="636" height="110" rx="10" fill="#FFFFFF"
 if RELIGHT:
     cells, bins, size = P2['split_tone_grid_size'], P2['split_tone_grid_bins'], P2['split_relight_size']
     text(868, 136, 'TẦNG TONE', size=14, weight='bold', color='#EF6C00', anchor='start')   # ảnh nhiễu rơi vào x 1113
-    badge(1236, 123, 'mới · p32: bản đồ stop')
+    if GATE:
+        text(1132, 137, 'cổng g/ảnh: J = vào + g·(tone − vào)', size=12, weight='bold', color='#EF6C00',
+             anchor='start')
+    else:
+        badge(1236, 123, 'mới · p32: bản đồ stop')
     t1 = node(866, 146, 165, 68, 'color', 'Bản đồ stop S', [f'U-Net {size}² · ảnh + ZI',
                                                            '+ thống kê phơi sáng' if EXPOSURE else ''], title_size=14)
     t2 = node(1046, 146, 135, 68, 'color', 'Làm sáng lại', ['ảnh · 2^(−S)', 'ánh sáng tuyến tính'], title_size=14)
@@ -182,9 +204,20 @@ else:
 for left, right in ((t1, t2), (t2, t3), (t3, t4)):
     arrow([mid_right(left), mid_left(right)], color='#EF6C00', width=2)
 # The noisy frame: into the coefficient net, the guide and the affine.
-line([(95, 200), (95, 76), (1113 if RELIGHT else 1418, 76)], '#2E7D32', width=3)
-text(470, 68, 'ảnh nhiễu RGB 256² — chỉ đi qua tầng tone (đường duy nhất mang MÀU)', size=13, color='#2E7D32',
-     style='font-style="italic"')
+line([(95, 192 if PAIRS else 200), (95, 76), (1113 if RELIGHT else 1418, 76)], '#2E7D32', width=3)
+if FLARE:
+    widths = '·'.join(str(w) for w in P2['split_flare_widths'])
+    fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}] · {P2["split_flare_blocks"]} khối',
+                                                            'ra: vào − lớp lóe (RGB)',
+                                                            'đọc ZI' if P2.get('split_flare_latent', True)
+                                                            else 'không đọc ZI'], title_size=14)
+    badge(566, 122, 'train riêng ở ④ · đóng băng' if STAGE else 'mới · p41: loss lớp lóe riêng', color='#C62828')
+    text(330, 68, 'ảnh nhiễu RGB 256²', size=13, color='#2E7D32', style='font-style="italic"')
+    text(846, 68, 'ảnh đã bỏ lóe → tầng tone (đường duy nhất mang MÀU)', size=12, color='#2E7D32', anchor='start',
+         style='font-style="italic"')
+else:
+    text(470, 68, 'ảnh nhiễu RGB 256² — chỉ đi qua tầng tone (đường duy nhất mang MÀU)', size=13, color='#2E7D32',
+         style='font-style="italic"')
 arrow([(850, 76), (850, 170), (866, 170)], color='#2E7D32', width=2.4)
 if RELIGHT:                                              # the grid reads the relit frame
     arrow([(1113, 76), (1113, 146)], color='#2E7D32', width=2.4)
@@ -221,7 +254,8 @@ def unet_block(x, yc, kind, title):
 
 
 colb = node(FX, 250, 232, 60, 'color', 'Nhánh MÀU · ResNet 128²',
-            ['tone chung (+ phân vị) → từng vùng' if EXPOSURE else 'tone/màu cả ảnh → từng vùng'], title_size=14)
+            ['tone chung (+ phân vị) → từng vùng' if EXPOSURE else 'tone/màu cả ảnh → từng vùng']
+            + (['+ chi tiết màu 256² (p34)'] if CHROMA else []), title_size=14)
 edgb = unet_block(FX, EDGE_Y, 'edge', 'Nhánh ĐƯỜNG NÉT (Y của J) · NAFNet + 4 WF')
 for x in (FX + 4, FX + 198):
     el.append(f'<rect x="{x}" y="{EDGE_Y - 48}" width="30" height="15" rx="4" fill="#FCE4EC" stroke="#D81B60" '
@@ -314,7 +348,9 @@ text(GX + 16 * CELL + 10, GY + 54, 'đoạn trên 8 token', size=11, color='#546
 terms = ['ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)', 'màu: L1 Cb/Cr + thống kê màu từng ảnh',
          'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',
          'tone: L1 giữa J và ảnh sạch ở 32²' if GRID or P2.get('split_light_branch', False) else '',
-         'stop: L1 giữa S và stop thật của bước nhiễu' if RELIGHT else '']
+         'stop: L1 giữa S và stop thật của bước nhiễu' if RELIGHT else '',
+         'cổng tone: BCE với nhãn "ánh sáng bị đổi"' if GATE else '',
+         'lóe: L1 lớp lóe với (ảnh lóe − ảnh sạch)' if FLARE and float(P2.get('split_flare_weight', 0)) > 0 else '']
 if LOWFREQ:
     terms.append(f'độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ','))
 terms.append('IMU: L1 · chi tiết Haar · rung · rung thừa · gia số')
@@ -327,9 +363,46 @@ arrow([(1325, 562), (1325, 520)], color='#D81B60', dash='6 4', width=2)
 text(1333, 538, 'train decoder', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 text(1333, 553, '25% cuối thêm backbone', size=12, color='#D81B60', anchor='start', style='font-style="italic"')
 
+# ---------------- band 4: the flare stage (p42), before phase 2
+if STAGE:
+    BY = 800
+    region(20, BY, 1485, 170, 'flare', '④ Giai đoạn lóe — train-flare, chạy SAU phase 1 và TRƯỚC phase 2: chỉ train nhánh '
+           'khử lóe, rồi phase 2 nạp và đóng băng nó')
+    lens = STAGE['lens']
+    kinds = STAGE['kinds']
+    optics = round(100 * float(lens['lens_optics_probability']))
+    real = round(100 * float(lens['lens_flare_real_fraction']))
+    s1 = node(32, BY + 36, 258, 50, 'flare', 'Lớp lóe Flare7K++',
+              [f'{real}% chụp thật Flare-R · quang học {optics}%'], title_size=13)
+    pair_bg = round(100 * float(STAGE['background_pair_fraction']))
+    s2 = node(32, BY + 92, 258, 50, 'data', 'Ảnh nền sạch',
+              [f'TartanAir {100 - pair_bg}% · gt FlareImage {pair_bg}%'], title_size=13)
+    s3 = node(310, BY + 40, 260, 96, 'flare', 'Ghép (ánh sáng tuyến tính)',
+              ['vào = nền + lóe', 'đích = nền + nguồn sáng (giữ đèn)', 'mờ: cả hai · hạt: chỉ ảnh vào',
+               'mỗi mẫu một lần rút MỚI'], title_size=14)
+    share = lambda k: f'{round(100 * float(kinds[k]) / sum(float(v) for v in kinds.values()))}%'
+    widths = '·'.join(str(w) for w in STAGE['widths'])
+    s4 = node(615, BY + 40, 250, 96, 'flare', 'NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}]', f'{STAGE["blocks"]} khối · không đọc ZI',
+                                                              '→ lớp lóe đoán'], title_size=15)
+    s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe',
+              ['đích: vào (trước hạt) − đích', f'{STAGE["max_successful_updates"]:,} bước × {STAGE["batch_size"]}'.replace(',', ' '),
+               f'AdamW {STAGE["learning_rate"]:.0e} · fp16 · 1 GPU'.replace('e-0', 'e-')], title_size=15)
+    s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation (chưa thấy)',
+              ['lóe ghép valid: % lóe còn lại', 'cặp FlareImage valid (ảnh thật):', 'PSNR vùng lóe · ngoài lóe',
+               'mỗi 1 000 bước'], title_size=14)
+    arrow([mid_right(s1), (300, BY + 61), (300, BY + 75), (310, BY + 75)], color='#C62828')
+    arrow([mid_right(s2), (300, BY + 117), (300, BY + 101), (310, BY + 101)], color='#C62828')
+    arrow([mid_right(s3), mid_left(s4)], color='#C62828')
+    arrow([mid_right(s4), mid_left(s5)], color='#C62828')
+    arrow([mid_right(s5), mid_left(s6)], color='#90A4AE', dash='5 4')
+    text(760, BY + 160, f'mẫu: {share("composite")} lóe ghép · {share("pair")} cặp FlareImage thật · '
+         f'{share("plain")} ảnh TartanAir không lóe (lớp lóe đích = 0, để yên ảnh không lóe)', size=12,
+         color='#C62828', style='font-style="italic"')
+el.append('</g>')
+
 markers = ''.join(
     f'<marker id="ah-{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825', '#90A4AE', '#1E88E5', '#8E24AA', '#D81B60'))
+    f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in ('#2E7D32', '#EF6C00', '#F9A825', '#90A4AE', '#1E88E5', '#8E24AA', '#D81B60', '#C62828'))
 svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" font-family="{FONT}">'
        f'<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
        f'<path d="M0,0 L10,5 L0,10 z" fill="#455A64"/></marker>{markers}</defs>'
