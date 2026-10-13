@@ -1,0 +1,49 @@
+# p39_lensflare: p38_expnorm + LOE ONG KINH tren anh TartanAir (qjepa/corruptions/lens_flare.py). Train lai ca hai phase.
+#
+# Nguoi dung (13/10/2026), sau p38: "cac tia loa sang van chua duoc xoa sach, anh van chua net"; roi "ap dung loe va
+# loi quang hoc ong kinh cho cac anh shard0 va shard1, anh tu FlareImage san co loe nen k can chinh".
+# Vi sao: o p38 chi FlareImage co loe -- 2/8 anh moi update, ~840 cap co dinh (~4000 luot ca run), anh TartanAir khong
+# co loe nao (halo_probability 0) va validation khong do loe. Flare7K++ train 600k luot, moi luot mot lop loe moi.
+#
+# Moi anh TartanAir (che do full / blur_low_light, khong phai anh sach, khong phai cap FlareImage) co lens_flare_probability
+# co loe:
+#  1. mot lop loe tan xa cua Flare7K++ (Flare7K tong hop / Flare-R chup that, moi nguon mot nua), bien doi nhu loader
+#     Flare7K++ (gamma, xoay, ti le, truot, dich, lat, mo lop loe, lech DC, do sang x0,8-3), CONG tren anh sang tuyen
+#     tinh. ANH DICH = anh sach + NGUON SANG cua lop do: model xoa loe ma giu den;
+#  2. lens_optics_probability so anh do co them loi quang hoc dung lai (tools/lens_flare_demo.py) quanh CUNG nguon:
+#     choi che, quang, bong ma tren truc nguon-tam anh, vanh halo, bui kinh.
+# Valid/test dung lop loe cua khoi khac (10% moi ben): validation trong luc train gio do ca loe (dong "loe").
+# Anh co loe bo cac buoc MOI TRUONG (lens_flare_clear_probability 1, nhu HALO p33 va FlareImage p36: nguoi dung
+# 09/10/2026 "anh da co san nhieu loe roi, nen nhieu giam"); mo may anh va hat giu nguyen.
+# FlareImage giu nhu p36-p38 (1/4 moi batch, khong them loe).
+#
+# data.lens_flare_root la duong dan (ngoai hash): notebook tu do thu muc co Flare7K/ va Flare-R/ trong Input.
+# Doi corruption -> doi hash CA HAI phase: train lai phase 1 va phase 2 (notebook: SHARDS = [0, 1], gan khoidb/flare7k).
+extends: kaggle_expnorm.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p39_lensflare
+
+data:
+  lens_flare_root: /kaggle/input/datasets/khoidb/flare7k
+
+corruption:
+  image:
+    lens_flare_probability: 0.4
+    lens_flare_clear_probability: 1.0
+    lens_flare_real_fraction: 0.5
+    lens_flare_holdout_fraction: 0.1
+    lens_flare_gain: [0.8, 3.0]
+    lens_flare_gamma: [1.8, 2.2]
+    lens_flare_scale: [0.8, 1.5]
+    lens_flare_shear_deg: 20.0
+    lens_flare_translate: 0.2
+    lens_flare_blur_sigma_px: [0.05, 1.5]
+    lens_flare_dc_offset: 0.02
+    lens_optics_probability: 0.7
+    lens_optics_energy: [0.05, 0.5]
+    lens_ghost_count: [2, 8]
+    lens_ghost_strength: [0.001, 0.006]
+    lens_veil: [0.005, 0.04]
+    lens_bloom: [0.005, 0.04]
+    lens_dirt: [0.0, 0.2]

@@ -267,6 +267,10 @@ class PairedCameraImuDataset(Dataset):
                 source_image, **corrupt)
         else:
             noisy_image, image_parameters = self.image_corruptor(source_image, **corrupt)
+        # A lens flare (corruption.image.lens_flare_*) keeps its light source in the target; otherwise the same frame.
+        target = getattr(self.image_corruptor, "target", None)
+        if target is not None:
+            clean_image = target(clean_image, image_parameters)
         noisy_imu, imu_parameters = self.imu_corruptor.window(
             imu_all,
             imu_times_all,

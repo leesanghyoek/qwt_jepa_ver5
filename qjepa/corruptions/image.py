@@ -9,6 +9,7 @@ time segment while random sensor noise remains frame-specific.
 from __future__ import annotations
 
 import io
+import json
 import math
 from dataclasses import asdict, dataclass
 
@@ -17,8 +18,9 @@ from PIL import Image
 from scipy import ndimage
 
 from .halo import HALO_EFFECTS, HaloFlareBank, apply_halo, draw_halo_parameters
+from .lens_flare import LensFlareBank, draw_lens_parameters, lens_flare_layers
 from .light import (apply_light, draw_fog_parameters, draw_illumination_parameters, draw_light_parameters,
-                    illumination_field, resize_channels)
+                    illumination_field, linear_to_srgb, resize_channels, srgb_to_linear)
 from .motion import imu_blur_kernel
 from .rng import generator
 
@@ -153,6 +155,54 @@ class LowLightImageCorruptionConfig:
     # environment -- no low-light stage, uneven light, lamps nor fog, like env_clear -- while the camera blur
     # and the sensor noise stay as drawn. Frames without the flare are untouched. Last draw of "image_halo".
     halo_clear_probability: float = 0.0
+    # Lens flare on TartanAir frames (lens_flare.py, p39): a Flare7K++ scattering flare (its light source kept in the
+    # TARGET) plus rebuilt lens optics -- veiling glare, bloom, ghosts on the source-centre axis, halo ring, dirt --
+    # added in linear light where HALO goes (after the environment, before the optics). HALO_MODES, env_clear frames
+    # too; never on a FlareImage pair (a real flared photo) nor a clean frame. Own stream ("image_lens"); at 0 nothing
+    # is drawn and a config without these keys renders as before. The layers live in data.lens_flare_root (a path).
+    lens_flare_probability: float = 0.0
+    # This fraction of the flared frames (mode "full") skips the environment, as halo_clear_probability does.
+    lens_flare_clear_probability: float = 0.0
+    lens_flare_real_fraction: float = 0.5                # Flare-R (real captures) vs Flare7K (synthetic)
+    lens_flare_holdout_fraction: float = 0.1             # of each source, blocks of 10, for valid and for test each
+    lens_flare_gain: tuple[float, float] = (0.8, 3.0)    # uniform, Flare7K++ ColorJitter brightness (0.8, 3)
+    lens_flare_gamma: tuple[float, float] = (1.8, 2.2)   # the layer's 8-bit values ^ gamma = linear light
+    lens_flare_scale: tuple[float, float] = (0.8, 1.5)
+    lens_flare_shear_deg: float = 20.0
+    lens_flare_translate: float = 0.2                    # of the flare image's side (Flare7K++: 300 / 1440)
+    lens_flare_blur_sigma_px: tuple[float, float] = (0.05, 1.5)   # frame px (Flare7K++: 0.1-3 on its 512 crop)
+    lens_flare_dc_offset: float = 0.02
+    # Of the flared frames, the fraction that also gets the rebuilt lens optics (tools/lens_flare_demo.py).
+    lens_optics_probability: float = 0.0
+    lens_optics_energy: tuple[float, float] = (0.05, 0.5)        # log-uniform, source energy / frame area (white = 1)
+    lens_ghost_count: tuple[int, int] = (2, 8)
+    lens_ghost_strength: tuple[float, float] = (0.001, 0.006)    # log-uniform reflectance of one ghost
+    lens_veil: tuple[float, float] = (0.005, 0.04)               # of the energy, as veiling glare
+    lens_bloom: tuple[float, float] = (0.005, 0.04)              # of the energy, as bloom round the source
+    lens_dirt: tuple[float, float] = (0.0, 0.2)                  # of the energy, scattered by dust on the front glass
+
+    def _validate_lens(self) -> None:
+        for name in ("lens_flare_probability", "lens_flare_clear_probability", "lens_flare_real_fraction",
+                     "lens_optics_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be in [0,1]")
+        if not 0 < self.lens_flare_holdout_fraction <= 0.4:
+            raise ValueError("lens_flare_holdout_fraction must be in (0, 0.4]: valid and test each keep that much")
+        for name, low_limit, strict in (("lens_flare_gain", 0.0, True), ("lens_flare_gamma", 0.0, True),
+                                        ("lens_flare_scale", 0.0, True), ("lens_flare_blur_sigma_px", 0.0, False),
+                                        ("lens_optics_energy", 0.0, True), ("lens_ghost_count", 0.0, False),
+                                        ("lens_ghost_strength", 0.0, True), ("lens_veil", 0.0, False),
+                                        ("lens_bloom", 0.0, False), ("lens_dirt", 0.0, False)):
+            value = getattr(self, name)
+            if (len(value) != 2 or not value[0] <= value[1] or value[0] < low_limit
+                    or (strict and value[0] <= low_limit)):
+                raise ValueError(f"{name} must be [low, high] with {'0 <' if strict else '0 <='} low <= high")
+        if self.lens_ghost_count[1] > 12:
+            raise ValueError("lens_ghost_count must stay at most 12")
+        if not 0 <= self.lens_flare_shear_deg < 45 or not 0 <= self.lens_flare_translate <= 0.5 \
+                or not 0 <= self.lens_flare_dc_offset <= 0.1:
+            raise ValueError("lens_flare_shear_deg must be in [0, 45), lens_flare_translate in [0, 0.5] and "
+                             "lens_flare_dc_offset in [0, 0.1]")
 
     def _validate_halo(self) -> None:
         for name in ("halo_probability", "halo_clear_probability"):
@@ -246,6 +296,7 @@ class LowLightImageCorruptionConfig:
             raise ValueError("motion_path_samples must be at least 3")
         self._validate_light()
         self._validate_halo()
+        self._validate_lens()
 
 
 def _motion_kernel(length: int, angle_radians: float) -> np.ndarray:
@@ -324,7 +375,7 @@ def frame_kind(params: dict[str, object]) -> str:
         return "flare"
     if params.get("clean"):
         return "plain"
-    if params.get("halo"):
+    if params.get("halo") or params.get("lens_flare"):
         return "flare"
     relit = active_stages(params)[1] or any(bool(params.get(key)) for key in ("illumination", "light", "fog"))
     return "relit" if relit else "plain"
@@ -397,7 +448,7 @@ def brightness_stops(params: dict[str, object], height: int, width: int) -> np.n
 
 class LowLightImageCorruptor:
     def __init__(self, config: LowLightImageCorruptionConfig | None = None, master_seed: int = 73128,
-                 halo_bank: HaloFlareBank | None = None):
+                 halo_bank: HaloFlareBank | None = None, lens_bank: LensFlareBank | None = None):
         self.config = config or LowLightImageCorruptionConfig()
         self.config.validate()
         self.master_seed = master_seed
@@ -405,6 +456,12 @@ class LowLightImageCorruptor:
             raise ValueError("corruption.image.halo_probability > 0 needs HALO's flare layers: set data.halo_root "
                              "(config.build_corruptors builds the bank from it)")
         self.halo_bank = halo_bank
+        if self.config.lens_flare_probability > 0 and lens_bank is None:
+            raise ValueError("corruption.image.lens_flare_probability > 0 needs Flare7K++'s layers: set "
+                             "data.lens_flare_root (config.build_corruptors builds the bank from it)")
+        self.lens_bank = lens_bank
+        # The last frame's lens layers: target() reads the light source _render just made without redoing it.
+        self._lens_cache: tuple[str, tuple[np.ndarray, np.ndarray]] | None = None
 
     def _parameters(
         self, split: str, realization: int, trajectory: str, timestamp: float, mode: str,
@@ -506,6 +563,22 @@ class LowLightImageCorruptor:
                     for key in ("light", "illumination", "fog"):
                         if key in parameters:
                             parameters[key], parameters[f"{key}_params"] = False, None
+        if cfg.lens_flare_probability > 0:
+            # The lens, not the environment: env_clear frames keep it; a clean frame or a real flared photo has none.
+            lens_rng = generator(self.master_seed, "image_lens", split, realization, trajectory, segment)
+            fire, clear_draw = float(lens_rng.random()), float(lens_rng.random())
+            flare = (not clean and mode in HALO_MODES and flare_pair is None
+                     and fire < cfg.lens_flare_probability)
+            drawn = draw_lens_parameters(lens_rng, cfg, self.lens_bank, split)
+            parameters.update(lens_flare=bool(flare), lens_flare_params=drawn if flare else None)
+            lighter = flare and mode == "full" and clear_draw < cfg.lens_flare_clear_probability
+            parameters["lens_flare_clear"] = bool(lighter)
+            if lighter:
+                # The flare is the frame's light problem: no darkness or other lighting on top of it.
+                parameters.update(low_light=False)
+                for key in ("light", "illumination", "fog"):
+                    if key in parameters:
+                        parameters[key], parameters[f"{key}_params"] = False, None
         if flare_pair is not None:
             # A FlareImage pair (data.flare_pairs_*): the input is a real photo that already holds its flare. With
             # "clear" it skips the environment, as a HALO-flared frame does with halo_clear_probability; camera blur
@@ -610,6 +683,10 @@ class LowLightImageCorruptor:
         if params.get("halo"):
             image = apply_halo(image, self.halo_bank, params["halo_params"])
             hdr = True
+        if params.get("lens_flare"):
+            flare, _ = self._lens_layers(params["lens_flare_params"], *image.shape[:2])
+            image = linear_to_srgb(srgb_to_linear(image) + flare).astype(np.float64)
+            hdr = True
 
         if optical and params["defocus"]:
             image = ndimage.gaussian_filter(
@@ -672,6 +749,21 @@ class LowLightImageCorruptor:
         without_grain = self._readout(before_grain, params, sensor_noise) if sensor_noise else noisy.copy()
         return noisy, without_grain, params
 
+    def _lens_layers(self, drawn: dict[str, object], height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+        key = json.dumps([drawn, height, width], sort_keys=True)
+        if self._lens_cache is None or self._lens_cache[0] != key:
+            self._lens_cache = (key, lens_flare_layers(self.lens_bank, drawn, height, width))
+        return self._lens_cache[1]
+
+    def target(self, image_clean: np.ndarray, params: dict[str, object]) -> np.ndarray:
+        """The frame the model should restore to: ``image_clean`` itself, but with a lens flare the clean frame plus the
+        flare's light source (linear light, clipped like any 8-bit capture) -- the flare goes, the lamp stays."""
+        if not params.get("lens_flare"):
+            return image_clean
+        _, light = self._lens_layers(params["lens_flare_params"], *image_clean.shape[:2])
+        lit = linear_to_srgb(srgb_to_linear(image_clean) + light)
+        return np.clip(lit, 0.0, 1.0).astype(np.float32)
+
     @staticmethod
     def _readout(image: np.ndarray, params: dict[str, object], sensor_noise: bool) -> np.ndarray:
         """Clip, then the sensor's quantization and JPEG when the sensor stage ran."""
@@ -687,5 +779,7 @@ class LowLightImageCorruptor:
         metadata = {"type": type(self).__name__, "master_seed": self.master_seed, "config": asdict(self.config)}
         if self.halo_bank is not None:
             metadata["halo"] = self.halo_bank.describe()
+        if self.lens_bank is not None:
+            metadata["lens_flare"] = self.lens_bank.describe()
         return metadata
 

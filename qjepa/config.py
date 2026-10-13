@@ -22,6 +22,7 @@ from .corruptions import (
     TrajectoryImuCorruptor,
 )
 from .corruptions.halo import HaloFlareBank
+from .corruptions.lens_flare import LensFlareBank
 from .corruptions.image import DEGRADATION_FEATURES
 from .data.normalize import ImuNormalizer
 from .transforms import IMAGE_INPUTS, QWT_BACKENDS
@@ -575,6 +576,7 @@ LIGHT_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig)
 ILLUM_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("illum_"))
 FOG_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("fog_"))
 HALO_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("halo_"))
+LENS_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("lens_"))
 # Optional switches inside a group: absent means the old behaviour, so they need not be written out.
 OPTIONAL_KEYS = ("illum_highlight_rolloff", "illum_max_brighten_stops")
 
@@ -590,7 +592,8 @@ def _validate_light(config: dict[str, Any]) -> None:
     except TypeError as error:
         raise ValueError(f"corruption.image: {error}") from error
     for switch, keys in (("light_probability", LIGHT_KEYS), ("illum_probability", ILLUM_KEYS),
-                         ("fog_probability", FOG_KEYS), ("halo_probability", HALO_KEYS)):
+                         ("fog_probability", FOG_KEYS), ("halo_probability", HALO_KEYS),
+                         ("lens_flare_probability", LENS_KEYS)):
         if float(image.get(switch, 0.0)) > 0:
             missing = [key for key in keys if key not in image and key not in OPTIONAL_KEYS]
             if missing:
@@ -601,6 +604,11 @@ def _validate_light(config: dict[str, Any]) -> None:
         if not isinstance(root, str) or not root:
             raise ValueError("corruption.image.halo_probability > 0 needs data.halo_root: the folder holding "
                              "halo_index.csv (Kaggle dataset halo-reflective-1280)")
+    if float(image.get("lens_flare_probability", 0.0)) > 0:
+        root = config["data"].get("lens_flare_root")
+        if not isinstance(root, str) or not root:
+            raise ValueError("corruption.image.lens_flare_probability > 0 needs data.lens_flare_root: the folder holding "
+                             "Flare7K/ and Flare-R/ (Kaggle dataset khoidb/flare7k)")
 
 
 def _validate_source_size(config: dict[str, Any]) -> None:
@@ -1091,7 +1099,11 @@ def build_corruptors(config: dict[str, Any]):
     if image_cfg.halo_probability > 0:
         halo = HaloFlareBank(config["data"]["halo_root"], revision=image_cfg.halo_revision,
                              effects=image_cfg.halo_effects, holdout_fraction=image_cfg.halo_holdout_fraction)
-    return LowLightImageCorruptor(image_cfg, seed, halo_bank=halo), TrajectoryImuCorruptor(imu_cfg, seed)
+    lens = None
+    if image_cfg.lens_flare_probability > 0:
+        lens = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=image_cfg.lens_flare_holdout_fraction)
+    return (LowLightImageCorruptor(image_cfg, seed, halo_bank=halo, lens_bank=lens),
+            TrajectoryImuCorruptor(imu_cfg, seed))
 
 
 def serializable_config(config: dict[str, Any]) -> dict[str, Any]:

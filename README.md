@@ -12,6 +12,39 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p39_lensflare — lóe ống kính trên ảnh TartanAir** (config `configs/kaggle_lensflare.yaml` → OUT `outputs/p39_lensflare`).
+Bằng p38 cộng các khoá `corruption.image.lens_*` và `data.lens_flare_root`. Đổi nhiễu nên **train lại cả hai phase**.
+- **Yêu cầu** (người dùng, 13/10/2026, sau p38): "các tia lóe sáng vẫn chưa được xoá sạch"; rồi "áp dụng lóe và lỗi quang học
+  ống kính cho các ảnh shard0 và shard1, ảnh từ FlareImage sẵn có lóe nên k cần chỉnh".
+- **Vì sao.** Ở p38 chỉ FlareImage có lóe: 2/8 ảnh mỗi update, ~840 cặp cố định, khoảng 4 000 lượt cả run. Ảnh TartanAir
+  không có lóe nào (`halo_probability` 0), và validation không đo lóe. Flare7K++ train 600 000 lượt, mỗi lượt ghép một lớp
+  lóe mới. Latent I-JEPA cố ý bỏ qua lóe (đoán latent của ảnh sạch), nên decoder phải tự học tìm lóe trên ảnh vào.
+- **Làm gì** (`qjepa/corruptions/lens_flare.py`). `lens_flare_probability` (0,4) ảnh TartanAir ở chế độ `full` /
+  `blur_low_light` có lóe. Ảnh sạch và cặp FlareImage không bao giờ có.
+  1. **Lớp lóe tán xạ Flare7K++** (Kaggle `khoidb/flare7k`: Flare7K 5 000 tổng hợp, Flare-R 962 chụp thật, mỗi nguồn một
+     nửa), biến đổi như loader Flare7K++: gamma 1,8–2,2, `remove_background`, xoay 0–360°, tỉ lệ 0,8–1,5, trượt ±20°, dịch,
+     lật, làm mờ lớp lóe, lệch DC ±0,02, độ sáng ×0,8–3. Khung 256 thấy cùng phần ảnh lóe như ô 512 của Flare7K++.
+     Cộng trên ánh sáng tuyến tính. **Ảnh đích = ảnh sạch + nguồn sáng** của lớp đó: model học xoá lóe mà giữ đèn.
+  2. **Lỗi quang học ống kính** (`lens_optics_probability` 0,7 số ảnh có lóe, dựng lại theo `tools/lens_flare_demo.py`) quanh
+     cùng nguồn sáng: chói che, quầng, 2–8 bóng ma hình lá khẩu trên đường nguồn–tâm ảnh (lệch màu do tán sắc), vành halo,
+     bụi và vết lau trên kính. Nguồn ngoài khung vẫn gây bóng ma và chói.
+  - Ảnh có lóe bỏ các bước môi trường (`lens_flare_clear_probability` 1, như HALO p33 và FlareImage p36); mờ máy ảnh và hạt
+    giữ nguyên. Valid/test dùng lớp lóe của khối 10 số thứ tự khác: dòng validation `loe` giờ đo được lóe.
+- **Đo trên máy** (không train; 6 lớp Flare-R và 10 lớp Flare7K tải từ `khoidb/flare7k`, 300 lần bốc trên ảnh TartanAir local):
+  PSNR ảnh chỉ có lớp Flare7K++ so với đích: Flare7K trung vị 21,6 dB (10% dưới 14,3), Flare-R 16,7 dB (10% dưới 8,0;
+  lóe chụp thật to và sáng). Lỗi quang học riêng: trung vị 34 dB. Dựng lớp lóe mất ~16 ms/ảnh, ~38 ms khi có lỗi quang học
+  (CPU; chủ yếu là giải mã PNG 640). Với 40% ảnh có lóe, mỗi mẫu tốn thêm ~13 ms.
+- **Notebook.** `SHARDS = [0, 1]` (người dùng bỏ shard 2 để nạp dữ liệu nhanh hơn; split theo môi trường nên trajectory không
+  đổi split). Gắn thêm `khoidb/flare7k`; Cell 4 tự tìm thư mục có `Flare7K/` và `Flare-R/`. Cell 5b vẽ batch train đúng như
+  lúc đưa vào model **ở cả phase 1 (JEPA) và phase 2** (mọi microbatch của một update): đích | vào, đánh dấu ảnh có lóe.
+- Bằng chứng: `tests/test_lens_flare.py`. Config không có khoá nào ra ảnh và tham số y như trước, bật lên không đổi các bước
+  khác; tắt hết bước khác thì ảnh vào đúng bằng srgb(tuyến tính(sạch) + lóe) và ảnh đích đúng bằng ảnh sạch cộng nguồn sáng;
+  lớp không biến đổi là phần giữa ảnh lóe trên ánh sáng tuyến tính của nó, thu nhỏ giữ tổng ánh sáng, dịch và lật đưa nguồn
+  đi đúng chỗ; bóng ma nằm trên trục nguồn–tâm với đúng phần năng lượng; bank ghép lóe với nguồn và chia trọn khối; bước lóe
+  chạy đúng chế độ, đúng tỉ lệ, không chạm ảnh sạch hay cặp FlareImage; dataset của cả hai phase trả ảnh đích có nguồn sáng;
+  hash p38 giữ nguyên (`20820dddfa24` / `da2dde02ceb9`); notebook tìm được dataset; `tools/lens_flare_preview.py` vẽ được.
+  Xem trước: `python tools/lens_flare_preview.py --lens-flare-root <Flare7K++> --images <TartanAir>`.
+
 **Xem ảnh lóe thật của FlareImage qua model** (`tools/flare_image_test.py`, notebook Cell 12d; không đổi run nào).
 - Lấy các cặp của một split FlareImage. Mặc định là `test`: model chưa thấy, chia theo nhóm cảnh. Các cặp rải đều qua bốn
   nguồn, hoặc chọn theo tên.
