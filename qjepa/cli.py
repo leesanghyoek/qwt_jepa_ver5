@@ -160,6 +160,7 @@ def _dataset(
         flare_pairs=flare_pairs,
         flare_pairs_fraction=float(config["data"].get("flare_pairs_fraction", 0.0)) if flare_pairs else 0.0,
         flare_pairs_clear_probability=float(config["data"].get("flare_pairs_clear_probability", 1.0)),
+        flare_pairs_augment=str(config["data"].get("flare_pairs_augment", "none")),
     )
 
 

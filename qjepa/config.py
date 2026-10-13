@@ -627,6 +627,9 @@ def _validate_source_size(config: dict[str, Any]) -> None:
 
 FLARE_PAIR_KEYS = ("flare_pairs_root", "flare_pairs_fraction", "flare_pairs_short_side",
                    "flare_pairs_holdout_fraction", "flare_pairs_clear_probability")
+# Optional (absent: none, as before p40): "dihedral" turns each training pair's crop by k x 90 degrees and maybe flips it.
+FLARE_PAIR_OPTIONAL_KEYS = ("flare_pairs_augment",)
+FLARE_PAIR_AUGMENTS = ("none", "dihedral")
 
 
 def _validate_flare_pairs(config: dict[str, Any]) -> None:
@@ -635,9 +638,15 @@ def _validate_flare_pairs(config: dict[str, Any]) -> None:
     Bat (flare_pairs_fraction > 0) thi PHAI ghi du moi khoa (hash chi doc file config). flare_pairs_root la duong
     dan, nam ngoai hash nhu halo_root."""
     data = config["data"]
-    unknown = sorted(key for key in data if key.startswith("flare_pairs_") and key not in FLARE_PAIR_KEYS)
+    known = FLARE_PAIR_KEYS + FLARE_PAIR_OPTIONAL_KEYS
+    unknown = sorted(key for key in data if key.startswith("flare_pairs_") and key not in known)
     if unknown:
-        raise ValueError(f"data: unknown keys {unknown}; FlareImage keys are {list(FLARE_PAIR_KEYS)}")
+        raise ValueError(f"data: unknown keys {unknown}; FlareImage keys are {list(known)}")
+    augment = data.get("flare_pairs_augment", "none")
+    if augment not in FLARE_PAIR_AUGMENTS:
+        raise ValueError(f"data.flare_pairs_augment must be one of {list(FLARE_PAIR_AUGMENTS)}")
+    if augment == "dihedral" and data["image_size"][0] != data["image_size"][1]:
+        raise ValueError("data.flare_pairs_augment dihedral turns the crop by 90 degrees: data.image_size must be square")
     fraction = data.get("flare_pairs_fraction", 0.0)
     if not _nonnegative_number(fraction) or fraction > 0.5:
         raise ValueError("data.flare_pairs_fraction must be a number in [0, 0.5]")

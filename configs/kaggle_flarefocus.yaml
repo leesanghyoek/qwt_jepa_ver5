@@ -19,3 +19,7 @@ runtime:
 
 data:
   flare_pairs_fraction: 0.5           # p36-p38: 0.25
+  # Nguoi dung (13/10/2026): "ap dung viec xoay va lat anh". Moi cap FlareImage TRAIN: o cat xoay k x 90 do va co the lat
+  # (8 bien the, khong noi suy nen anh dich khong mo di), gt va anh loe cung mot phep. IMU cua cap la muon nen khong
+  # co chuyen dong nao phai giu. Cap valid/test va anh TartanAir khong doi (phase 2 van lat ngang moi anh kem IMU).
+  flare_pairs_augment: dihedral

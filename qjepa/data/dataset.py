@@ -102,6 +102,7 @@ class PairedCameraImuDataset(Dataset):
         flare_pairs: FlarePairBank | None = None,
         flare_pairs_fraction: float = 0.0,
         flare_pairs_clear_probability: float = 1.0,
+        flare_pairs_augment: str = "none",
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -115,6 +116,13 @@ class PairedCameraImuDataset(Dataset):
         self.flare_pairs_split = "train"   # tools/flare_pairs_probe.py reads the held-out pairs instead
         self.flare_pairs_fraction = float(flare_pairs_fraction)
         self.flare_pairs_clear_probability = float(flare_pairs_clear_probability)
+        # data.flare_pairs_augment: "dihedral" turns each TRAINING pair's crop by k x 90 degrees and maybe flips it, gt
+        # and flared photo alike (8 lossless views; the pair's IMU is borrowed, so no motion to keep). "none": as before.
+        if flare_pairs_augment not in ("none", "dihedral"):
+            raise ValueError("flare_pairs_augment must be 'none' or 'dihedral'")
+        if flare_pairs_augment == "dihedral" and image_size[0] != image_size[1]:
+            raise ValueError("flare_pairs_augment dihedral needs a square image_size")
+        self.flare_pairs_augment = flare_pairs_augment
         # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
         self.sensor_reference = sensor_reference
         # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
@@ -230,12 +238,20 @@ class PairedCameraImuDataset(Dataset):
         top = int(rng.integers(0, gt.shape[0] - height + 1))
         left = int(rng.integers(0, gt.shape[1] - width + 1))
         crop = lambda image: np.ascontiguousarray(image[top:top + height, left:left + width], dtype=np.float32) / 255.0
+        gt_crop, flared_crop = crop(gt), crop(flared)
+        info = {"name": pair.name, "source": pair.source, "clear": clear}
+        if self.flare_pairs_augment == "dihedral" and self.flare_pairs_split == "train":
+            # Own stream: the pair, crop, host and clear draws above stay those of a run without the key.
+            view = np.random.default_rng(derive_seed(self.scenario_seed, "flare_pair_augment", self.realization, draw))
+            turns, flip = int(view.integers(4)), bool(view.random() < 0.5)
+            turn = lambda image: np.ascontiguousarray(np.rot90(image, turns)[:, ::-1] if flip else np.rot90(image, turns))
+            gt_crop, flared_crop = turn(gt_crop), turn(flared_crop)
+            info.update(rot90=turns, flip=flip)
         sample_id = f"flareimage/{pair.name}#{self.realization}:{draw}"
         image_mode, imu_mode = self._modes(sample_id)
-        return self._item(host, sample_id, f"flareimage/{pair.source}", crop(gt), crop(flared), image_mode,
+        return self._item(host, sample_id, f"flareimage/{pair.source}", gt_crop, flared_crop, image_mode,
                           imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0,
-                          flare_pair={"name": pair.name, "source": pair.source, "clear": clear},
-                          imu_donor=host.sample_id)
+                          flare_pair=info, imu_donor=host.sample_id)
 
     def _item(self, host: PairedSample, sample_id: str, trajectory_key: str, clean_image: np.ndarray,
               source_image: np.ndarray, image_mode: str, imu_mode: str, *, trajectory: str, timestamp: float,
