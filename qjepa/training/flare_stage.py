@@ -16,7 +16,8 @@ import torch.nn.functional as F
 from ..models.decoders import FlareLayer
 from .schedules import warmup_cosine_lr
 
-FLARE_THRESHOLD = 0.05          # nhu tools/flare_image_test.py: pixel vao lech anh sach hon 0,05 la vung loe
+FLARE_THRESHOLD = 0.05
+NONFINITE_LIMIT = 50            # so batch NaN/inf lien tiep thi train-flare dung han (p42 Kaggle: NaN tu ~2 300 mai mai)          # nhu tools/flare_image_test.py: pixel vao lech anh sach hon 0,05 la vung loe
 
 
 def build_flare_layer(stage: dict[str, Any]) -> FlareLayer:
@@ -57,6 +58,12 @@ class FlareStageTrainer:
         target = batch["flare_target"].to(self.device, non_blocking=True)
         flare = self._forward(image)
         loss = F.l1_loss(flare, target)
+        if not torch.isfinite(loss):
+            # A non-finite batch leaves the weights as they are; train-flare stops after NONFINITE_LIMIT in a row.
+            self.optimizer.zero_grad(set_to_none=True)
+            self.successful_updates += 1
+            return {"loss": float("nan"), "learning_rate": lr, "nonfinite": True,
+                    "successful_updates": self.successful_updates}
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
         norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(stage["gradient_clip_norm"])))
@@ -69,7 +76,7 @@ class FlareStageTrainer:
             size = target.abs().mean(dim=(1, 2, 3))
             kinds = batch["kind"].to(self.device)
             report = {"loss": float(loss), "learning_rate": lr, "gradient_norm": norm, "amp_overflow": overflow,
-                      "successful_updates": self.successful_updates}
+                      "nonfinite": False, "successful_updates": self.successful_updates}
             for index, name in enumerate(("composite", "pair", "plain")):
                 chosen = kinds == index
                 if bool(chosen.any()):

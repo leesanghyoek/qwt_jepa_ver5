@@ -67,7 +67,8 @@ from .training.losses import jepa_fine_loss, jepa_latent_loss
 from .training.ijepa import IJEPATrainer, ijepa_loss
 from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
 from .training.phase2 import Phase2Trainer, latent_predictor_hash
-from .training.flare_stage import FlareStageTrainer, build_flare_layer, validate_flare_stage, validation_text
+from .training.flare_stage import (NONFINITE_LIMIT, FlareStageTrainer, build_flare_layer, validate_flare_stage,
+                                   validation_text)
 
 
 def _config_path(value: str | None) -> Path:
@@ -1238,6 +1239,7 @@ def command_train_flare(args: argparse.Namespace) -> None:
             "flare_l1_plain")
     started, first = time.perf_counter(), trainer.successful_updates
     waited = 0.0
+    nonfinite = 0
     batches = iter(loader)
     while trainer.successful_updates < maximum:
         batch, wait = _next_timed(batches)
@@ -1246,6 +1248,10 @@ def command_train_flare(args: argparse.Namespace) -> None:
         update = trainer.successful_updates
         metrics["data_wait_seconds"] = wait
         log.write(metrics)
+        nonfinite = nonfinite + 1 if metrics["nonfinite"] else 0
+        if nonfinite >= NONFINITE_LIMIT:
+            raise RuntimeError(f"train-flare: {nonfinite} batch lien tiep cho loss NaN/inf (update {update}); "
+                               "checkpoint cuoi con nguyen, xem lai learning rate / du lieu")
         recent.add(metrics, keys)
         if update % 50 == 0 or update == first + 1:
             print(f"flare update={_progress(update, maximum)} loss={metrics['loss']:.5f} {recent.text(keys)} "

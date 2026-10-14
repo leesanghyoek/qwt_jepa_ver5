@@ -1025,7 +1025,13 @@ class FlareLayer(nn.Module):
     def forward(self, latent: torch.Tensor | None, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(image without the flare, the flare layer)."""
         if not self.uses_latent:
-            latent = image.new_zeros(image.shape[0], 1, 1, 1)
+            # p42: always fp32. Under fp16 autocast the layer (no normalisation) overflowed after ~2 300 flare-stage
+            # updates on Kaggle -- every later batch inf/NaN, every step skipped. Phase 2 runs it frozen under fp16 too.
+            with torch.autocast(device_type=image.device.type, enabled=False):
+                image32 = image.float()
+                flare = self.net(image32.new_zeros(image32.shape[0], 1, 1, 1), image32,
+                                 base=torch.zeros_like(image32))
+            return image - flare.to(image.dtype), flare
         flare = self.net(latent, image, base=torch.zeros_like(image))
         return image - flare, flare
 

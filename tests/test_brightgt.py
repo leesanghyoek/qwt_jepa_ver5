@@ -92,7 +92,7 @@ def test_kaggle_brightgt_is_p42_plus_the_key_reusing_p40_phase1_and_p42_flare_st
     assert configuration_hash(p43, "phase1") == configuration_hash(p40, "phase1")
     assert configuration_hash(p43, "flare") == configuration_hash(p42, "flare")
     assert configuration_hash(p43, "phase2") != configuration_hash(p42, "phase2")
-    assert configuration_hash(p42, "phase2").startswith("7c7f4669c574")      # p42 with its 12000-update flare stage
+    assert configuration_hash(p42, "phase2").startswith("e90ef9e5e0f7")      # p42: 12000-update fp32 flare stage
     a, b = (serializable_config(copy.deepcopy(config)) for config in (p42, p43))
     assert b["runtime"].pop("output_dir").endswith("outputs/p43_brightgt")
     a["runtime"].pop("output_dir")

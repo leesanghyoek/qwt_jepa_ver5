@@ -36,7 +36,7 @@ flare:
   warmup_updates: 500
   weight_decay: 1.0e-4
   gradient_clip_norm: 1.0
-  precision: amp_fp16
+  precision: fp32                   # p42 Kaggle 14/10: fp16 tran so tu ~2 300 update (NaN mai mai); nhanh loe luon fp32
   # Ty le ba loai mau: loe ghep Flare7K++ / cap FlareImage that / anh TartanAir khong loe (dich lop loe = 0).
   kinds: {composite: 0.6, pair: 0.2, plain: 0.2}
   background_pair_fraction: 0.3      # nen cua anh ghep: 30% anh gt FlareImage, con lai anh TartanAir sach

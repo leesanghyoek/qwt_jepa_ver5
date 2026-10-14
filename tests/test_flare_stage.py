@@ -47,7 +47,8 @@ def _stage(tmp_path, **change):
     stage = copy.deepcopy(P42["flare"])
     stage.update(widths=[8, 8, 8], blocks=1, batch_size=4, max_successful_updates=4, warmup_updates=1,
                  validation_every_updates=2, validation_composites=6, checkpoint_every_updates=2,
-                 precision="fp32", **change)
+                 precision="fp32")
+    stage.update(change)
     config["flare"] = stage
     validate_config(config)
     return config, manifest, manifest_dir
@@ -243,3 +244,25 @@ def test_bad_settings_fail(change, message):
     change(config)
     with pytest.raises(ValueError, match=message):
         validate_config(config)
+
+
+def test_the_image_only_layer_runs_in_fp32_under_autocast_and_train_flare_stops_on_repeated_nan(tmp_path, monkeypatch):
+    # p42 on Kaggle: under fp16 the layer overflowed after ~2 300 updates and every later batch was NaN.
+    from qjepa.training.flare_stage import build_flare_layer
+    layer = build_flare_layer({"widths": [8, 8, 8], "blocks": 1})
+    image = torch.rand(2, 3, 32, 32)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out, flare = layer(None, image)
+    assert flare.dtype == torch.float32 and out.dtype == image.dtype
+    torch.set_num_threads(1)
+    config, _, manifest_dir = _stage(tmp_path, max_successful_updates=8)
+    path, run = _train_flare(config, tmp_path, "nan")
+    from qjepa import cli
+    from qjepa.training import flare_stage
+    monkeypatch.setattr(cli, "NONFINITE_LIMIT", 3)
+    monkeypatch.setattr(flare_stage.FlareStageTrainer, "_forward",
+                        lambda self, image: torch.full_like(image, float("nan")))
+    with pytest.raises(SystemExit):
+        main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(run)])
+    rows = [json.loads(line) for line in (run / "flare/train.jsonl").read_text().splitlines()]
+    assert [row["nonfinite"] for row in rows if "loss" in row] == [True, True, True]

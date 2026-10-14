@@ -51,7 +51,12 @@ p42 cộng `phase2.target_brighten`. Chỉ đổi phase 2: **dùng lại phase 1
     - 20% **ảnh TartanAir không lóe** qua đúng bước nhiễu của phase 2: lớp lóe đích bằng 0, để nhánh học để yên ảnh không lóe.
   - Mờ máy ảnh (cùng một phép cho ảnh vào và ảnh đích) và hạt (chỉ ảnh vào). Lớp lóe đích = ảnh vào trước hạt − ảnh đích.
   - Loss L1 trên lớp lóe; 12 000 bước × 16 ảnh (người dùng 14/10/2026: 20 000 → 12 000; notebook đổi được bằng
-    `FLARE_UPDATES` ở Cell 1), AdamW 2e-4, fp16, một GPU.
+    `FLARE_UPDATES` ở Cell 1), AdamW 2e-4, **fp32**, một GPU.
+  - **Lần chạy đầu trên Kaggle (14/10/2026) hỏng ở fp16:** loss thành NaN từ khoảng update 2 330 và không bao giờ hết,
+    validation 3 000 và 4 000 cũng NaN. U-Net không có lớp chuẩn hoá, kích hoạt vượt giới hạn fp16, mọi batch sau đó
+    tràn số và bị bỏ bước. Sửa: nhánh lóe không đọc latent luôn chạy fp32 (cả khi phase 2 đóng băng nó dưới fp16),
+    `flare.precision: fp32`; `train-flare` bỏ qua batch NaN/inf và dừng hẳn sau 50 batch liên tiếp như vậy.
+    Trước khi NaN (update 2 000): lóe ghép còn 78%, FlareImage valid vùng lóe 16,20 → 17,19 dB, ngoài lóe 31,85 → 30,45.
   - Validation mỗi 1 000 bước trên lóe ghép valid (lớp lóe valid lên ảnh TartanAir valid) và trên mọi cặp FlareImage valid
     (ảnh thật, ô giữa): PSNR vùng lóe và ngoài vùng lóe, vào → ra.
 - **Phase 2:** nạp `OUT/flare/last.pt` (phải chạy xong, cùng hash `flare`), đóng băng nhánh (ngoài optimizer và DDP; hash nhánh
