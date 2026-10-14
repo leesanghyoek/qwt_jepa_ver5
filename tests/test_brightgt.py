@@ -111,3 +111,25 @@ def test_bad_settings_fail(value, message):
     config["phase2"]["target_brighten"] = value
     with pytest.raises(ValueError, match=message):
         validate_config(config)
+
+
+def test_the_preview_tool_draws_images_and_dataset_frames(tmp_path, capsys):
+    import yaml
+    from PIL import Image
+    from tools.brighten_preview import main as preview
+    folder = tmp_path / "anh"
+    folder.mkdir()
+    rng = np.random.default_rng(1)
+    Image.fromarray((rng.uniform(0, 0.15, (40, 50, 3)) * 255).astype(np.uint8)).save(folder / "toi.png")
+    Image.fromarray((rng.uniform(0.4, 0.9, (40, 50, 3)) * 255).astype(np.uint8)).save(folder / "sang.png")
+    preview(["--images", str(folder), "--output", str(tmp_path / "a.png")])
+    out = capsys.readouterr().out
+    assert (tmp_path / "a.png").stat().st_size > 1000 and "1/2 ảnh được làm sáng" in out
+    config, _, _, manifest_dir = _smoke(tmp_path, phase1_batch=4, phase2_batch=4)
+    config["phase2"]["target_brighten"] = KEY
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(config))
+    preview(["--config", str(path), "--manifest", str(manifest_dir), "--count", "3", "--stats", "8",
+             "--output", str(tmp_path / "b.png")])
+    out = capsys.readouterr().out
+    assert (tmp_path / "b.png").stat().st_size > 1000 and "được làm sáng" in out and "Thống kê " in out
