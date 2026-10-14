@@ -7,7 +7,7 @@ Hai cach:
 Tham so lam sang doc tu phase2.target_brighten cua --config (mac dinh configs/kaggle_brightgt.yaml); --below, --target,
 --max-gain de thu gia tri khac ma khong sua config.
 
-    python3 tools/brighten_preview.py --images anh_cua_toi/ --output brighten.png
+    python3 tools/brighten_preview.py --images anh_cua_toi/ --output brighten.png      # khong can torch
     python3 tools/brighten_preview.py --manifest manifests/kaggle --split train --count 12 --stats 400 --output brighten.png
 """
 
@@ -27,14 +27,27 @@ from PIL import Image  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from qjepa.config import load_config  # noqa: E402
-from qjepa.corruptions.light import LUMA_709, brighten_dark  # noqa: E402
+from qjepa.corruptions.light import LUMA_709, brighten_dark  # noqa: E402  (khong can torch)
 
 SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
+def _yaml(path: Path) -> dict:
+    """Doc config theo chuoi extends ma khong can torch (qjepa.config can torch): chi de lay phase2.target_brighten."""
+    import yaml
+    path = Path(path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    parent = data.pop("extends", None)
+    if parent is None:
+        return data
+    base = _yaml(path.parent / parent)
+    for key, value in data.items():
+        base[key] = {**base.get(key, {}), **value} if isinstance(value, dict) and isinstance(base.get(key), dict) else value
+    return base
+
+
 def settings(args) -> dict:
-    config = load_config(args.config)
+    config = _yaml(args.config)
     chosen = dict(config["phase2"].get("target_brighten") or {"below": 0.30, "target": 0.40, "max_gain": 3.0})
     for key, value in (("below", args.below), ("target", args.target), ("max_gain", args.max_gain)):
         if value is not None:
@@ -94,7 +107,8 @@ def from_images(args, chosen: dict) -> None:
 
 
 def from_dataset(args, chosen: dict) -> None:
-    from qjepa.cli import _dataset, _manifest
+    from qjepa.cli import _dataset, _manifest          # can torch (venv ~/venv-torch hoac Kaggle)
+    from qjepa.config import load_config
     config = load_config(args.config)
     manifest, _ = _manifest(config, args.manifest)
     # Anh dich GOC (target_brighten=False), lam sang o day de ve canh nhau; anh vao nhu phase 2 doc.
@@ -145,7 +159,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.manifest:
         from_dataset(args, chosen)
     else:
-        parser.error("cần --images hoặc --manifest")
+        print("\nCách dùng:\n"
+              "  python3 tools/brighten_preview.py --images <file hoặc thư mục ảnh> [--output brighten.png]\n"
+              "      ảnh bất kỳ trên máy: gốc | làm sáng (không cần torch)\n"
+              "  ~/venv-torch/bin/python tools/brighten_preview.py --manifest manifests/kaggle --split train\n"
+              "      ảnh thật của dataset (trên Kaggle): vào | đích gốc | đích làm sáng + thống kê\n"
+              "  thêm --below 0.25 --target 0.35 --max-gain 2.5 để thử ngưỡng khác")
 
 
 if __name__ == "__main__":
