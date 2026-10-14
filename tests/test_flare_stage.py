@@ -266,3 +266,35 @@ def test_the_image_only_layer_runs_in_fp32_under_autocast_and_train_flare_stops_
         main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(run)])
     rows = [json.loads(line) for line in (run / "flare/train.jsonl").read_text().splitlines()]
     assert [row["nonfinite"] for row in rows if "loss" in row] == [True, True, True]
+
+
+def test_exposure_statistics_survive_nan_and_phase2_refuses_a_broken_flare_layer(tmp_path):
+    # p42 on Kaggle: a NaN frame crashed scatter_add_ in the exposure statistics (device-side assert).
+    from qjepa.cli import _load_flare_stage
+    from qjepa.config import build_decoders
+    from qjepa.models.decoders import exposure_statistics
+    frame = torch.rand(2, 3, 16, 16)
+    broken = frame.clone()
+    broken[0, :, :4, :4] = float("nan")
+    assert torch.equal(exposure_statistics(frame), exposure_statistics(frame.clone()))
+    assert bool(torch.isfinite(exposure_statistics(broken)).all())
+    torch.set_num_threads(1)
+    config, _, manifest_dir = _stage(tmp_path)
+    config["phase2"].update(split_flare_layer=True, split_flare_widths=[8, 8, 8], split_flare_blocks=1,
+                            split_flare_weight=0.0, split_flare_latent=False, split_flare_pretrained=True,
+                            split_flare_freeze=True)
+    path, run = _train_flare(config, tmp_path, "run")
+    main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(run)])
+    stage = load_checkpoint(run / "flare/last.pt")
+    stage["model"] = {key: torch.full_like(value, float("nan")) if value.is_floating_point() else value
+                      for key, value in stage["model"].items()}
+    from qjepa.training.checkpoints import atomic_torch_save
+    from qjepa.models.decoders import FlareLayer
+    layer = FlareLayer(widths=(8, 8, 8), blocks=1, uses_latent=False)
+    layer.load_state_dict(stage["model"])
+    stage["metadata"]["layer_hash"] = state_dict_hash(layer)
+    atomic_torch_save(stage, run / "flare/last.pt")
+    system = type("S", (), {})()
+    system.decoders = build_decoders(config)
+    with pytest.raises(ValueError, match="broken"):
+        _load_flare_stage(config, system, run)

@@ -237,7 +237,9 @@ def exposure_statistics(image: torch.Tensor) -> torch.Tensor:
     falls 0.096 -> 0.044 (README p30_exposure). Measured on the input, never trained through:
     detached and in fp32."""
     with torch.no_grad(), torch.autocast(device_type=image.device.type, enabled=False):
-        x = image.float().clamp(0.0, 1.0)
+        # nan_to_num: a NaN pixel cast to long is a huge negative bin and a device-side assert in scatter_add_
+        # (p42 Kaggle, NaN from a broken flare layer). Finite frames give exactly what they gave before.
+        x = torch.nan_to_num(image.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         y = luminance(x).flatten(1)
         levels = torch.tensor(EXPOSURE_QUANTILES, device=y.device, dtype=y.dtype)
         quantiles = torch.quantile(y, levels, dim=1).transpose(0, 1)

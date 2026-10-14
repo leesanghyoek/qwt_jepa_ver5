@@ -1264,6 +1264,8 @@ def command_train_flare(args: argparse.Namespace) -> None:
             metadata = {"pipeline_version": 3, "phase": "flare_stage", "successful_updates": update,
                         "configuration_hash": configuration_hash(config, "flare"), "manifest_hash": manifest_hash,
                         "layer_hash": state_dict_hash(trainer.model)}
+            if not all(bool(torch.isfinite(value).all()) for value in trainer.model.state_dict().values()):
+                raise RuntimeError(f"train-flare: NaN/inf weights at update {update}; the last good checkpoint stays")
             atomic_torch_save(trainer.payload(metadata, serializable_config(config)), output / "last.pt")
 
 
@@ -1279,9 +1281,16 @@ def _load_flare_stage(config: dict[str, Any], system: RestorationSystem, output:
     if int(metadata.get("successful_updates", 0)) != int(config["flare"]["max_successful_updates"]):
         raise ValueError(f"{path} is an unfinished flare stage ({metadata.get('successful_updates')}/"
                          f"{config['flare']['max_successful_updates']} updates): finish train-flare first")
-    system.decoders.image.flare.load_state_dict(payload["model"], strict=True)
-    if state_dict_hash(system.decoders.image.flare) != metadata.get("layer_hash"):
+    flare = system.decoders.image.flare
+    flare.load_state_dict(payload["model"], strict=True)
+    if state_dict_hash(flare) != metadata.get("layer_hash"):
         raise ValueError(f"{path}: weights do not match their recorded hash")
+    broken = [name for name, value in flare.state_dict().items() if not bool(torch.isfinite(value).all())]
+    with torch.no_grad():
+        probe = flare(None, torch.rand(2, 3, 64, 64, generator=torch.Generator().manual_seed(0)))[1]
+    if broken or not bool(torch.isfinite(probe).all()):
+        raise ValueError(f"{path}: the flare stage's layer is broken (NaN/inf weights {broken[:4]} or outputs); "
+                         "delete OUT/flare and train it again")
     return metadata["layer_hash"]
 
 
