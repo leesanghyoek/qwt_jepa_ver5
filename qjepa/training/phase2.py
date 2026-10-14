@@ -55,6 +55,15 @@ class Phase2Trainer:
         self.config = config
         self.phase = config["phase2"]
         self.device = device
+        # p42 (phase2.split_flare_freeze): the flare stage's layer stays as train-flare left it -- out of the
+        # optimizer and of DDP's gradient sync; checkpoint_payload checks it never moved. Frozen BEFORE DDP is built:
+        # built first, DDP waited for the layer's gradients and died at the second update (p43 on Kaggle).
+        # Absent: every decoder trains.
+        self.frozen_flare_hash = None
+        if self.phase.get("split_flare_freeze", False):
+            flare = self.system.decoders.image.flare
+            flare.requires_grad_(False)
+            self.frozen_flare_hash = state_dict_hash(flare)
         self.forward_model, self.device_ids = parallel_forward(
             RestorationForward(self.system), device, config["runtime"].get("gpu_count", "auto")
         )
@@ -68,13 +77,6 @@ class Phase2Trainer:
         self.parent_checkpoint = parent_checkpoint
         self.manifest_hash = manifest_hash
         self.successful_updates = 0
-        # p42 (phase2.split_flare_freeze): the flare stage's layer stays as train-flare left it -- out of the
-        # optimizer and of DDP's gradient sync; checkpoint_payload checks it never moved. Absent: every decoder trains.
-        self.frozen_flare_hash = None
-        if self.phase.get("split_flare_freeze", False):
-            flare = self.system.decoders.image.flare
-            flare.requires_grad_(False)
-            self.frozen_flare_hash = state_dict_hash(flare)
         self.parameters = [p for p in self.system.decoders.parameters() if p.requires_grad]
         groups = self.parameters
         gate = getattr(self.system.decoders.image, "tone_gate", None)

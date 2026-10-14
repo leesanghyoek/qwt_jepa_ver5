@@ -1178,6 +1178,11 @@ class SplitColorEdgeDecoder(nn.Module):
         standardize = self.exposure_norm                    # None: the heads read the raw statistics
         if self.flare is not None:
             image, parts["image_flare"] = self.flare(latent, image)
+            if not self.flare.uses_latent:
+                # p42+: the flare stage's frozen layer can answer far out of range on frames unlike its training ones;
+                # the frame without its flare is light in [0, 1], and the fp16 stages below overflowed on more (p43:
+                # NaN updates). p41's layer (trained with phase 2) keeps its gradient unclipped.
+                image = image.clamp(0.0, 1.0)
             parts["image_deflared"] = image
         if self.light is not None:
             image = self.light(latent, image, standardize)

@@ -298,3 +298,38 @@ def test_exposure_statistics_survive_nan_and_phase2_refuses_a_broken_flare_layer
     system.decoders = build_decoders(config)
     with pytest.raises(ValueError, match="broken"):
         _load_flare_stage(config, system, run)
+
+
+def test_phase2_with_the_frozen_layer_trains_on_two_processes(tmp_path):
+    # p43 on Kaggle: DDP was built before the layer was frozen, waited for its gradients and died at update 2.
+    torch.set_num_threads(1)
+    config, _, manifest_dir = _stage(tmp_path)
+    config["phase2"].update(split_flare_layer=True, split_flare_widths=[8, 8, 8], split_flare_blocks=1,
+                            split_flare_weight=0.0, split_flare_latent=False, split_flare_pretrained=True,
+                            split_flare_freeze=True, batch_size=4, gradient_accumulation=2, max_successful_updates=3)
+    validate_config(config)
+    path, run = _train_flare(config, tmp_path, "run")
+    common = ["--config", str(path), "--manifest", str(manifest_dir), "--output", str(run)]
+    _run_until_done(["train-phase1", *common], run / "phase1/last.pt")
+    main(["train-flare", *common])
+    stage = load_checkpoint(run / "flare/last.pt")
+    # One process runs all three updates (no memory restarts): the bug showed from the second update of a process.
+    config["runtime"].update(parallel="ddp", gpu_count=2, restart_above_rss_gib=1e6)
+    path.write_text(yaml.safe_dump(serializable_config(config)))
+    _run_until_done(["train-phase2", *common, "--backbone-checkpoint", str(run / "phase1/last.pt")],
+                    run / "phase2/last.pt")
+    final = load_checkpoint(run / "phase2/last.pt")
+    assert final["successful_updates"] == 3
+    assert json.loads((run / "phase2/execution.json").read_text())["backend"] == "ddp"
+    for key, value in stage["model"].items():
+        assert torch.equal(final["system"][f"decoders.image.flare.{key}"], value), key
+
+
+def test_the_frame_without_the_stage_flare_stays_in_range():
+    from qjepa.models.decoders import SplitColorEdgeDecoder
+    decoder = SplitColorEdgeDecoder(8, color_width=4, color_blocks=1, edge_width=4, edge_blocks=1,
+                                    flare={"widths": (8, 8, 8), "blocks": 1, "latent": False})
+    with torch.no_grad():
+        decoder.flare.net.tail.bias.fill_(-5.0)                     # a layer answering far out of range
+        _, parts = decoder(torch.zeros(1, 8, 4, 4), torch.rand(1, 3, 32, 32))
+    assert float(parts["image_deflared"].min()) >= 0.0 and float(parts["image_deflared"].max()) <= 1.0
