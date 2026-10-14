@@ -321,6 +321,10 @@ def test_phase2_with_the_frozen_layer_trains_on_two_processes(tmp_path):
     final = load_checkpoint(run / "phase2/last.pt")
     assert final["successful_updates"] == 3
     assert json.loads((run / "phase2/execution.json").read_text())["backend"] == "ddp"
+    logged = [json.loads(line) for line in (run / "phase2/train.jsonl").read_text().splitlines()]
+    updates = [row for row in logged if "loss_image" in row]
+    assert updates and all(row["nonfinite_restored"] == 0 and row["nonfinite_target"] == 0
+                            and 0 <= row["deflared_absmax"] <= 1 for row in updates)   # NaN diagnostics logged
     for key, value in stage["model"].items():
         assert torch.equal(final["system"][f"decoders.image.flare.{key}"], value), key
 

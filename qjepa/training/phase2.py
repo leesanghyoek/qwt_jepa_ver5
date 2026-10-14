@@ -309,6 +309,13 @@ class Phase2Trainer:
                 with torch.no_grad():
                     parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                         restored["image_coefficients"], visible_coefficients)
+                    if "image_flare" in restored:
+                        # p43 on Kaggle: some updates came out NaN. Which side: the output, the target, or the
+                        # flare layer (its largest answer, and the frame without it)?
+                        parts["nonfinite_restored"] = (~torch.isfinite(restored["image"])).float().mean()
+                        parts["nonfinite_target"] = (~torch.isfinite(batch["image_clean"])).float().mean()
+                        parts["flare_absmax"] = restored["image_flare"].detach().float().abs().amax()
+                        parts["deflared_absmax"] = restored["image_deflared"].detach().float().abs().amax()
                 # The auxiliary heads' own losses: the stop map and the tone gate train on them, the image does not.
                 heads = sum((float(self.phase[weight]) * parts[name] for name, weight in (
                     ("image_stops_l1", "split_relight_weight"), ("image_tone_bce", "split_tone_gate_weight"))
