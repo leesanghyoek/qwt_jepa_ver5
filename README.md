@@ -12,6 +12,24 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p43_brightgt — ảnh đích tối được làm sáng** (config `configs/kaggle_brightgt.yaml` → OUT `outputs/p43_brightgt`). Bằng
+p42 cộng `phase2.target_brighten`. Chỉ đổi phase 2: **dùng lại phase 1 của p40 và giai đoạn lóe của p42** (cùng hash
+`phase1` và `flare`).
+- **Yêu cầu** (người dùng, 14/10/2026): "tôi nghĩ do groundtruth chưa mạnh, thêm vào ảnh train nào tối thì làm sáng nó lên".
+- **Làm gì** (`corruptions/light.brighten_dark`): ảnh **đích** (không phải ảnh vào) có độ sáng trung bình sRGB dưới 0,30 được
+  nhân một hệ số g ≥ 1 trên ánh sáng tuyến tính cho cả ảnh, để trung bình lên khoảng 0,40. g tối đa ×3 và không đẩy phân
+  vị 99,5 của kênh sáng nhất quá 0,97 (không làm cháy đèn, trời). Ảnh đủ sáng giữ nguyên; không bao giờ làm tối.
+  - Áp dụng cho ảnh TartanAir và gt FlareImage, ở train, validation và các tool đánh giá phase 2: **PSNR của p43 so với
+    ảnh đích mới, không so thẳng với p42 trở về trước**. Phase 1 và giai đoạn lóe vẫn dùng ảnh sạch gốc.
+  - Ảnh được làm sáng: nhãn cổng tone thành "ánh sáng bị đổi" (cổng mở cho tầng tone làm sáng), bản đồ stop đích thêm
+    −log2(g) (ảnh vào tối hơn đích chừng ấy).
+- **Chưa đo trên máy** vì dataset TartanAir chỉ có trên Kaggle: tỉ lệ ảnh đích bị làm sáng xem ở Cell 5b (cột nhiễu ảnh
+  in `đích sáng ×g`).
+- Bằng chứng: `tests/test_brightgt.py`. Ảnh sáng giữ nguyên từng pixel, ảnh tối sáng lên, không pixel nào tối đi, thứ tự
+  giá trị giữ nguyên, có đèn thì g dừng trước khi cháy; ở phase 2 ảnh đích sáng lên còn ảnh vào giữ nguyên, phase 1 và
+  giai đoạn lóe không đổi; nhãn tone và bản đồ stop đi theo g; p43 là p42 cộng một khoá, cùng hash phase 1 với p40 và
+  hash giai đoạn lóe với p42; cài sai thì báo lỗi.
+
 **p42_flarestage — nhánh khử lóe train riêng trên lóe ghép Flare7K++, rồi đóng băng trong phase 2** (config
 `configs/kaggle_flarestage.yaml` → OUT `outputs/p42_flarestage`). Bằng p41 cộng mục `flare` (giai đoạn lóe, lệnh mới
 `train-flare`) và `phase2.split_flare_latent: false`, `split_flare_pretrained`, `split_flare_freeze`. Hash phase 1 bằng p40:

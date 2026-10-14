@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from ..corruptions import LowLightImageCorruptor, TrajectoryImuCorruptor
 from ..corruptions.image import brightness_stops, degradation_vector, frame_kind, light_changed
+from ..corruptions.light import brighten_dark
 from ..corruptions.rng import derive_seed
 from .flare_pairs import FlarePair, FlarePairBank
 from .manifest import PairedSample
@@ -104,6 +105,7 @@ class PairedCameraImuDataset(Dataset):
         flare_pairs_clear_probability: float = 1.0,
         flare_pairs_augment: str = "none",
         flare_layer: bool = False,
+        target_brighten: dict | None = None,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -134,6 +136,9 @@ class PairedCameraImuDataset(Dataset):
         # minus its clean photo (zero for a TartanAir frame), and a pair's tone label says only whether the
         # corruption changed its light: the flare is the flare layer's. False: as before.
         self.flare_layer = bool(flare_layer)
+        # phase2.target_brighten (p43): a dark TARGET is brightened (light.brighten_dark), the input left as it is; its
+        # tone label then says "light changed" and its stop map gains -log2(gain). None: targets as before.
+        self.target_brighten = dict(target_brighten) if target_brighten else None
         self.hflip_probability = hflip_probability
         self.samples = samples
         self.image_corruptor = image_corruptor or LowLightImageCorruptor()
@@ -303,7 +308,13 @@ class PairedCameraImuDataset(Dataset):
             trajectory=host.trajectory_key,
             mode=imu_mode,
         )
+        gain = 1.0
+        if self.target_brighten is not None:
+            clean_image, gain = brighten_dark(clean_image, **self.target_brighten)
+            image_parameters["target_gain"] = gain
         stops = brightness_stops(image_parameters, *noisy_image.shape[:2]) if self.brightness_target else None
+        if stops is not None and gain > 1.0:
+            stops = (stops - np.float32(np.log2(gain))).astype(np.float32)   # the input is that much darker than the target
         if self.flare_layer and flare_target is None:
             flare_target = np.zeros_like(noisy_image, dtype=np.float32)       # no flare to take off
         if mirror_draw(self.scenario_seed, sample_id, self.realization, self.hflip_probability):
@@ -340,6 +351,7 @@ class PairedCameraImuDataset(Dataset):
             changed = frame_kind(image_parameters) != "plain"
             if self.flare_layer and image_parameters.get("flare_pair"):
                 changed = light_changed(image_parameters)
+            changed = changed or gain > 1.0          # p43: a brightened target is a change of light the tone stage makes
             item["image_tone_label"] = torch.tensor([float(changed)])
         return item
 

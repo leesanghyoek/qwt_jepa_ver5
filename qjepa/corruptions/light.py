@@ -329,3 +329,24 @@ def apply_light(image: np.ndarray, params: dict[str, object] | None, stages: boo
         glare += resize_channels(ghosts, (height, width), Image.Resampling.BILINEAR)
     lit = linear_to_srgb(scene + np.maximum(glare, 0.0)).astype(np.float64)
     return (linear_to_srgb(scene).astype(np.float64), lit) if stages else lit
+
+
+def brighten_dark(image: np.ndarray, *, below: float, target: float, max_gain: float,
+                  ceiling: float = 0.97, percentile: float = 99.5) -> tuple[np.ndarray, float]:
+    """(anh, he so) -- phase2.target_brighten (p43): anh DICH toi duoc lam sang, khong bao gio toi di.
+
+    Do sang trung binh (sRGB, BT.709) duoi ``below`` thi nhan anh sang TUYEN TINH voi mot he so g >= 1 cho ca anh, de
+    trung binh len ~``target``; g khong vuot ``max_gain`` va khong day phan vi ``percentile`` cua kenh sang nhat qua
+    ``ceiling`` (khong lam chay vung sang). Anh du sang tra lai nguyen ven, g = 1."""
+    image = np.asarray(image, dtype=np.float32)
+    luma = float(np.tensordot(image, LUMA_709.astype(np.float32), axes=([-1], [0])).mean())
+    if luma >= below:
+        return image, 1.0
+    linear = srgb_to_linear(image)
+    level = lambda value: float(srgb_to_linear(np.array([value], dtype=np.float32))[0])
+    wanted = level(target) / max(level(luma), 1e-5)
+    headroom = level(ceiling) / max(float(np.percentile(linear.max(axis=-1), percentile)), 1e-6)
+    gain = max(1.0, min(wanted, float(max_gain), headroom))
+    if gain <= 1.0:
+        return image, 1.0
+    return np.clip(linear_to_srgb(linear * np.float32(gain)), 0.0, 1.0).astype(np.float32), gain

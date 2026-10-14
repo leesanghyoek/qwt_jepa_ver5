@@ -156,6 +156,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_flare_pairs(config)
     _validate_flare_layer(config)
     _validate_flare_stage(config)
+    _validate_target_brighten(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -889,6 +890,25 @@ def _validate_flare_layer(config: dict[str, Any]) -> None:
         stage = config["flare"]
         if list(phase2["split_flare_widths"]) != list(stage["widths"]) or phase2["split_flare_blocks"] != stage["blocks"]:
             raise ValueError("phase2.split_flare_widths / split_flare_blocks must equal flare.widths / flare.blocks")
+
+
+TARGET_BRIGHTEN_KEYS = ("below", "target", "max_gain")
+
+
+def _validate_target_brighten(config: dict[str, Any]) -> None:
+    """p43: phase2.target_brighten -- a phase-2 target darker than ``below`` (mean sRGB luma) is brightened towards
+    ``target`` by one linear-light gain of at most ``max_gain`` (light.brighten_dark). Absent: targets as before."""
+    value = config["phase2"].get("target_brighten")
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != set(TARGET_BRIGHTEN_KEYS):
+        raise ValueError(f"phase2.target_brighten must give exactly {', '.join(TARGET_BRIGHTEN_KEYS)}")
+    if not all(_nonnegative_number(value[key]) for key in TARGET_BRIGHTEN_KEYS):
+        raise ValueError("phase2.target_brighten values must be nonnegative numbers")
+    if not 0 < value["below"] <= value["target"] < 1:
+        raise ValueError("phase2.target_brighten needs 0 < below <= target < 1")
+    if not 1 < value["max_gain"] <= 8:
+        raise ValueError("phase2.target_brighten.max_gain must be in (1, 8]")
 
 
 FLARE_STAGE_KEYS = ("widths", "blocks", "batch_size", "max_successful_updates", "learning_rate", "minimum_lr",

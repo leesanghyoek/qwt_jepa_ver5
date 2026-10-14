@@ -135,6 +135,7 @@ def _dataset(
     tone_label: bool = False,
     flare_pairs: FlarePairBank | None = None,
     flare_layer: bool = False,
+    target_brighten: bool = True,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -164,6 +165,8 @@ def _dataset(
         flare_pairs_clear_probability=float(config["data"].get("flare_pairs_clear_probability", 1.0)),
         flare_pairs_augment=str(config["data"].get("flare_pairs_augment", "none")),
         flare_layer=flare_layer,
+        # phase2.target_brighten: the phase-2 target. Phase 1 and the flare stage pass False and keep the plain frame.
+        target_brighten=config["phase2"].get("target_brighten") if target_brighten else None,
     )
 
 
@@ -197,7 +200,8 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
                     hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
                     brightness_target=brightness_target, tone_label=tone_label,
-                    flare_pairs=flare_pair_bank(config), flare_layer=flare_layer, **kwargs)
+                    flare_pairs=flare_pair_bank(config), flare_layer=flare_layer,
+                    target_brighten=phase == "phase2", **kwargs)
 
 
 def _loader(
@@ -968,7 +972,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
     seed_everything(config["phase1"]["initialization_seed"])
     normalizer = build_normalizer(manifest["meta"])
     model = build_phase1_model(config, normalizer)
-    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
+    validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True, target_brighten=False)
     _fixed_validation_bank(validation_dataset, config["monitor"].get("validation_bank_size", 64))
     validation_loader = _loader(config, validation_dataset, config["phase1"]["batch_size"], train=False)
     if config["model"].get("encoder_norm_calibration", False) and not args.resume:
@@ -1209,10 +1213,12 @@ def command_train_flare(args: argparse.Namespace) -> None:
     lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction)
     pairs = flare_pair_bank(config)
     batch_size, maximum = int(stage["batch_size"]), int(stage["max_successful_updates"])
-    train_set = FlareStageDataset(_dataset(config, manifest, "train", fixed_realization=False), lens_bank=lens_bank,
+    train_set = FlareStageDataset(_dataset(config, manifest, "train", fixed_realization=False, target_brighten=False),
+                                  lens_bank=lens_bank,
                                   flare_pairs=pairs, section=stage, split="train", length=maximum * batch_size,
                                   seed=int(stage["seed"]))
-    valid_set = FlareStageDataset(_dataset(config, manifest, "valid", fixed_realization=True), lens_bank=lens_bank,
+    valid_set = FlareStageDataset(_dataset(config, manifest, "valid", fixed_realization=True, target_brighten=False),
+                                  lens_bank=lens_bank,
                                   flare_pairs=pairs, section=stage, split="valid",
                                   length=int(stage["validation_composites"]), seed=int(stage["seed"]))
     real = held_out_pairs(pairs, "valid", tuple(config["data"]["image_size"])) if pairs is not None else []

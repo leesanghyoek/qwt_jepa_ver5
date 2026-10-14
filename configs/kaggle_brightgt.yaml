@@ -1,0 +1,20 @@
+# p43_brightgt: p42_flarestage + ANH DICH TOI DUOC LAM SANG (phase2.target_brighten). Chi doi phase 2: dung lai phase 1
+# cua p40 va giai doan loe cua p42 (cung hash: muc flare khong doi).
+#
+# Nguoi dung (14/10/2026): "toi nghi do groundtruth chua manh, them vao anh train nao toi thi lam sang no len".
+# Anh DICH (khong phai anh vao) co do sang trung binh (sRGB) duoi `below` duoc nhan mot he so g >= 1 tren anh sang
+# tuyen tinh cho ca anh, de trung binh len ~`target`; g <= `max_gain` va khong day phan vi 99,5 cua kenh sang nhat qua
+# 0,97 (khong lam chay den, troi). Anh du sang giu nguyen. Ap dung cho anh TartanAir va gt FlareImage, o train,
+# validation va cac tool danh gia phase 2 -- nen PSNR cua p43 so voi DICH MOI, khong so thang voi p42 tro ve truoc.
+# Anh lam sang: nhan cong tone = "anh sang bi doi" (cong mo cho tang tone lam sang), ban do stop dich them -log2(g).
+# Phase 1 va giai doan loe van dung anh sach goc.
+extends: kaggle_flarestage.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p43_brightgt
+
+phase2:
+  target_brighten:
+    below: 0.30       # trung binh do sang sRGB cua anh dich duoi muc nay moi lam sang
+    target: 0.40      # muc trung binh nham toi
+    max_gain: 3.0     # toi da x3 tren anh sang tuyen tinh (~ +1,6 stop)
