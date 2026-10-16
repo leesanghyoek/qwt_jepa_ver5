@@ -18,10 +18,19 @@ Commercial use needs the contributors' permission.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 from PIL import Image
 from torch import nn
 
@@ -194,6 +203,7 @@ class LeWinTransformerBlock(nn.Module):
 class BasicUformerLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, win_size, mlp_ratio=4.0, qkv_bias=True):
         super().__init__()
+        self.checkpointing = False
         self.blocks = nn.ModuleList([
             LeWinTransformerBlock(dim, input_resolution, num_heads, win_size=win_size,
                                   shift_size=0 if i % 2 == 0 else win_size // 2, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias)
@@ -201,7 +211,11 @@ class BasicUformerLayer(nn.Module):
 
     def forward(self, x):
         for block in self.blocks:
-            x = block(x)
+            if self.checkpointing and torch.is_grad_enabled():
+                # Fine-tuning at 512x512 on a 16 GB T4: recompute each block in backward instead of keeping it.
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
         return x
 
 
@@ -225,6 +239,12 @@ class Uformer(nn.Module):
         self.upsample_1, self.decoderlayer_1 = Upsample(16 * e, 4 * e), layer(8 * e, 4, 6)
         self.upsample_2, self.decoderlayer_2 = Upsample(8 * e, 2 * e), layer(4 * e, 2, 7)
         self.upsample_3, self.decoderlayer_3 = Upsample(4 * e, e), layer(2 * e, 1, 8)
+
+    def set_checkpointing(self, enabled: bool) -> None:
+        """Gradient checkpointing per transformer block (same outputs and gradients, less memory, ~30% slower)."""
+        for module in self.modules():
+            if isinstance(module, BasicUformerLayer):
+                module.checkpointing = bool(enabled)
 
     def forward(self, x):
         y = self.input_proj(x)
@@ -293,3 +313,180 @@ def remove_flare(model: Uformer, image: np.ndarray) -> np.ndarray:
     merged = torch.cat(kept, dim=2 if wide else 1)[:3].clamp(0, 1).permute(1, 2, 0).cpu().numpy()
     flare = np.abs(small - merged)
     return np.clip(np.abs(image - _resize(flare, w, h)), 0.0, 1.0).astype(np.float32)
+
+
+# Four halvings down to a window of 8: every side the Uformer sees is a multiple of 128.
+SIDE_MULTIPLE = 128
+
+
+def _square_tiles(net, x: torch.Tensor) -> torch.Tensor:
+    """``net`` (square inputs only) over a B x C x H x W batch whose sides are multiples of SIDE_MULTIPLE: a square
+    frame in one pass; otherwise square tiles of the short side every half side along the long one, the last flush
+    with the end, each tile's overlap blended linearly into the previous one -- test_large.py's scheme, in torch so
+    gradients pass."""
+    h, w = x.shape[-2:]
+    if h == w:
+        return net(x)
+    wide, side, length = w > h, min(h, w), max(h, w)
+    dim = -1 if wide else -2
+    ends = [min(end, length) for end in range(side, length + side // 2, side // 2)]
+    segments = [net(x.narrow(dim, end - side, side)) for end in ends]
+    overlaps = [0] + [previous - current + side for previous, current in zip(ends[:-1], ends[1:])]
+    for i in range(1, len(segments)):
+        overlap = overlaps[i]
+        shape = [1] * segments[i].dim()
+        shape[dim] = overlap
+        alpha = torch.linspace(0, 1, overlap, device=x.device, dtype=segments[i].dtype).view(shape)
+        head = alpha * segments[i].narrow(dim, 0, overlap) + (1 - alpha) * segments[i - 1].narrow(dim, side - overlap, overlap)
+        segments[i] = torch.cat([head, segments[i].narrow(dim, overlap, side - overlap)], dim)
+    pieces = [segment.narrow(dim, 0, side - overlap) for segment, overlap in zip(segments[:-1], overlaps[1:])]
+    return torch.cat(pieces + [segments[-1]], dim)
+
+
+class UformerFlareLayer(nn.Module):
+    """p44 (flare.model / phase2.split_flare_model: uformer_flare7kpp): Flare7K++'s Uformer in the flare layer's place.
+
+    Same contract as decoders.FlareLayer with uses_latent False: ``forward(None, image)`` gives (image without the
+    flare, the flare layer). The frame is upsampled by ``scale`` (bicubic; 2 takes a 256 crop to the 512 the
+    checkpoint was trained at), padded to multiples of 128 (replicate), run in square tiles, and the flare -- that
+    upsampled frame minus the Uformer's flare-free frame (light source kept) -- is brought back down (bilinear,
+    antialiased) and taken off the input, so the frame keeps its own detail outside the flare. Always fp32, as the
+    p42 layer: phase 2 runs it frozen under fp16 autocast.
+    """
+
+    uses_latent = False
+
+    def __init__(self, scale: float = 2.0) -> None:
+        super().__init__()
+        self.scale = float(scale)
+        self.net = Uformer()
+
+    def _deflare(self, tile: torch.Tensor) -> torch.Tensor:
+        return self.net(tile)[:, :3]
+
+    def forward(self, latent: torch.Tensor | None, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            frame = image.float()
+            h, w = frame.shape[-2:]
+            big = (F.interpolate(frame, scale_factor=self.scale, mode="bicubic", align_corners=False)
+                   if self.scale != 1 else frame)
+            bh, bw = big.shape[-2:]
+            pad_h, pad_w = (-bh) % SIDE_MULTIPLE, (-bw) % SIDE_MULTIPLE
+            padded = F.pad(big, (0, pad_w, 0, pad_h), mode="replicate") if pad_h or pad_w else big
+            clean = _square_tiles(self._deflare, padded)[..., :bh, :bw]
+            flare = big - clean
+            if (bh, bw) != (h, w):
+                flare = F.interpolate(flare, size=(h, w), mode="bilinear", align_corners=False,
+                                      antialias=self.scale > 1)
+        return image - flare.to(image.dtype), flare
+
+
+def file_sha256(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_flare7kpp_into(layer: UformerFlareLayer, path) -> str:
+    """The released checkpoint into ``layer.net`` (strict); its sha256, which the flare stage records."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    state = payload.get("params_ema", payload.get("params", payload)) if isinstance(payload, dict) else payload
+    layer.net.load_state_dict(state, strict=True)
+    return file_sha256(path)
+
+
+# README of github.com/ykdai/Flare7K, "Pretrained Model", row Flare7K++ (official Google Drive link).
+FLARE7KPP_DRIVE_ID = "17AX9BJ-GS0in9Ey7vw3BVPISm67Rpzho"
+CHECKPOINT_NAME = "net_g_last.pth"
+SCAN_PRUNE = ("image_", "depth_", "seg_", "flow_", "imu", "Flare7K", "Flare-R", "flare_dataset", "tartanair640",
+              "__pycache__", ".git")
+
+
+def _pick_member(bundle: zipfile.ZipFile) -> str | None:
+    members = [m for m in bundle.namelist() if m.endswith(".pth")]
+    ranked = sorted(members, key=lambda m: ("flare7kpp" not in m.lower(), not m.endswith(CHECKPOINT_NAME)))
+    return ranked[0] if ranked else None
+
+
+def _extract(bundle: zipfile.ZipFile, member: str, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with bundle.open(member) as source, target.open("wb") as sink:
+        shutil.copyfileobj(source, sink)
+    return target
+
+
+def find_flare7kpp(input_root, cache_dir, skip=(), max_depth: int = 12) -> Path | None:
+    """net_g_last.pth in ``cache_dir`` or anywhere under ``input_root`` (Kaggle Input): a file, or a member of a zip
+    (extracted to ``cache_dir``), paths with "flare7kpp" first. Image folders and ``skip`` (dataset shards) are not
+    walked: listing them on Kaggle's network disk takes minutes."""
+    cached = Path(cache_dir) / CHECKPOINT_NAME
+    if cached.is_file():
+        return cached
+    files, archives = [], []
+    root = Path(input_root)
+    skip = {str(path) for path in skip}
+    top = len(root.parts)
+    for directory, children, names in os.walk(root):
+        here = Path(directory)
+        if len(here.parts) - top >= max_depth:
+            children[:] = []
+        else:
+            children[:] = sorted(c for c in children if not c.startswith(SCAN_PRUNE) and str(here / c) not in skip)
+        for name in sorted(names):
+            if name == CHECKPOINT_NAME:
+                files.append(here / name)
+            elif name.endswith(".zip"):
+                archives.append(here / name)
+    if files:
+        return sorted(files, key=lambda path: "flare7kpp" not in str(path).lower())[0]
+    for archive in archives:
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                member = _pick_member(bundle)
+                if member and member.endswith(CHECKPOINT_NAME):
+                    print("Giải nén", member, "từ", archive, flush=True)
+                    return _extract(bundle, member, cached)
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return None
+
+
+def download_flare7kpp(cache_dir, drive_id: str | None = None) -> Path | None:
+    """The Flare7K++ checkpoint from Google Drive (gdown) into ``cache_dir``: ``drive_id`` (a copy in your own Drive,
+    when the official file hits Drive's download quota) or the official one. A zip gives its net_g_last.pth. None,
+    with a hint, when Drive refuses."""
+    target = Path(cache_dir) / CHECKPOINT_NAME
+    if target.is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    raw = target.parent / "download.bin"
+    try:
+        import gdown
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown"], check=True)
+        import gdown
+    print("Tải checkpoint Flare7K++ từ Google Drive...", flush=True)
+    try:
+        gdown.download(f"https://drive.google.com/uc?id={drive_id or FLARE7KPP_DRIVE_ID}", str(raw), quiet=False)
+    except Exception as error:                              # quota, permission, network
+        print("⚠ Tải lỗi:", " ".join(str(error).split())[:400], flush=True)
+    if not raw.is_file() or raw.stat().st_size < 1_000_000:
+        raw.unlink(missing_ok=True)
+        print("⚠ Không tải được (Google Drive hay báo hết hạn mức). Tạo bản sao trong Drive của bạn (Colab: Drive API\n"
+              "  files().copy, xem notebook Cell 12e), chia sẻ 'bất kỳ ai có đường liên kết' và đặt ID của nó; hoặc tải\n"
+              "  tay rồi tải lên Kaggle thành dataset và gắn làm Input.", flush=True)
+        return None
+    if zipfile.is_zipfile(raw):
+        with zipfile.ZipFile(raw) as bundle:
+            member = _pick_member(bundle)
+            if member is None:
+                raise ValueError(f"the downloaded zip holds no .pth: {bundle.namelist()[:10]}")
+            _extract(bundle, member, target)
+            print("Lấy", member, "từ zip tải về", flush=True)
+        raw.unlink()
+    else:
+        raw.rename(target)
+    print(f"Đã tải {target} ({target.stat().st_size / 2**20:.1f} MiB)", flush=True)
+    return target

@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from ..models.decoders import FlareLayer
 from .schedules import warmup_cosine_lr
@@ -20,8 +21,22 @@ FLARE_THRESHOLD = 0.05
 NONFINITE_LIMIT = 50            # so batch NaN/inf lien tiep thi train-flare dung han (p42 Kaggle: NaN tu ~2 300 mai mai)          # nhu tools/flare_image_test.py: pixel vao lech anh sach hon 0,05 la vung loe
 
 
-def build_flare_layer(stage: dict[str, Any]) -> FlareLayer:
+def build_flare_layer(stage: dict[str, Any]) -> nn.Module:
+    """The flare section's layer: p42's U-Net (flare.model absent or "unet"), or p44's Uformer of Flare7K++
+    (flare.model: uformer_flare7kpp; train-flare loads its released weights before the first update)."""
+    if stage.get("model", "unet") == "uformer_flare7kpp":
+        from ..models.uformer_flare import UformerFlareLayer
+        layer = UformerFlareLayer(float(stage["uformer_scale"]))
+        layer.net.set_checkpointing(True)          # fine-tuning at 512x512 on a 16 GB T4
+        return layer
     return FlareLayer(widths=tuple(int(w) for w in stage["widths"]), blocks=int(stage["blocks"]), uses_latent=False)
+
+
+def selection_score(report: dict[str, float]) -> float:
+    """p44 (flare.select_best): the flare stage's checkpoint score, higher is better -- PSNR over the whole crop of
+    the held-out FlareImage pairs (flare taken off AND the rest kept), or of the valid composites without pairs."""
+    value = report.get("real_psnr_out") if report.get("real_pairs") else report.get("composite_psnr_out")
+    return float(value) if value is not None and math.isfinite(float(value)) else float("-inf")
 
 
 def _grad_scaler(enabled: bool):

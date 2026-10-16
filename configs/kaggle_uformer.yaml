@@ -1,0 +1,40 @@
+# p44_uformer: p43_brightgt, nhung NHANH KHU LOE la Uformer cua Flare7K++ (trong so cong bo) FINE-TUNE ngan tren du
+# lieu loe cua repo, roi dong bang trong phase 2; va loss phase 2 CAN BANG THEO LOAI ANH. Phase 1 dung lai cua p40
+# (hash phase 1 bang p40-p43).
+#
+# Nguoi dung (16/10/2026) sau p43: "chi co 1 vai anh toi co giam 1 chut do loe nhung van con loe"; chon cach B ("tai
+# model Uformer roi train lai" = fine-tune). Do truoc (Cell 12e, tools/flare_pretrained_probe.py, 108 cap FlareImage
+# test, so voi gt goc): vung loe vao 15,79 -> nhanh p42/p43 18,33 / Uformer 19,07 dB; ngoai loe 33,15 -> 30,97 / 32,48.
+# Uformer hon ro tren loe kieu Flare7K (+2,6..+3,7 dB vung loe) va giu ngoai loe tot hon (-0,7 so voi -2,2 dB), nhung
+# chi NGANG nhanh p42 tren anh chup that (flare_removal 18,82 vs 18,58) va HALO (18,58 vs 18,48) -- hai loai nhanh p42
+# da duoc train, Uformer thi chua. Fine-tune = prior cua Uformer + du lieu cua minh (bai Meta 2609.39527).
+#
+# Giai doan loe (Cell 9b, train-flare): bat dau tu trong so Flare7K++ (data.uformer_checkpoint, Cell 4 tim hoac tai),
+# lr nho, cung hon hop mau nhu p42 (60% loe Flare7K++ ghep, 20% cap FlareImage, 20% anh khong loe, lop loe dich 0).
+# select_best: validation ca o update 0 (Uformer chua fine-tune) va moi 500 update tren cap FlareImage valid; giu
+# flare/best.pt tot nhat theo PSNR ca o cat (go loe VA giu phan con lai) -- khong ban nao hon thi la chinh Uformer goc:
+# khong the te hon cach A (Uformer dong bang nguyen trang).
+#
+# Phase 2: nhanh loe = Uformer cua best.pt, dong bang; kind_balance: moi loai anh (nhe/mo/toi/toi_mo/loe) cua mot
+# microbatch nang ngang nhau trong gradient loss anh (p43: nhe +150%, mo +50% vi chi ~6% moi loai).
+extends: kaggle_brightgt.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p44_uformer
+
+phase2:
+  split_flare_model: uformer_flare7kpp
+  split_flare_scale: 2.0             # = flare.uformer_scale
+  kind_balance: true
+
+flare:
+  model: uformer_flare7kpp
+  uformer_scale: 2.0                 # o cat 256 -> 512, co Uformer duoc train
+  select_best: true
+  batch_size: 4                      # 4 anh 512x512 qua Uformer co gradient (checkpointing tung khoi) tren T4 16 GB
+  max_successful_updates: 3000       # 12 000 mau; notebook: FLARE_UPDATES = None giu so nay
+  learning_rate: 2.0e-5              # fine-tune: 1/10 lr Flare7K++ train tu dau
+  minimum_lr: 1.0e-6
+  warmup_updates: 200
+  validation_every_updates: 500
+  checkpoint_every_updates: 500

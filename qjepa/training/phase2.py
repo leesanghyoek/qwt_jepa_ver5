@@ -23,6 +23,23 @@ from .phase1 import _finite_gradients, _to_device
 from .schedules import warmup_cosine_lr
 
 
+def kind_weights(codes: torch.Tensor, kinds: int) -> torch.Tensor:
+    """p44 (phase2.kind_balance): per-frame weights, mean 1, under which every kind present in ``codes`` (one
+    LOG_KINDS index per frame) carries the same total weight -- frames of a rare kind count more."""
+    counts = torch.bincount(codes, minlength=kinds).to(torch.float32)
+    present = int((counts > 0).sum())
+    return codes.numel() / (present * counts[codes])
+
+
+def _weight_frames(restored: dict[str, torch.Tensor], weights: torch.Tensor) -> None:
+    """Scale the gradient reaching each frame's image outputs by its weight: every image loss term is a sum over
+    frames, so this is the weighted loss, while the logged losses stay the plain means. IMU outputs untouched."""
+    for key, value in restored.items():
+        if key.startswith("image") and torch.is_tensor(value) and value.requires_grad and value.shape[:1] == weights.shape:
+            shape = (-1,) + (1,) * (value.dim() - 1)
+            value.register_hook(lambda grad, w=weights.view(shape): grad * w.to(grad.dtype))
+
+
 def latent_predictor_hash(system: RestorationSystem) -> str | None:
     """Hash of the frozen phase-1 predictor (and its degradation head), None without one.
 
@@ -200,6 +217,11 @@ class Phase2Trainer:
                     restored = {key: gather_shares(value, keep_graph=True) for key, value in restored.items()}
                     batch = {key: gather_shares(value, keep_graph=False) if isinstance(value, torch.Tensor)
                              else value for key, value in batch.items()}
+                if self.phase.get("kind_balance", False):
+                    # p44: p43's log had 'nhe' and 'mo' frames ~6% each, made worse by a decoder fitted to the rest.
+                    if "log_kind" not in batch:
+                        raise KeyError("phase2.kind_balance needs each frame's corruption (batch['corruption'])")
+                    _weight_frames(restored, kind_weights(batch["log_kind"], len(LOG_KINDS)))
                 clean_imu = self.system.normalizer.normalize(batch["imu_clean_phys"])
                 detail_weight = float(self.phase.get("reconstruction_detail_weight", 0.0))
                 image_transform = self.system.backbone.image_transform

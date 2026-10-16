@@ -1077,8 +1077,13 @@ class SplitColorEdgeDecoder(nn.Module):
     ) -> None:
         super().__init__()
         # p41 (phase2.split_flare_layer): the flare layer, subtracted first. Absent: no layers, p40's decoder.
-        self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
-                                 uses_latent=bool(flare.get("latent", True))) if flare else None)
+        if flare and flare.get("model", "unet") == "uformer_flare7kpp":
+            # p44: Flare7K++'s Uformer (fine-tuned by the flare stage, frozen here). Image only, as p42's layer.
+            from .uformer_flare import UformerFlareLayer
+            self.flare = UformerFlareLayer(float(flare["scale"]))
+        else:
+            self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
+                                     uses_latent=bool(flare.get("latent", True))) if flare else None)
         if tone_gate and not tone_grid:
             raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
         if exposure_standardize and not (exposure_stats or tone_gate):

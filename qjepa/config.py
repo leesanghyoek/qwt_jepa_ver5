@@ -157,6 +157,7 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_flare_layer(config)
     _validate_flare_stage(config)
     _validate_target_brighten(config)
+    _validate_kind_balance(config)
     floors = config.get("encoder_sensitivity", {}).get("signal_floor_log_gain")
     if floors is not None and (not isinstance(floors, dict) or not set(floors) <= {"image", "imu"} or any(
             isinstance(v, bool) or not isinstance(v, (int, float)) for v in floors.values())):
@@ -890,6 +891,16 @@ def _validate_flare_layer(config: dict[str, Any]) -> None:
         stage = config["flare"]
         if list(phase2["split_flare_widths"]) != list(stage["widths"]) or phase2["split_flare_blocks"] != stage["blocks"]:
             raise ValueError("phase2.split_flare_widths / split_flare_blocks must equal flare.widths / flare.blocks")
+        # p44: the layer phase 2 builds is the one the stage trained (absent on both sides: p42's FlareLayer).
+        if (phase2.get("split_flare_model", "unet") != stage.get("model", "unet")
+                or phase2.get("split_flare_scale") != stage.get("uformer_scale")):
+            raise ValueError("phase2.split_flare_model / split_flare_scale must equal flare.model / flare.uformer_scale")
+    model = phase2.get("split_flare_model", "unet")
+    _validate_flare_model(phase2, "phase2.split_flare_model", "phase2.split_flare_scale", model,
+                          phase2.get("split_flare_scale"))
+    if model != "unet" and not phase2.get("split_flare_pretrained", False):
+        raise ValueError("phase2.split_flare_model: uformer_flare7kpp comes from the flare stage: set "
+                         "split_flare_pretrained: true")
 
 
 TARGET_BRIGHTEN_KEYS = ("below", "target", "max_gain")
@@ -909,6 +920,32 @@ def _validate_target_brighten(config: dict[str, Any]) -> None:
         raise ValueError("phase2.target_brighten needs 0 < below <= target < 1")
     if not 1 < value["max_gain"] <= 8:
         raise ValueError("phase2.target_brighten.max_gain must be in (1, 8]")
+
+
+# p44: optional. model: "unet" (absent, p42's FlareLayer) or "uformer_flare7kpp" (Flare7K++'s Uformer, fine-tuned from
+# its released checkpoint, data.uformer_checkpoint); uformer_scale: the Uformer's upsampling of each frame (2: a 256
+# crop to the 512 it was trained at); select_best: validate at update 0 and every validation_every_updates on the
+# held-out FlareImage pairs and keep the best weights (flare/best.pt) -- the pretrained ones if none beats them.
+FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best")
+FLARE_MODELS = ("unet", "uformer_flare7kpp")
+
+
+def _validate_flare_model(owner: dict[str, Any], model_key: str, scale_key: str, model: Any, scale: Any) -> None:
+    if model not in FLARE_MODELS:
+        raise ValueError(f"{model_key} must be one of {', '.join(FLARE_MODELS)}")
+    if model == "uformer_flare7kpp":
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0.5 <= scale <= 4:
+            raise ValueError(f"{scale_key} must be a number in [0.5, 4] with {model_key}: uformer_flare7kpp")
+    elif scale is not None:
+        raise ValueError(f"{scale_key} is the Uformer's upsampling: set {model_key}: uformer_flare7kpp")
+
+
+def _validate_kind_balance(config: dict[str, Any]) -> None:
+    """p44: phase2.kind_balance -- each kind of frame of a microbatch (corruptions.image.LOG_KINDS) weighs the same
+    in the image loss's gradients. Absent: every frame weighs the same, as before."""
+    value = config["phase2"].get("kind_balance", False)
+    if not isinstance(value, bool):
+        raise ValueError("phase2.kind_balance must be true or false")
 
 
 FLARE_STAGE_KEYS = ("widths", "blocks", "batch_size", "max_successful_updates", "learning_rate", "minimum_lr",
@@ -931,9 +968,13 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
     missing = [key for key in FLARE_STAGE_KEYS if key not in stage]
     if missing:
         raise ValueError(f"flare needs every key written out; missing: {', '.join(missing)}")
-    unknown = sorted(set(stage) - set(FLARE_STAGE_KEYS))
+    unknown = sorted(set(stage) - set(FLARE_STAGE_KEYS) - set(FLARE_STAGE_OPTIONAL_KEYS))
     if unknown:
         raise ValueError(f"flare: unknown keys {unknown}")
+    _validate_flare_model(stage, "flare.model", "flare.uformer_scale", stage.get("model", "unet"),
+                          stage.get("uformer_scale"))
+    if "select_best" in stage and not isinstance(stage["select_best"], bool):
+        raise ValueError("flare.select_best must be true or false")
     if not config["data"].get("lens_flare_root"):
         raise ValueError("flare needs data.lens_flare_root: the folder holding Flare7K/ and Flare-R/ (Kaggle "
                          "khoidb/flare7k)")
@@ -1230,6 +1271,9 @@ def build_decoders(
                 "blocks": int(config["phase2"]["split_flare_blocks"]),
                 # Absent before p42: the layer reads the latent (p41).
                 "latent": bool(config["phase2"].get("split_flare_latent", True)),
+                # Absent before p44: p42's U-Net layer.
+                "model": config["phase2"].get("split_flare_model", "unet"),
+                "scale": float(config["phase2"].get("split_flare_scale") or 1.0),
             } if config["phase2"].get("split_flare_layer", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),

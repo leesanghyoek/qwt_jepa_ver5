@@ -68,8 +68,8 @@ from .training.losses import jepa_fine_loss, jepa_latent_loss
 from .training.ijepa import IJEPATrainer, ijepa_loss
 from .training.phase1 import Phase1Trainer, _to_device, jepa_report_terms
 from .training.phase2 import Phase2Trainer, latent_predictor_hash
-from .training.flare_stage import (NONFINITE_LIMIT, FlareStageTrainer, build_flare_layer, validate_flare_stage,
-                                   validation_text)
+from .training.flare_stage import (NONFINITE_LIMIT, FlareStageTrainer, build_flare_layer, selection_score,
+                                   validate_flare_stage, validation_text)
 
 
 def _config_path(value: str | None) -> Path:
@@ -1213,6 +1213,12 @@ def flare_stage_checkpoint(config: dict[str, Any], output: str | Path | None) ->
     return Path(output or config["runtime"]["output_dir"]) / "flare" / "last.pt"
 
 
+def flare_stage_layer(config: dict[str, Any], output: str | Path | None) -> Path:
+    """The checkpoint whose layer phase 2 loads: flare/best.pt with flare.select_best (p44), else flare/last.pt."""
+    last = flare_stage_checkpoint(config, output)
+    return last.with_name("best.pt") if config["flare"].get("select_best", False) else last
+
+
 def command_train_flare(args: argparse.Namespace) -> None:
     """p42: the flare stage -- the flare layer alone, on Flare7K++ flares composited afresh for every sample.
 
@@ -1229,6 +1235,18 @@ def command_train_flare(args: argparse.Namespace) -> None:
     output = Path(args.output or config["runtime"]["output_dir"]) / "flare"
     seed_everything(int(stage["seed"]))
     trainer = FlareStageTrainer(build_flare_layer(stage), stage, device)
+    uformer = stage.get("model", "unet") == "uformer_flare7kpp"
+    select_best = bool(stage.get("select_best", False))
+    pretrained_sha256 = None
+    if uformer and not args.resume:
+        # p44: fine-tuning starts from Flare7K++'s released weights (a path, out of the hash; its sha256 is recorded).
+        from .models.uformer_flare import load_flare7kpp_into
+        checkpoint_path = config["data"].get("uformer_checkpoint")
+        if not checkpoint_path or not Path(checkpoint_path).is_file():
+            raise ValueError("flare.model: uformer_flare7kpp starts from Flare7K++'s net_g_last.pth: set "
+                             "data.uformer_checkpoint (the notebook's Cell 4 finds or downloads it)")
+        pretrained_sha256 = load_flare7kpp_into(trainer.model, checkpoint_path)
+        trainer.model.to(device)
     if args.resume:
         payload = load_checkpoint(args.resume, device)
         metadata = payload.get("metadata", {})
@@ -1243,6 +1261,7 @@ def command_train_flare(args: argparse.Namespace) -> None:
         if trainer.amp and payload.get("scaler"):
             trainer.scaler.load_state_dict(payload["scaler"])
         trainer.successful_updates = int(payload["successful_updates"])
+        pretrained_sha256 = metadata.get("pretrained_sha256")
         del payload
     _prepare_run(output, args.resume, trainer.successful_updates)
     _write_resolved(config, output)
@@ -1270,6 +1289,33 @@ def command_train_flare(args: argparse.Namespace) -> None:
           f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)} | device {device}"
           f" | {'fp16' if trainer.amp else 'fp32'}", flush=True)
     log = _Jsonl(output / "train.jsonl")
+
+    def metadata_at(update: int) -> dict[str, Any]:
+        return {"pipeline_version": 3, "phase": "flare_stage", "successful_updates": update,
+                "configuration_hash": configuration_hash(config, "flare"), "manifest_hash": manifest_hash,
+                "layer_hash": state_dict_hash(trainer.model), "pretrained_sha256": pretrained_sha256}
+
+    # p44 (flare.select_best): the best weights on the held-out pairs so far, update 0 (the pretrained ones) included.
+    best_path = output / "best.pt"
+    best_score = float("-inf")
+    if select_best and best_path.is_file() and args.resume:
+        best_score = float(load_checkpoint(best_path, "cpu")["metadata"]["selection_score"])
+
+    def keep_if_best(update: int, report: dict[str, float]) -> None:
+        nonlocal best_score
+        score = selection_score(report)
+        if select_best and score > best_score:
+            best_score = score
+            metadata = {**metadata_at(update), "selected_update": update, "selection_score": score}
+            atomic_torch_save({"metadata": metadata, "model": trainer.model.state_dict(),
+                               "config": serializable_config(config), "validation": report}, best_path)
+            print(f"  -> best.pt = update {update} (PSNR cặp FlareImage valid {score:.2f})", flush=True)
+
+    if select_best and trainer.successful_updates == 0:
+        report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+        log.write({"successful_updates": 0, "validation": report})
+        print(f"  validation update=0 (trước fine-tune) | {validation_text(report)}", flush=True)
+        keep_if_best(0, report)
     recent = _RecentMean()
     keys = ("loss", "flare_l1_composite", "flare_size_composite", "flare_l1_pair", "flare_size_pair",
             "flare_l1_plain")
@@ -1296,10 +1342,9 @@ def command_train_flare(args: argparse.Namespace) -> None:
             report = validate_flare_stage(trainer, valid_loader, real, batch_size)
             log.write({"successful_updates": update, "validation": report})
             print(f"  validation update={_progress(update, maximum)} | {validation_text(report)}", flush=True)
+            keep_if_best(update, report)
         if update % int(stage["checkpoint_every_updates"]) == 0 or update == maximum:
-            metadata = {"pipeline_version": 3, "phase": "flare_stage", "successful_updates": update,
-                        "configuration_hash": configuration_hash(config, "flare"), "manifest_hash": manifest_hash,
-                        "layer_hash": state_dict_hash(trainer.model)}
+            metadata = metadata_at(update)
             if not all(bool(torch.isfinite(value).all()) for value in trainer.model.state_dict().values()):
                 raise RuntimeError(f"train-flare: NaN/inf weights at update {update}; the last good checkpoint stays")
             atomic_torch_save(trainer.payload(metadata, serializable_config(config)), output / "last.pt")
@@ -1317,6 +1362,17 @@ def _load_flare_stage(config: dict[str, Any], system: RestorationSystem, output:
     if int(metadata.get("successful_updates", 0)) != int(config["flare"]["max_successful_updates"]):
         raise ValueError(f"{path} is an unfinished flare stage ({metadata.get('successful_updates')}/"
                          f"{config['flare']['max_successful_updates']} updates): finish train-flare first")
+    layer_path = flare_stage_layer(config, output)
+    if layer_path != path:
+        # p44 (flare.select_best): the stage is finished; phase 2 takes the weights it kept as best.
+        del payload
+        if not layer_path.is_file():
+            raise ValueError(f"flare.select_best: the finished flare stage has no {layer_path}")
+        payload = load_checkpoint(layer_path, "cpu")
+        metadata = payload.get("metadata", {})
+        if metadata.get("phase") != "flare_stage" or metadata.get("configuration_hash") != configuration_hash(config, "flare"):
+            raise ValueError(f"{layer_path} is not this config's flare stage (flare section or data changed)")
+        path = layer_path
     flare = system.decoders.image.flare
     flare.load_state_dict(payload["model"], strict=True)
     if state_dict_hash(flare) != metadata.get("layer_hash"):

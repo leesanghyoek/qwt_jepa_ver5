@@ -12,6 +12,42 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p44_uformer — nhánh khử lóe là Uformer của Flare7K++, fine-tune trên dữ liệu lóe của repo; loss phase 2 cân
+bằng theo loại ảnh** (config `configs/kaggle_uformer.yaml` → OUT `outputs/p44_uformer`). Bằng p43 cộng
+`flare.model: uformer_flare7kpp`, `flare.uformer_scale`, `flare.select_best`, `phase2.split_flare_model`,
+`phase2.split_flare_scale` và `phase2.kind_balance` (thiếu khoá: như cũ, hash p43 không đổi). Chỉ đổi giai đoạn lóe và
+phase 2: **dùng lại phase 1 của p40** (cùng hash phase 1).
+
+![Kiến trúc p44_uformer](docs/kien_truc_ijepa.svg)
+
+- **Yêu cầu** (người dùng, 16/10/2026): sau phép đo dưới đây chọn cách B, "tải model Uformer rồi train lại" (fine-tune).
+- **Phép đo dẫn tới nó** (Cell 12e trên p43, 108 cặp FlareImage test, so với gt gốc): vùng lóe vào 15,79 → nhánh p42/p43
+  18,33 / Uformer gốc 19,07 dB; ngoài lóe 33,15 → 30,97 / 32,48 dB. Theo nguồn: Flare7K thật/tổng hợp Uformer hơn 2,6 /
+  3,7 dB ở vùng lóe; flare_removal (60 cặp chụp thật) 18,58 / 18,82 và HALO 18,48 / 18,58 — ngang. Nhánh cũ phá vùng
+  ngoài lóe (có cặp 27,05 → 14,30 dB), Uformer giữ tốt hơn.
+- **Giai đoạn lóe** (`train-flare`, Cell 9b): `UformerFlareLayer` (`qjepa/models/uformer_flare.py`) cùng giao diện với
+  `FlareLayer` của p42 — ảnh ×`uformer_scale` (bicubic; 256 → 512, cỡ checkpoint được train), đệm lên bội số 128, chạy
+  theo ô vuông, lớp lóe = ảnh phóng − ảnh Uformer bỏ lóe, thu về cỡ cũ (bilinear antialias) rồi trừ khỏi ảnh vào. Bắt đầu
+  từ checkpoint `data.uformer_checkpoint` (đường dẫn ngoài hash; sha256 ghi trong metadata), lr 2e-5, 3 000 bước × 4,
+  fp32, gradient checkpointing từng khối: đo trên máy (CPU), mỗi ảnh 128² giữ 572 MiB cho backward khi không checkpoint
+  (khoảng 9 GB mỗi ảnh ở 512²), 51 MiB khi có — batch 4 ở 512² vừa T4 16 GB. `select_best`: validation ở bước 0 (Uformer
+  gốc) và mỗi 500 bước; `flare/best.pt` giữ bản có PSNR cả ô cắt cao nhất trên cặp FlareImage valid. Không bản nào hơn
+  bước 0 thì `best.pt` là Uformer gốc: không thể tệ hơn dùng Uformer đóng băng nguyên trạng.
+- **Phase 2:** nạp `flare/best.pt` (giai đoạn lóe phải xong), đóng băng như p42. `kind_balance`: mỗi loại ảnh
+  (`corruptions.image.LOG_KINDS`) trong một microbatch có tổng trọng số bằng nhau, trung bình 1 — làm bằng hook nhân
+  gradient của mọi đầu ra ảnh từng khung theo trọng số của nó (mọi số hạng loss ảnh là tổng theo khung), nên loss in ra
+  vẫn là trung bình thường và IMU không đổi. p43: `nhe` +150%, `mo` +50% so với ảnh vào vì mỗi loại chỉ ~6% batch.
+- **Notebook:** Cell 4 tìm `net_g_last.pth` trong Input hoặc tải bằng `UFORMER_DRIVE_ID` (Cell 1, bản sao trong Drive của
+  người dùng: link gốc của Flare7K++ hay hết hạn mức tải). `FLARE_UPDATES = None` giữ số bước của config.
+- **Kiến trúc:** `docs/kien_truc_ijepa.svg` vẽ lại cho p44 (`tools/draw_architecture_ijepa.py`, mặc định đọc
+  `configs/kaggle_uformer.yaml`): ③ nhánh khử lóe là Uformer, ④ giai đoạn lóe là fine-tune + giữ best.pt, hộp loss phase 2
+  có dòng cân bằng loại ảnh.
+- Bằng chứng: `tests/test_uformer_stage.py`. Lớp Uformer trả nguyên ảnh khi Uformer trả nguyên (mọi cỡ, vuông hay không);
+  fp32 dưới autocast, có gradient; checkpointing không đổi đầu ra lẫn gradient; trọng số theo loại ảnh có tổng bằng nhau,
+  hook nhân đúng gradient ảnh và để yên IMU; train-flare bắt đầu từ checkpoint (sha256 ghi lại), validate ở bước 0, giữ
+  best.pt đúng bản tốt nhất; phase 2 dựng Uformer, nạp best.pt và không đổi nó; p44 là p43 cộng các khoá trên, cùng hash
+  phase 1, hash p43 không đổi, đường dẫn checkpoint ngoài mọi hash; cài sai thì báo lỗi.
+
 **Đo trước p44: nhánh lóe tự train vs Uformer đã train sẵn của Flare7K++** (16/10/2026; không train, không đổi hash).
 - **Vì sao.** p43 (Cell 12d, 8 cặp test, cả khung): vùng lóe 15,55 → 19,75 dB nhưng ngoài lóe 34,28 → 30,93 dB; người
   dùng: "chỉ có 1 vài ảnh tối có giảm 1 chút độ lóe nhưng vẫn còn lóe". p36–p43 đều chỉ gỡ khoảng 1/4–1/3 lóe. Ba bài

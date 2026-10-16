@@ -1,4 +1,4 @@
-"""Architecture figure of the run the notebook trains (configs/kaggle_flarestage.yaml, p42_flarestage;
+"""Architecture figure of the run the notebook trains (configs/kaggle_uformer.yaml, p44_uformer;
 qwt-jaco-jepa-ijepa.ipynb), as plain SVG.
 
 Drawn from the config: phase 1 is I-JEPA alone -- ONE ViT over the image's and the IMU's wavelet
@@ -17,7 +17,9 @@ the terms the config turns on.
 Later keys, each drawn only when the config turns it on: the tone gate (p35, phase2.split_tone_gate), full-resolution
 chroma detail (p34), FlareImage pairs in every batch (p36+, data.flare_pairs_fraction), the flare layer subtracted
 before the tone stage (p41, phase2.split_flare_layer) and, with a flare section (p42), the flare stage that trains it
-alone (band 4, train-flare) before phase 2 loads and freezes it.
+alone (band 4, train-flare) before phase 2 loads and freezes it. With flare.model uformer_flare7kpp (p44) that layer is
+Flare7K++'s Uformer, fine-tuned from its released weights and kept at its best validation (flare/best.pt); with
+phase2.kind_balance the loss box says every kind of frame weighs the same.
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
@@ -31,7 +33,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_flarestage.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_uformer.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -44,6 +46,8 @@ CHROMA = bool(P2.get("split_chroma_detail", False))
 PAIRS = float(CONFIG["data"].get("flare_pairs_fraction", 0.0))
 FLARE = bool(P2.get("split_flare_layer", False))
 STAGE = CONFIG.get("flare") if FLARE and P2.get("split_flare_pretrained", False) else None
+UFORMER = P2.get("split_flare_model", "unet") == "uformer_flare7kpp"
+KIND_BALANCE = bool(P2.get("kind_balance", False))
 DY = 40 if FLARE else 0                  # room above phase 2 for the flare layer on the input line
 BAND = 190 if STAGE else 0               # band 4: the flare stage
 # A typical draw (context 40% of the tokens; median 42%, p10-p90 33-51% over 400 draws) whose four
@@ -207,11 +211,18 @@ for left, right in ((t1, t2), (t2, t3), (t3, t4)):
 line([(95, 192 if PAIRS else 200), (95, 76), (1113 if RELIGHT else 1418, 76)], '#2E7D32', width=3)
 if FLARE:
     widths = '·'.join(str(w) for w in P2['split_flare_widths'])
-    fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}] · {P2["split_flare_blocks"]} khối',
-                                                            'ra: vào − lớp lóe (RGB)',
-                                                            'đọc ZI' if P2.get('split_flare_latent', True)
-                                                            else 'không đọc ZI'], title_size=14)
-    badge(566, 122, 'train riêng ở ④ · đóng băng' if STAGE else 'mới · p41: loss lớp lóe riêng', color='#C62828')
+    if UFORMER:
+        scale = f'{float(P2["split_flare_scale"]):g}'.replace('.', ',')
+        fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE: Uformer', ['Flare7K++ · 20,5 M tham số',
+                                                                         f'ảnh ×{scale} → ô vuông 512² · fp32',
+                                                                         'ra: vào − lớp lóe · không đọc ZI'], title_size=14)
+        badge(566, 122, 'fine-tune ở ④ · best.pt · đóng băng', color='#C62828')
+    else:
+        fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}] · {P2["split_flare_blocks"]} khối',
+                                                                'ra: vào − lớp lóe (RGB)',
+                                                                'đọc ZI' if P2.get('split_flare_latent', True)
+                                                                else 'không đọc ZI'], title_size=14)
+        badge(566, 122, 'train riêng ở ④ · đóng băng' if STAGE else 'mới · p41: loss lớp lóe riêng', color='#C62828')
     text(330, 68, 'ảnh nhiễu RGB 256²', size=13, color='#2E7D32', style='font-style="italic"')
     text(846, 68, 'ảnh đã bỏ lóe → tầng tone (đường duy nhất mang MÀU)', size=12, color='#2E7D32', anchor='start',
          style='font-style="italic"')
@@ -354,6 +365,8 @@ terms = ['ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)', 'màu: L1 
 if LOWFREQ:
     terms.append(f'độ sáng: MSE ảnh trung bình khối 8 px × {LOWFREQ:g}'.replace('.', ','))
 terms.append('IMU: L1 · chi tiết Haar · rung · rung thừa · gia số')
+if KIND_BALANCE:
+    terms.append('cân bằng: mỗi loại ảnh nặng ngang nhau (kind_balance)')
 terms = [t for t in terms if t]
 loss2 = node(1150, 562, 350, 30 + 17 * len(terms) + 34, 'loss', 'Loss phase 2', terms)
 recipe = (f'phạt nét ×1,5 · cắt gradient ở {P2["gradient_clip_norm"]:g} · '.replace('.', ',')
@@ -382,14 +395,26 @@ if STAGE:
                'mỗi mẫu một lần rút MỚI'], title_size=14)
     share = lambda k: f'{round(100 * float(kinds[k]) / sum(float(v) for v in kinds.values()))}%'
     widths = '·'.join(str(w) for w in STAGE['widths'])
-    s4 = node(615, BY + 40, 250, 96, 'flare', 'NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}]', f'{STAGE["blocks"]} khối · không đọc ZI',
-                                                              '→ lớp lóe đoán'], title_size=15)
-    s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe',
+    precision = 'fp16' if STAGE['precision'] == 'amp_fp16' else 'fp32'
+    every = f'{STAGE["validation_every_updates"]:,}'.replace(',', ' ')
+    if UFORMER:
+        s4 = node(615, BY + 40, 250, 96, 'flare', 'UFORMER FLARE7K++', ['khởi tạo: trọng số công bố',
+                                                                       f'ảnh ×{float(STAGE["uformer_scale"]):g} → 512²'.replace('.', ','),
+                                                                       'checkpointing · → lớp lóe đoán'], title_size=15)
+    else:
+        s4 = node(615, BY + 40, 250, 96, 'flare', 'NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}]', f'{STAGE["blocks"]} khối · không đọc ZI',
+                                                                  '→ lớp lóe đoán'], title_size=15)
+    s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe' + (' (fine-tune)' if UFORMER else ''),
               ['đích: vào (trước hạt) − đích', f'{STAGE["max_successful_updates"]:,} bước × {STAGE["batch_size"]}'.replace(',', ' '),
-               f'AdamW {STAGE["learning_rate"]:.0e} · fp16 · 1 GPU'.replace('e-0', 'e-')], title_size=15)
-    s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation (chưa thấy)',
-              ['lóe ghép valid: % lóe còn lại', 'cặp FlareImage valid (ảnh thật):', 'PSNR vùng lóe · ngoài lóe',
-               'mỗi 1 000 bước'], title_size=14)
+               f'AdamW {STAGE["learning_rate"]:.0e} · {precision} · 1 GPU'.replace('e-0', 'e-')], title_size=15)
+    if STAGE.get('select_best', False):
+        s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation → giữ best.pt',
+                  ['cặp FlareImage valid (ảnh thật)', f'bước 0 (chưa fine-tune) + mỗi {every} bước',
+                   'PSNR cả ô cắt cao nhất → best.pt', 'không hơn bước 0 → giữ Uformer gốc'], title_size=14)
+    else:
+        s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation (chưa thấy)',
+                  ['lóe ghép valid: % lóe còn lại', 'cặp FlareImage valid (ảnh thật):', 'PSNR vùng lóe · ngoài lóe',
+                   f'mỗi {every} bước'], title_size=14)
     arrow([mid_right(s1), (300, BY + 61), (300, BY + 75), (310, BY + 75)], color='#C62828')
     arrow([mid_right(s2), (300, BY + 117), (300, BY + 101), (310, BY + 101)], color='#C62828')
     arrow([mid_right(s3), mid_left(s4)], color='#C62828')
