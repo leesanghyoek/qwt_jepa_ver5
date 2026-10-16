@@ -192,3 +192,44 @@ def test_bad_settings_fail(change, message):
     change(config)
     with pytest.raises(ValueError, match=message):
         validate_config(config)
+
+
+def test_the_checkpoint_is_found_in_input_or_its_zips_and_downloaded_otherwise(tmp_path, monkeypatch):
+    import sys
+    import types
+    import zipfile
+    from qjepa.models.uformer_flare import download_flare7kpp, find_flare7kpp
+    root, cache = tmp_path / "input", tmp_path / "cache"
+    shard = root / "datasets/me/tartanairshard0"
+    (shard / "Env/flare7kpp").mkdir(parents=True)
+    (shard / "Env/flare7kpp/net_g_last.pth").write_bytes(b"shard")             # inside a shard: never walked
+    assert find_flare7kpp(root, cache, skip=[shard]) is None
+    archive = root / "datasets/me/weights"
+    archive.mkdir(parents=True)
+    with zipfile.ZipFile(archive / "ckpt.zip", "w") as bundle:
+        bundle.writestr("flare7k/net_g_last.pth", b"old")
+        bundle.writestr("flare7kpp/net_g_last.pth", b"new")
+    found = find_flare7kpp(root, cache, skip=[shard])
+    assert found == cache / "net_g_last.pth" and found.read_bytes() == b"new"       # the Flare7K++ one, extracted
+    assert find_flare7kpp(root, cache, skip=[shard]) == found                       # cached
+    (root / "datasets/me/plain/flare7kpp").mkdir(parents=True)
+    (root / "datasets/me/plain/flare7kpp/net_g_last.pth").write_bytes(b"file")
+    found.unlink()
+    assert find_flare7kpp(root, cache, skip=[shard]).read_bytes() == b"file"
+
+    calls = []
+
+    def fake(url, output, quiet=False, refuse=False):
+        calls.append(url)
+        if "QUOTA" in url:
+            raise RuntimeError("Too many users have viewed or downloaded this file recently.")
+        with zipfile.ZipFile(output, "w") as bundle:
+            bundle.writestr("flare7kpp/net_g_last.pth", b"x" * 2_000_000)
+
+    monkeypatch.setitem(sys.modules, "gdown", types.SimpleNamespace(download=fake))
+    assert download_flare7kpp(tmp_path / "quota", "QUOTA") is None
+    got = download_flare7kpp(tmp_path / "copy", "MYCOPY")
+    assert got.stat().st_size == 2_000_000 and "id=MYCOPY" in calls[-1]
+    assert sorted(p.name for p in got.parent.iterdir()) == ["net_g_last.pth"]
+    download_flare7kpp(tmp_path / "official")
+    assert calls[-1].endswith("id=17AX9BJ-GS0in9Ey7vw3BVPISm67Rpzho")
