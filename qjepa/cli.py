@@ -44,7 +44,8 @@ from .data import (
     write_manifest,
 )
 from .data.dataset import load_rgb
-from .corruptions.image import FRAME_KINDS, brightness_stops, degradation_vector, frame_kind
+from .corruptions.image import FRAME_KINDS, LOG_KINDS, brightness_stops, degradation_vector, frame_kind
+from .evaluation.flare_pairs import evaluate_flare_pairs, flare_validation_dataset, flare_validation_text
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
 from .evaluation.reporting import (
@@ -410,6 +411,41 @@ class _RecentMean:
             return ""
         count = max(len(values) for values in kept.values())
         return f"| TB {count} update: " + " ".join(f"{key}={sum(v) / len(v):.4f}" for key, v in kept.items())
+
+
+class _KindMean:
+    """Phase 2's training L1 by kind of frame (corruptions.image.LOG_KINDS) over the last ``window`` updates.
+
+    The batch mixes kinds -- a dark blurred frame next to a flared photo -- so the total loss cannot say which of them
+    the decoder is learning. Each update reports, per kind present, its frame count and mean L1 of input and output
+    against the target (Phase2Trainer.step); here they are pooled frame-weighted. Output below input: that kind is
+    being restored; at or above it: it is not (or is being damaged)."""
+
+    def __init__(self, window: int = 100):
+        self.rows: deque = deque(maxlen=int(window))
+
+    def add(self, metrics: dict[str, Any]) -> None:
+        row = {}
+        for kind in LOG_KINDS:
+            count = metrics.get(f"kind_{kind}_count")
+            if count:
+                row[kind] = (float(count), float(count) * metrics[f"kind_{kind}_l1_in"],
+                             float(count) * metrics[f"kind_{kind}_l1_out"])
+        self.rows.append(row)
+
+    def totals(self) -> dict[str, tuple[float, float, float]]:
+        """kind -> (frames, mean L1 in, mean L1 out) over the window."""
+        pooled: dict[str, list[float]] = {}
+        for row in self.rows:
+            for kind, values in row.items():
+                pooled[kind] = [a + b for a, b in zip(pooled.get(kind, [0.0, 0.0, 0.0]), values)]
+        return {kind: (frames, l1_in / frames, l1_out / frames)
+                for kind in LOG_KINDS if kind in pooled for frames, l1_in, l1_out in [pooled[kind]]}
+
+    def text(self) -> str:
+        parts = [f"{kind} {l1_in:.4f}->{l1_out:.4f} ({100 * (l1_out / max(l1_in, 1e-12) - 1):+.0f}%, n={frames:.0f})"
+                 for kind, (frames, l1_in, l1_out) in self.totals().items()]
+        return f"  theo loai anh (TB {len(self.rows)} update, L1 vao->ra so voi dich): " + " | ".join(parts) if parts else ""
 
 
 KIND_LABELS = {"plain": "tot", "relit": "doi sang", "flare": "loe"}
@@ -1418,6 +1454,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     validation_dataset = _dataset(config, manifest, "valid", fixed_realization=True)
     _fixed_validation_bank(validation_dataset, config["runtime"]["validation_batches"] * config["phase2"]["batch_size"])
     validation_loader = _loader(config, validation_dataset, config["phase2"]["batch_size"], train=False)
+    # The TartanAir bank holds no flare (p36+): FlareImage's valid pairs are scored beside it, log only.
+    pairs_bank = flare_pair_bank(config)
+    flare_validation = None if pairs_bank is None else flare_validation_dataset(
+        _dataset(config, manifest, "valid", fixed_realization=True, flare_pairs=pairs_bank, flare_layer=True))
     blur_dataset = blur_loader = None
     if "blur_validation_samples" in config["phase2"]:
         blur_dataset = _dataset(config, manifest, "valid", fixed_realization=True,
@@ -1492,6 +1532,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     share_rank0_rng()                             # the guard reference drew on rank 0 only
     started, first_update, waited = time.perf_counter(), trainer.successful_updates, 0.0
     recent = _RecentMean()
+    kinds_recent = _KindMean()
     while trainer.successful_updates < maximum:
         timed = [_next_timed(batches) for _ in range(config["phase2"]["gradient_accumulation"])]
         wait = sum(seconds for _, seconds in timed)
@@ -1505,6 +1546,7 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         # restoration goes; IMU noise and the auxiliary heads keep the total high whatever the image does.
         shown = ("loss", "image_l1", "loss_image", "loss_imu", "loss_heads")
         recent.add(metrics, shown)
+        kinds_recent.add(metrics)
         update = trainer.successful_updates
         if update % config["runtime"]["log_every_updates"] == 0 or update == 1:
             print(
@@ -1512,6 +1554,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 f" image_l1={metrics['image_l1']:.6f} {recent.text(shown)}"
                 f" {_pace(started, first_update, update, waited)}"
             )
+            if kinds_recent.text():
+                print(kinds_recent.text())
         if update % checkpoint_every == 0 or update == maximum:
             if not lead:
                 # Rank 0 validates and saves; take its RNG and its restart decision.
@@ -1542,6 +1586,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                         float(blur["strong_edge_gradient_mae_restored"]) /
                         max(float(blur["strong_edge_gradient_mae_input"]), 1e-12),
                     )
+                flare_report = None
+                if flare_validation is not None:
+                    flare_report = evaluate_flare_pairs(flare_validation, trainer.evaluation_model, device,
+                                                        config["phase2"]["batch_size"])
                 guard_pass = False
                 guard_failures: list[str] = []
                 if guard_reference is not None:
@@ -1552,6 +1600,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 record = {"successful_updates": update, **memory, **validation, **blur_validation}
                 if blur_loader is not None:
                     record["blur_validation_worst_ratio"] = blur_score
+                if flare_report is not None:
+                    record.update({f"flare_pairs_validation_{key}": value for key, value in flare_report.items()})
                 if guard_reference is not None:
                     record["guard_pass"] = guard_pass
                     record["guard_failures"] = guard_failures
@@ -1581,6 +1631,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 kinds = kind_summary(validation, "validation_")
                 if kinds:
                     print(f"  theo loai anh: {kinds}")
+                if flare_report is not None:
+                    print(f"  {flare_validation_text(flare_report)}")
                 if blur_validation:
                     print(
                         f"  blur actual={blur_validation['blur_validation_active_frames']}"

@@ -380,6 +380,25 @@ def frame_kind(params: dict[str, object]) -> str:
     return "relit" if light_changed(params) else "plain"
 
 
+# The phase-2 training log's split of each update's frames (cli "theo loai anh" line): finer than FRAME_KINDS, with
+# camera blur on its own, so a mixed batch says which kind of frame the decoder is learning and which it is not.
+LOG_KINDS = ("nhe", "mo", "toi", "toi_mo", "loe")
+
+
+def log_kind(params: dict[str, object]) -> str:
+    """"loe": frame_kind flare; "toi": the light was changed (frame_kind relit) or the target brightened above the
+    input (phase2.target_brighten, ``target_gain`` > 1); "mo": camera blur (defocus or motion) only; "toi_mo": both;
+    "nhe": neither -- grain, resolution and JPEG at most, or a clean frame."""
+    kind = frame_kind(params)
+    if kind == "flare":
+        return "loe"
+    blurred = (not params.get("clean") and active_stages(params)[0]
+               and bool(params.get("defocus") or params.get("motion")))
+    if kind == "relit" or float(params.get("target_gain", 1.0)) > 1.0:
+        return "toi_mo" if blurred else "toi"
+    return "mo" if blurred else "nhe"
+
+
 def light_changed(params: dict[str, object]) -> bool:
     """Whether the corruption changed the frame's light -- low-light stage, uneven light, lamps, fog -- a flare
     aside. phase2.split_flare_layer (p41) labels a FlareImage pair's tone gate with this: its flare is the flare

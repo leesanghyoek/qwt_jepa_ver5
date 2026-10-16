@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..corruptions.image import LOG_KINDS, log_kind
 from ..distributed import gather_shares, rank_and_world
 from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
@@ -179,8 +180,15 @@ class Phase2Trainer:
         # a float() per logged term was ~20 GPU syncs per microbatch, each stopping the
         # CPU from queueing the next microbatch while the GPU finished this one.
         pending: dict[str, torch.Tensor] = {}
+        # Per LOG_KINDS row: frames, summed L1 input vs target, summed L1 output vs target -- the log's "theo loai anh".
+        kind_stats = torch.zeros(len(LOG_KINDS), 3, device=self.device)
         for index, raw_batch in enumerate(microbatches):
             batch = _to_device(raw_batch, self.device)
+            if "corruption" in batch:
+                # A tensor, so the DDP gather below hands every rank the kinds of the whole microbatch.
+                batch["log_kind"] = torch.tensor(
+                    [LOG_KINDS.index(log_kind(c["image"])) if c.get("image") else 0 for c in batch["corruption"]],
+                    device=self.device)
             # DDP averages gradients only on the last microbatch of the update.
             accumulating = self.world > 1 and index < expected - 1
             with self.forward_model.no_sync() if accumulating else nullcontext():
@@ -309,6 +317,12 @@ class Phase2Trainer:
                 with torch.no_grad():
                     parts["image_detail_invisible_fraction"] = invisible_detail_fraction(
                         restored["image_coefficients"], visible_coefficients)
+                    if "log_kind" in batch:
+                        target_image = batch["image_clean"].float()
+                        l1_in = (batch["image_noisy"].float() - target_image).abs().mean(dim=(1, 2, 3))
+                        l1_out = (restored["image"].detach().float().clamp(0, 1) - target_image).abs().mean(dim=(1, 2, 3))
+                        member = F.one_hot(batch["log_kind"], len(LOG_KINDS)).float()        # frames x kinds
+                        kind_stats += torch.stack([member.sum(0), member.T @ l1_in, member.T @ l1_out], dim=1)
                     if "image_flare" in restored:
                         # p43 on Kaggle: some updates came out NaN. Which side: the output, the target, or the
                         # flare layer (its largest answer, and the frame without it)?
@@ -333,9 +347,15 @@ class Phase2Trainer:
         self.scaler.unscale_(self.optimizer)
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.parameters, self.phase["gradient_clip_norm"])
         names = list(pending)
-        values = torch.stack([pending[name].float() for name in names] + [gradient_norm.float()]).tolist()
-        totals.update(zip(names, values[:-1]))
-        norm = values[-1]
+        values = torch.cat([torch.stack([pending[name].float() for name in names] + [gradient_norm.float()]),
+                            kind_stats.flatten()]).tolist()
+        totals.update(zip(names, values[:len(names)]))
+        norm = values[len(names)]
+        for row, kind in enumerate(LOG_KINDS):
+            count, l1_in, l1_out = values[len(names) + 1 + 3 * row: len(names) + 4 + 3 * row]
+            if count:
+                totals.update({f"kind_{kind}_count": count, f"kind_{kind}_l1_in": l1_in / count,
+                               f"kind_{kind}_l1_out": l1_out / count})
         amp_report: dict[str, float | bool] = {}
         if self.amp:
             # An fp16 overflow is routine while the scale settles: the scaler skips

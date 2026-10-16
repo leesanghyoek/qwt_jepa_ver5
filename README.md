@@ -12,6 +12,25 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**Log phase 2 theo loại ảnh** (16/10/2026; chỉ thêm log, không đổi cách train, không đổi hash nào).
+- **Yêu cầu** (người dùng): "ảnh 1 là ảnh mờ tối, ảnh 2 là ảnh có lóe… loss ở mỗi ảnh sẽ khác nhau, nên tôi không biết toàn
+  bộ model có thật sự hoạt động đúng không". Tổng loss của một batch trộn nhiều loại ảnh không nói được model đang học loại
+  nào.
+- **Lúc train**, dưới mỗi dòng `phase2 update=…` in thêm `theo loai anh (TB 100 update, L1 vao->ra so voi dich): nhe … | mo … |
+  toi … | toi_mo … | loe …`: L1 của ảnh vào và ảnh ra so với đích, gộp theo số ảnh. Loại ảnh lấy từ chính bước nhiễu
+  (`corruptions.image.log_kind`): `loe` là ảnh có lóe (cặp FlareImage); `toi` là ánh sáng bị đổi, hoặc đích được làm sáng
+  (p43); `mo` là mờ lệch tiêu cự hoặc chuyển động; `toi_mo` là cả hai; `nhe` là chỉ còn hạt/JPEG. Ra thấp hơn vào (% âm) nghĩa
+  là loại đó đang được khôi phục. `train.jsonl` ghi `kind_<loai>_count/_l1_in/_l1_out` cho từng update.
+- **Mỗi lần validation** (run có FlareImage) chấm thêm mọi cặp FlareImage **valid** (model chưa thấy), dựng như lúc train
+  (ô cắt, mờ, hạt, IMU mượn, đích phase 2), cùng các ô cắt ở mọi lần: `FlareImage valid n=…: ca anh vào -> ra | vung loe … |
+  ngoai loe …`. Vùng lóe là nơi ảnh lóe gốc lệch ảnh sạch hơn 0,05, như `tools/flare_image_test.py`. Validation TartanAir từ
+  p36 không có lóe nên trước đây lóe chỉ đo được sau khi train (Cell 12c/12d). Chỉ ghi log (`flare_pairs_validation_*`), không
+  ảnh hưởng chọn checkpoint.
+- Bằng chứng: `tests/test_phase2_kind_log.py`. Nhãn đúng theo từng bước nhiễu; số ảnh các loại cộng lại bằng số ảnh mỗi
+  update, và loại `loe` đúng bằng số ô FlareImage; gộp theo số ảnh, không theo số update; validation chấm mỗi cặp valid một
+  lần, các lần như nhau, và model trả nguyên ảnh vào thì ra = vào. `tests/test_flare_pairs.py`: hai tiến trình DDP cho cùng
+  số theo loại như một tiến trình.
+
 **p43_brightgt — ảnh đích tối được làm sáng** (config `configs/kaggle_brightgt.yaml` → OUT `outputs/p43_brightgt`). Bằng
 p42 cộng `phase2.target_brighten`. Chỉ đổi phase 2: **dùng lại phase 1 của p40 và giai đoạn lóe của p42** (cùng hash
 `phase1` và `flare`).

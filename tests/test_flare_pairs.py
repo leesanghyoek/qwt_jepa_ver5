@@ -411,8 +411,10 @@ def test_two_processes_train_with_the_pairs_what_one_does(tmp_path):
                                     output / "phase2/last.pt")
         assert restarts == (4 if name == "ddp" else 0)
     assert json.loads((tmp_path / "ddp/phase2/execution.json").read_text())["backend"] == "ddp"
+    # Phase 2's split by kind of frame (test_phase2_kind_log) reads the gathered batch: the same on two ranks.
+    kind_keys = ("kind_loe_count", "kind_loe_l1_in", "kind_loe_l1_out")
     for phase in ("phase1", "phase2"):
-        for key in ("loss", "gradient_norm"):
+        for key in ("loss", "gradient_norm", *(kind_keys if phase == "phase2" else ())):
             single_values, ddp_values = (_records(tmp_path / name, phase, key) for name in ("single", "ddp"))
             assert len(single_values) == len(ddp_values) == 3, (phase, key)
             assert ddp_values == pytest.approx(single_values, rel=2e-3), (phase, key)
