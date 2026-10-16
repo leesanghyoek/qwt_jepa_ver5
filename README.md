@@ -12,6 +12,20 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**Đo trước p44: nhánh lóe tự train vs Uformer đã train sẵn của Flare7K++** (16/10/2026; không train, không đổi hash).
+- **Vì sao.** p43 (Cell 12d, 8 cặp test, cả khung): vùng lóe 15,55 → 19,75 dB nhưng ngoài lóe 34,28 → 30,93 dB; người
+  dùng: "chỉ có 1 vài ảnh tối có giảm 1 chút độ lóe nhưng vẫn còn lóe". p36–p43 đều chỉ gỡ khoảng 1/4–1/3 lóe. Ba bài
+  báo người dùng đưa (LightsOut 2510.15868, UniSER 2511.14183, Meta 2609.39527) cho cùng một bài học: thứ quyết định là
+  một model khử lóe đã được huấn luyện kỹ và dữ liệu lóe đúng loại, không phải kiến trúc.
+- **Làm gì.** `qjepa/models/uformer_flare.py` port Uformer của Flare7K++ (github.com/ykdai/Flare7K, giấy phép S-Lab:
+  chỉ dùng phi thương mại) để nạp đúng checkpoint công bố `net_g_last.pth`, và `remove_flare` chạy như `test_large.py`
+  của họ (cạnh ngắn 512, ô 512 chồng nhau). `tools/flare_pretrained_probe.py` (Cell 12e) chạy nhánh lóe hiện tại
+  (`OUT/flare/last.pt`) và Uformer, mỗi cái một mình, trên mọi cặp FlareImage test, so với gt gốc: PSNR cả ảnh, vùng lóe,
+  ngoài lóe.
+- **Đã kiểm trên máy** (so với file gốc của Flare7K, không có trọng số thật vì Google Drive báo hết hạn mức): 308 tham số
+  cùng tên và kích thước, đầu ra trùng từng bit trên ảnh 512×512 với cùng trọng số ngẫu nhiên; cách ghép ô khớp
+  `test_large.py` trong mức làm tròn uint8 của chính nó (tối đa 3,6/255). Bằng chứng: `tests/test_uformer_flare.py`.
+
 **Log phase 2 theo loại ảnh** (16/10/2026; chỉ thêm log, không đổi cách train, không đổi hash nào).
 - **Yêu cầu** (người dùng): "ảnh 1 là ảnh mờ tối, ảnh 2 là ảnh có lóe… loss ở mỗi ảnh sẽ khác nhau, nên tôi không biết toàn
   bộ model có thật sự hoạt động đúng không". Tổng loss của một batch trộn nhiều loại ảnh không nói được model đang học loại
