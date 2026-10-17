@@ -1222,7 +1222,9 @@ def flare_stage_layer(config: dict[str, Any], output: str | Path | None) -> Path
 def command_train_flare(args: argparse.Namespace) -> None:
     """p42: the flare stage -- the flare layer alone, on Flare7K++ flares composited afresh for every sample.
 
-    One GPU: the layer is small next to phase 2 and the CPU composites the frames. Resumes from its own last.pt."""
+    One process per GPU with runtime.parallel ddp (as phases 1 and 2): flare.batch_size stays the global batch, each
+    rank takes its contiguous share of every batch, DDP averages the gradients, rank 0 validates and saves. p44's
+    fine-tuned Uformer took 3.9 s per update on one T4. Resumes from its own last.pt."""
     from .corruptions.lens_flare import LensFlareBank
     from .data.flare_stage import FlareStageDataset, collate_flare_stage, held_out_pairs, lens_config
     config = load_config(_config_path(args.config))
@@ -1233,6 +1235,18 @@ def command_train_flare(args: argparse.Namespace) -> None:
     manifest_hash = manifest["meta"]["manifest_hash"]
     device = resolve_device(args.device or config["runtime"]["device"])
     output = Path(args.output or config["runtime"]["output_dir"]) / "flare"
+    rank, world = rank_and_world()
+    ranks = _ddp_world(config, args, device)
+    if ranks > 1 and world == 1:
+        if int(stage["batch_size"]) % ranks:
+            print(f"flare.batch_size {stage['batch_size']} does not split over {ranks} GPUs: one GPU", flush=True)
+        else:
+            spawn_ranks(command_train_flare, args, ranks, cuda=device.type == "cuda")
+            return
+    lead = rank == 0
+    if world > 1:
+        # The vCPUs are shared, and each rank composites only its share of a batch.
+        config["data"]["num_workers"] = -(-int(config["data"]["num_workers"]) // world)
     seed_everything(int(stage["seed"]))
     trainer = FlareStageTrainer(build_flare_layer(stage), stage, device)
     uformer = stage.get("model", "unet") == "uformer_flare7kpp"
@@ -1263,8 +1277,12 @@ def command_train_flare(args: argparse.Namespace) -> None:
         trainer.successful_updates = int(payload["successful_updates"])
         pretrained_sha256 = metadata.get("pretrained_sha256")
         del payload
-    _prepare_run(output, args.resume, trainer.successful_updates)
-    _write_resolved(config, output)
+    trainer.distribute()
+    with rank0_section():
+        if lead:
+            _prepare_run(output, args.resume, trainer.successful_updates)
+            _write_resolved(config, output)
+    share_rank0_rng()
     lens = lens_config(stage["lens"])
     lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction)
     pairs = flare_pair_bank(config)
@@ -1280,15 +1298,18 @@ def command_train_flare(args: argparse.Namespace) -> None:
     real = held_out_pairs(pairs, "valid", tuple(config["data"]["image_size"])) if pairs is not None else []
     common = {"num_workers": int(config["data"]["num_workers"]), "collate_fn": collate_flare_stage,
               "pin_memory": bool(config["data"]["pin_memory"]) and device.type == "cuda"}
-    # Sample i of the run is always draw i: a resumed run reads the very samples it would have.
+    # Sample i of the run is always draw i: a resumed run reads the very samples it would have. With several ranks,
+    # rank r takes the r-th contiguous share of every batch: together they read exactly the one-GPU batch.
     start = trainer.successful_updates * batch_size
-    loader = DataLoader(train_set, batch_size=batch_size, drop_last=True,
-                        sampler=range(start, len(train_set)), **common)
+    share = batch_size // world
+    order = [index for first_index in range(start, len(train_set), batch_size)
+             for index in range(first_index + rank * share, first_index + (rank + 1) * share)]
+    loader = DataLoader(train_set, batch_size=share, drop_last=True, sampler=order, **common)
     valid_loader = DataLoader(valid_set, batch_size=batch_size, **common)
     print(f"flare stage | layer {sum(p.numel() for p in trainer.model.parameters()) / 1e6:.2f} M params | "
           f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)} | device {device}"
-          f" | {'fp16' if trainer.amp else 'fp32'}", flush=True)
-    log = _Jsonl(output / "train.jsonl")
+          f" | {'fp16' if trainer.amp else 'fp32'} | {world} GPU, {share} ảnh mỗi GPU mỗi bước", flush=True)
+    log = _Jsonl(output / "train.jsonl" if lead else None)
 
     def metadata_at(update: int) -> dict[str, Any]:
         return {"pipeline_version": 3, "phase": "flare_stage", "successful_updates": update,
@@ -1312,10 +1333,13 @@ def command_train_flare(args: argparse.Namespace) -> None:
             print(f"  -> best.pt = update {update} (PSNR cặp FlareImage valid {score:.2f})", flush=True)
 
     if select_best and trainer.successful_updates == 0:
-        report = validate_flare_stage(trainer, valid_loader, real, batch_size)
-        log.write({"successful_updates": 0, "validation": report})
-        print(f"  validation update=0 (trước fine-tune) | {validation_text(report)}", flush=True)
-        keep_if_best(0, report)
+        with rank0_section():
+            if lead:                                         # the other ranks wait in share_rank0_rng
+                report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+                log.write({"successful_updates": 0, "validation": report})
+                print(f"  validation update=0 (trước fine-tune) | {validation_text(report)}", flush=True)
+                keep_if_best(0, report)
+        share_rank0_rng()
     recent = _RecentMean()
     keys = ("loss", "flare_l1_composite", "flare_size_composite", "flare_l1_pair", "flare_size_pair",
             "flare_l1_plain")
@@ -1338,16 +1362,22 @@ def command_train_flare(args: argparse.Namespace) -> None:
         if update % 50 == 0 or update == first + 1:
             print(f"flare update={_progress(update, maximum)} loss={metrics['loss']:.5f} {recent.text(keys)} "
                   f"{_pace(started, first, update, waited)}", flush=True)
-        if update % int(stage["validation_every_updates"]) == 0 or update == maximum:
-            report = validate_flare_stage(trainer, valid_loader, real, batch_size)
-            log.write({"successful_updates": update, "validation": report})
-            print(f"  validation update={_progress(update, maximum)} | {validation_text(report)}", flush=True)
-            keep_if_best(update, report)
-        if update % int(stage["checkpoint_every_updates"]) == 0 or update == maximum:
-            metadata = metadata_at(update)
-            if not all(bool(torch.isfinite(value).all()) for value in trainer.model.state_dict().values()):
-                raise RuntimeError(f"train-flare: NaN/inf weights at update {update}; the last good checkpoint stays")
-            atomic_torch_save(trainer.payload(metadata, serializable_config(config)), output / "last.pt")
+        validate = update % int(stage["validation_every_updates"]) == 0 or update == maximum
+        save = update % int(stage["checkpoint_every_updates"]) == 0 or update == maximum
+        if not (validate or save):
+            continue
+        with rank0_section():
+            if lead and validate:                            # rank 0 alone; the others wait in share_rank0_rng
+                report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+                log.write({"successful_updates": update, "validation": report})
+                print(f"  validation update={_progress(update, maximum)} | {validation_text(report)}", flush=True)
+                keep_if_best(update, report)
+            if lead and save:
+                metadata = metadata_at(update)
+                if not all(bool(torch.isfinite(value).all()) for value in trainer.model.state_dict().values()):
+                    raise RuntimeError(f"train-flare: NaN/inf weights at update {update}; the last good checkpoint stays")
+                atomic_torch_save(trainer.payload(metadata, serializable_config(config)), output / "last.pt")
+        share_rank0_rng()
 
 
 def _load_flare_stage(config: dict[str, Any], system: RestorationSystem, output: str | Path | None) -> str:

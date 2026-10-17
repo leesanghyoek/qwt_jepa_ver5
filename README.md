@@ -33,6 +33,12 @@ phase 2: **dùng lại phase 1 của p40** (cùng hash phase 1).
   (khoảng 9 GB mỗi ảnh ở 512²), 51 MiB khi có — batch 4 ở 512² vừa T4 16 GB. `select_best`: validation ở bước 0 (Uformer
   gốc) và mỗi 500 bước; `flare/best.pt` giữ bản có PSNR cả ô cắt cao nhất trên cặp FlareImage valid. Không bản nào hơn
   bước 0 thì `best.pt` là Uformer gốc: không thể tệ hơn dùng Uformer đóng băng nguyên trạng.
+- **Giai đoạn lóe trên 2 GPU** (17/10/2026, người dùng: "quá lâu, hiện tại đang train trên 1 gpu, sửa lại để train trên
+  2GPU T4"): trên Kaggle 1 T4 mất 3,9 s/bước (~3,3 giờ cho 3 000 bước). Với `runtime.parallel: ddp` (như phase 1 và 2),
+  `train-flare` chạy một tiến trình mỗi GPU; `flare.batch_size` vẫn là batch toàn cục, mỗi rank lấy phần liền nhau của
+  mọi batch, DDP lấy trung bình gradient, batch NaN được quyết chung cho mọi rank, rank 0 validate và lưu. `runtime`
+  ngoài hash: run đang chạy resume tiếp được. Bằng chứng: `tests/test_flare_stage.py`
+  (`test_two_processes_train_the_flare_stage_one_process_does`: 2 tiến trình gloo ra đúng trọng số của 1 tiến trình).
 - **Phase 2:** nạp `flare/best.pt` (giai đoạn lóe phải xong), đóng băng như p42. `kind_balance`: mỗi loại ảnh
   (`corruptions.image.LOG_KINDS`) trong một microbatch có tổng trọng số bằng nhau, trung bình 1 — làm bằng hook nhân
   gradient của mọi đầu ra ảnh từng khung theo trọng số của nó (mọi số hạng loss ảnh là tổng theo khung), nên loss in ra

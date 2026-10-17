@@ -55,10 +55,22 @@ class FlareStageTrainer:
                                            weight_decay=float(stage["weight_decay"]))
         self.scaler = _grad_scaler(self.amp)
         self.successful_updates = 0
+        # Training forward; distribute() swaps in DDP. Validation always runs the bare model (rank 0 alone).
+        self.train_model = self.model
+        self.world = 1
 
-    def _forward(self, image: torch.Tensor) -> torch.Tensor:
+    def distribute(self) -> None:
+        """Several ranks (one per GPU): each takes its share of every batch, DDP averages the gradients -- the
+        global batch's mean loss, as on one GPU. Call after the weights are loaded: DDP starts from rank 0's."""
+        from ..distributed import rank_and_world
+        self.world = rank_and_world()[1]
+        if self.world > 1:
+            ids = [torch.cuda.current_device()] if self.device.type == "cuda" else None
+            self.train_model = nn.parallel.DistributedDataParallel(self.model, device_ids=ids, broadcast_buffers=False)
+
+    def _forward(self, image: torch.Tensor, model: nn.Module | None = None) -> torch.Tensor:
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.amp):
-            _, flare = self.model(None, image)
+            _, flare = (model or self.model)(None, image)
         return flare.float()
 
     def step(self, batch: dict[str, Any]) -> dict[str, Any]:
@@ -71,9 +83,13 @@ class FlareStageTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         image = batch["image_noisy"].to(self.device, non_blocking=True)
         target = batch["flare_target"].to(self.device, non_blocking=True)
-        flare = self._forward(image)
+        flare = self._forward(image, self.train_model)
         loss = F.l1_loss(flare, target)
-        if not torch.isfinite(loss):
+        bad = not bool(torch.isfinite(loss))
+        if self.world > 1:
+            from ..distributed import any_rank
+            bad = any_rank(bad)             # every rank skips together, or DDP waits for a backward that never comes
+        if bad:
             # A non-finite batch leaves the weights as they are; train-flare stops after NONFINITE_LIMIT in a row.
             self.optimizer.zero_grad(set_to_none=True)
             self.successful_updates += 1

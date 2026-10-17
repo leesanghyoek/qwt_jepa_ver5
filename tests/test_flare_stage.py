@@ -337,3 +337,25 @@ def test_the_frame_without_the_stage_flare_stays_in_range():
         decoder.flare.net.tail.bias.fill_(-5.0)                     # a layer answering far out of range
         _, parts = decoder(torch.zeros(1, 8, 4, 4), torch.rand(1, 3, 32, 32))
     assert float(parts["image_deflared"].min()) >= 0.0 and float(parts["image_deflared"].max()) <= 1.0
+
+
+def test_two_processes_train_the_flare_stage_one_process_does(tmp_path):
+    """p44 on Kaggle: 3.9 s per update on one T4 for the fine-tuned Uformer. With runtime.parallel ddp the stage runs
+    one process per GPU, each on its contiguous share of every batch; the weights end where one process leaves them,
+    and the validation and checkpoints are rank 0's alone."""
+    torch.set_num_threads(1)
+    config, _, manifest_dir = _stage(tmp_path, select_best=True)
+    path, single = _train_flare(config, tmp_path, "single")
+    main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(single)])
+    config["runtime"].update(parallel="ddp", gpu_count=2)
+    path, double = _train_flare(config, tmp_path, "double")
+    main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(double)])
+    one, two = (load_checkpoint(run / "flare/last.pt") for run in (single, double))
+    assert one["successful_updates"] == two["successful_updates"] == 4
+    for key, value in one["model"].items():
+        assert torch.allclose(value, two["model"][key], rtol=1e-4, atol=1e-6), key
+    rows = [json.loads(line) for line in (double / "flare/train.jsonl").read_text().splitlines()]
+    assert [row["successful_updates"] for row in rows if "loss" in row] == [1, 2, 3, 4]       # rank 0's log only
+    assert [row["successful_updates"] for row in rows if "validation" in row] == [0, 2, 4]
+    best_one, best_two = (load_checkpoint(run / "flare/best.pt")["metadata"] for run in (single, double))
+    assert best_one["selected_update"] == best_two["selected_update"]
