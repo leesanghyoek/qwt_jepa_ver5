@@ -33,6 +33,7 @@ from qjepa.execution import RestorationForward  # noqa: E402
 from qjepa.models import RestorationSystem  # noqa: E402
 from qjepa.models.color_edge import downsample  # noqa: E402
 from qjepa.training.perceptual import PerceptualLoss, load_vgg16_features  # noqa: E402
+from qjepa.training.phase2 import freeze_flare_stage  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -61,6 +62,9 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
     system = RestorationSystem(phase1.backbone, phase1.normalizer, build_decoders(config),
                                *phase2_latent_modules(config, phase1)).to(device)
     system.freeze_backbone()
+    # As Phase2Trainer: the flare stage's layer is frozen (p44 on Kaggle: the probe trained the 20 M Uformer at 512x512,
+    # ran out of the T4's memory twice and left phase 2 in fp32).
+    freeze_flare_stage(system, config["phase2"])
     decoder = system.decoders.image
     height, width = config["data"]["image_size"]
     length = config["data"]["imu_window"]
@@ -71,7 +75,7 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
     crop = int(config["phase2"].get("perceptual_crop", 0))
     vgg = PerceptualLoss(load_vgg16_features(pretrained=False), crop=crop).to(device)
     forward = RestorationForward(system)
-    optimizer = torch.optim.AdamW(system.decoders.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW([p for p in system.decoders.parameters() if p.requires_grad], lr=1e-4)
     with torch.no_grad():
         latent = system.encode(image, imu, image_time, imu_times)
     zi = latent.ZI.detach()
@@ -127,7 +131,7 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
                 loss = loss + 0.5 * vgg(out["image"], image)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(list(system.decoders.parameters()), 5.0)
+            torch.nn.utils.clip_grad_norm_([p for p in system.decoders.parameters() if p.requires_grad], 5.0)
             scaler.step(optimizer)
             scaler.update()
 

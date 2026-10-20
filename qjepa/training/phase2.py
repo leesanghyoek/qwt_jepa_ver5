@@ -40,6 +40,17 @@ def _weight_frames(restored: dict[str, torch.Tensor], weights: torch.Tensor) -> 
             value.register_hook(lambda grad, w=weights.view(shape): grad * w.to(grad.dtype))
 
 
+def freeze_flare_stage(system: RestorationSystem, phase: dict[str, Any]) -> str | None:
+    """phase2.split_flare_freeze (p42+): the flare stage's layer stays as train-flare left it -- no gradient, so no
+    activations kept for one either (p44's Uformer at 512x512 would need ~9 GB per frame). Its hash, or None when
+    the key is off. Phase2Trainer and tools/decoder_speed_probe.py both call it, before DDP is built."""
+    if not phase.get("split_flare_freeze", False):
+        return None
+    flare = system.decoders.image.flare
+    flare.requires_grad_(False)
+    return state_dict_hash(flare)
+
+
 def latent_predictor_hash(system: RestorationSystem) -> str | None:
     """Hash of the frozen phase-1 predictor (and its degradation head), None without one.
 
@@ -77,11 +88,7 @@ class Phase2Trainer:
         # optimizer and of DDP's gradient sync; checkpoint_payload checks it never moved. Frozen BEFORE DDP is built:
         # built first, DDP waited for the layer's gradients and died at the second update (p43 on Kaggle).
         # Absent: every decoder trains.
-        self.frozen_flare_hash = None
-        if self.phase.get("split_flare_freeze", False):
-            flare = self.system.decoders.image.flare
-            flare.requires_grad_(False)
-            self.frozen_flare_hash = state_dict_hash(flare)
+        self.frozen_flare_hash = freeze_flare_stage(self.system, self.phase)
         self.forward_model, self.device_ids = parallel_forward(
             RestorationForward(self.system), device, config["runtime"].get("gpu_count", "auto")
         )

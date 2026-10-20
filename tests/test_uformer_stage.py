@@ -233,3 +233,25 @@ def test_the_checkpoint_is_found_in_input_or_its_zips_and_downloaded_otherwise(t
     assert sorted(p.name for p in got.parent.iterdir()) == ["net_g_last.pth"]
     download_flare7kpp(tmp_path / "official")
     assert calls[-1].endswith("id=17AX9BJ-GS0in9Ey7vw3BVPISm67Rpzho")
+
+
+def test_the_speed_probe_and_phase2_freeze_the_flare_stage_alike():
+    """p44 on Kaggle: tools/decoder_speed_probe.py trained the 20 M Uformer at 512x512, ran out of the T4's memory
+    and left phase 2 in fp32. Both now freeze it through freeze_flare_stage."""
+    from pathlib import Path
+    from qjepa.config import build_decoders
+    from qjepa.training.phase2 import freeze_flare_stage
+
+    class _System(nn.Module):
+        def __init__(self, decoders):
+            super().__init__()
+            self.decoders = decoders
+
+    system = _System(build_decoders(P44))
+    assert all(p.requires_grad for p in system.decoders.image.flare.parameters())
+    digest = freeze_flare_stage(system, P44["phase2"])
+    assert digest and not any(p.requires_grad for p in system.decoders.image.flare.parameters())
+    assert any(p.requires_grad for p in system.decoders.parameters())                 # the rest still trains
+    assert freeze_flare_stage(system, {**P44["phase2"], "split_flare_freeze": False}) is None
+    probe = Path("tools/decoder_speed_probe.py").read_text()
+    assert "freeze_flare_stage(system, config[\"phase2\"])" in probe

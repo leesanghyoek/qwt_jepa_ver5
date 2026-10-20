@@ -33,6 +33,21 @@ phase 2: **dùng lại phase 1 của p40** (cùng hash phase 1).
   (khoảng 9 GB mỗi ảnh ở 512²), 51 MiB khi có — batch 4 ở 512² vừa T4 16 GB. `select_best`: validation ở bước 0 (Uformer
   gốc) và mỗi 500 bước; `flare/best.pt` giữ bản có PSNR cả ô cắt cao nhất trên cặp FlareImage valid. Không bản nào hơn
   bước 0 thì `best.pt` là Uformer gốc: không thể tệ hơn dùng Uformer đóng băng nguyên trạng.
+- **Kết quả p44 trên Kaggle** (commit 600f7a5, 17/10/2026; giai đoạn lóe 1 GPU 199 phút, phase 2 fp32 169 phút):
+  - Giai đoạn lóe, cặp FlareImage valid: Uformer gốc 24,00 dB → 25,34 dB ở bước 3 000 (vùng lóe 19,17 → 20,70; vẫn tăng
+    chậm). Riêng nhánh lóe trên 108 cặp test (Cell 12e, so với gt gốc): cả ảnh 24,96 / vùng lóe 19,75 / ngoài lóe 33,18 dB
+    (ảnh vào 21,54 / 15,79 / 33,15; Uformer gốc 24,27 / 19,07 / 32,48; nhánh p42 23,53 / 18,33 / 30,97) — không còn phá
+    phần ngoài lóe.
+  - Validation phase 2 (TartanAir): PSNR 23,47 so với 21,37 dB của ảnh vào (p43 23,15); ảnh tốt 29,61 → 30,08 (p43 tụt
+    xuống 28,00); ảnh đổi sáng 15,81 → 19,79. FlareImage valid: 20,92 → 23,68, vùng lóe 19,84, ngoài lóe 27,45 → 27,15.
+    Test (1/8 frame): 23,88 so với 22,26 dB. Cell 12d (8 cặp, cả khung): vùng lóe 15,55 → 21,24 (p43 19,75), ngoài lóe
+    34,28 → 32,17 (p43 30,93).
+  - Còn hỏng: quầng chói lớn (HALO 001053: vùng lóe 9,08 → 9,36 dB) và ảnh flare_removal phủ 60–95% khung vẫn ở 15–20 dB;
+    ảnh `nhe`/`mo` trong batch train vẫn ra tệ hơn vào (+100–280% / +20–100% L1, kind_balance không đổi được); ảnh test
+    tốt 30,46 → 29,89 dB.
+  - `tools/decoder_speed_probe.py` không đóng băng nhánh lóe như lúc train, nên train Uformer 20 M tham số ở 512², hết bộ
+    nhớ T4 và để phase 2 chạy fp32. Sửa: `training.phase2.freeze_flare_stage`, dùng chung cho Phase2Trainer và probe
+    (`tests/test_uformer_stage.py::test_the_speed_probe_and_phase2_freeze_the_flare_stage_alike`).
 - **Giai đoạn lóe trên 2 GPU** (17/10/2026, người dùng: "quá lâu, hiện tại đang train trên 1 gpu, sửa lại để train trên
   2GPU T4"): trên Kaggle 1 T4 mất 3,9 s/bước (~3,3 giờ cho 3 000 bước). Với `runtime.parallel: ddp` (như phase 1 và 2),
   `train-flare` chạy một tiến trình mỗi GPU; `flare.batch_size` vẫn là batch toàn cục, mỗi rank lấy phần liền nhau của

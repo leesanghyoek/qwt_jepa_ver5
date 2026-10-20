@@ -261,7 +261,7 @@ def test_the_image_only_layer_runs_in_fp32_under_autocast_and_train_flare_stops_
     from qjepa.training import flare_stage
     monkeypatch.setattr(cli, "NONFINITE_LIMIT", 3)
     monkeypatch.setattr(flare_stage.FlareStageTrainer, "_forward",
-                        lambda self, image: torch.full_like(image, float("nan")))
+                        lambda self, image, model=None: torch.full_like(image, float("nan")))
     with pytest.raises(SystemExit):
         main(["train-flare", "--config", str(path), "--manifest", str(manifest_dir), "--output", str(run)])
     rows = [json.loads(line) for line in (run / "flare/train.jsonl").read_text().splitlines()]
