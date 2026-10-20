@@ -1254,12 +1254,23 @@ def command_train_flare(args: argparse.Namespace) -> None:
     pretrained_sha256 = None
     if uformer and not args.resume:
         # p44: fine-tuning starts from Flare7K++'s released weights (a path, out of the hash; its sha256 is recorded).
-        from .models.uformer_flare import load_flare7kpp_into
+        # p45 (flare.uformer_init: stage): from a previous run's flare/best.pt instead, e.g. p44's fine-tuned Uformer.
+        from .models.uformer_flare import file_sha256, load_flare7kpp_into
         checkpoint_path = config["data"].get("uformer_checkpoint")
+        from_stage = stage.get("uformer_init", "release") == "stage"
         if not checkpoint_path or not Path(checkpoint_path).is_file():
-            raise ValueError("flare.model: uformer_flare7kpp starts from Flare7K++'s net_g_last.pth: set "
-                             "data.uformer_checkpoint (the notebook's Cell 4 finds or downloads it)")
-        pretrained_sha256 = load_flare7kpp_into(trainer.model, checkpoint_path)
+            wanted = "a flare stage's best.pt" if from_stage else "Flare7K++'s net_g_last.pth"
+            raise ValueError(f"flare.model: uformer_flare7kpp starts from {wanted}: set data.uformer_checkpoint "
+                             "(the notebook's Cell 4 finds it)")
+        if from_stage:
+            previous = load_checkpoint(checkpoint_path, "cpu")
+            if previous.get("metadata", {}).get("phase") != "flare_stage":
+                raise ValueError(f"{checkpoint_path} is not a flare-stage checkpoint (flare.uformer_init: stage)")
+            trainer.model.load_state_dict(previous["model"], strict=True)
+            pretrained_sha256 = file_sha256(checkpoint_path)
+            del previous
+        else:
+            pretrained_sha256 = load_flare7kpp_into(trainer.model, checkpoint_path)
         trainer.model.to(device)
     if args.resume:
         payload = load_checkpoint(args.resume, device)
@@ -1284,7 +1295,15 @@ def command_train_flare(args: argparse.Namespace) -> None:
             _write_resolved(config, output)
     share_rank0_rng()
     lens = lens_config(stage["lens"])
-    lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction)
+    wu_root = None
+    if lens.lens_flare_wu_fraction > 0:
+        # p45: Wu et al.'s daytime flare-only photos (a path, out of the hash; Cell 4 finds or downloads them).
+        wu_root = config["data"].get("wu_flare_root")
+        if not wu_root or not Path(wu_root).is_dir():
+            raise ValueError("flare.lens.lens_flare_wu_fraction > 0 reads Wu et al.'s flare photos: set "
+                             "data.wu_flare_root (qjepa/data/wu_flares.py fetch_wu_flares; the notebook's Cell 4)")
+    lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction,
+                              wu_root=wu_root)
     pairs = flare_pair_bank(config)
     batch_size, maximum = int(stage["batch_size"]), int(stage["max_successful_updates"])
     train_set = FlareStageDataset(_dataset(config, manifest, "train", fixed_realization=False, target_brighten=False),
@@ -1324,7 +1343,7 @@ def command_train_flare(args: argparse.Namespace) -> None:
 
     def keep_if_best(update: int, report: dict[str, float]) -> None:
         nonlocal best_score
-        score = selection_score(report)
+        score = selection_score(report, stage.get("select_on", "real"))
         if select_best and score > best_score:
             best_score = score
             metadata = {**metadata_at(update), "selected_update": update, "selection_score": score}

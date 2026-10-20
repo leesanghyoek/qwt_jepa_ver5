@@ -26,6 +26,12 @@ loe nen k can chinh". Hai phan, cung mot nguon sang:
    sac), vanh halo, bui va vet lau tren mat kinh truoc sang len gan nguon. Nguon ngoai khung van gay bong ma va choi.
    Tia sao nhieu xa khong dung lai: lop Flare7K++ da co tia.
 
+3. (p45, lens_flare_wu_fraction > 0) Anh chi co loe cua Wu va cs. 2021 (Google, CC BY 4.0, qjepa/data/wu_flares.py),
+   o data.wu_flare_root rieng: loe BAN NGAY kieu mat troi -- quang choi, chuoi bong ma da giac, tia sao. Hai nguon:
+   "Wu-captured" (2 001 anh chup that qua ong kinh, nhom 10 khung lien tiep) va "Wu-simulated" (3 000 anh mo phong,
+   nhom theo hinh la khau). Khong co anh nguon sang: nguon sang = phan gan bao hoa cua chinh anh loe (``wu_light``),
+   nen dich van giu mat troi; mat troi ngoai khung thi nguon ~ 0.
+
 Chia theo KHOI 10 so thu tu lien tiep trong ten file (cac lop gan nhau thuong cung mot ong kinh / mot lan chup), tung nguon rieng:
 valid va test moi ben ~holdout_fraction, nen PSNR valid/test do tren lop loe model chua thay luc train.
 """
@@ -45,10 +51,19 @@ from .halo import split_scenes
 from .rng import generator
 
 LENS_SOURCES = ("Flare7K", "Flare-R")
+# p45: anh chi co loe cua Wu va cs. 2021 (data.wu_flare_root), thu muc con theo nguon; khong co anh nguon sang.
+WU_SOURCES = ("Wu-captured", "Wu-simulated")
+WU_LAYOUT = {"Wu-captured": "captured", "Wu-simulated": "simulated"}
+# Nguon sang cua anh Wu: kenh lon nhat tu WU_LIGHT_LOW (khong) toi WU_LIGHT_HIGH (tron) tren 255.
+WU_LIGHT_LOW, WU_LIGHT_HIGH = 225.0, 252.0
+GHOST_REF_RADIUS = 0.035        # lens_ghost_strength is the reflectance of a ghost this big (of the frame side)
+WU_DRAWS = 8                    # lens_wu_min_flare: draws of a faint Wu layer, at most
 LAYOUT = {"Flare7K": ("Flare7K/Scattering_Flare/Compound_Flare", "Flare7K/Scattering_Flare/Light_Source"),
           "Flare-R": ("Flare-R/Compound_Flare", "Flare-R/Light_Source")}
 # Phan canh dai cua anh loe ma o 512 cua Flare7K++ thay o ti le 1 (CenterCrop 512 tren anh 1440 / 1008x756).
-FRAME_FRACTION = {"Flare7K": 512.0 / 1440.0, "Flare-R": 512.0 / 1008.0}
+FRAME_FRACTION = {"Flare7K": 512.0 / 1440.0, "Flare-R": 512.0 / 1008.0,
+                  # Anh Wu 1008x752 nhu Flare-R (1008x756): cung o 512 cua anh goc.
+                  "Wu-captured": 512.0 / 1008.0, "Wu-simulated": 512.0 / 1008.0}
 SPLITS = ("train", "valid", "test")
 SUFFIXES = (".png", ".jpg", ".jpeg")
 GROUP = 10
@@ -56,18 +71,24 @@ GROUP = 10
 COATINGS = ((0.35, 1.0, 0.45), (1.0, 0.35, 0.85), (1.0, 0.65, 0.25), (0.35, 0.6, 1.0), (0.85, 1.0, 0.3),
             (0.6, 0.4, 1.0))
 GHOST_KINDS = ("disk", "ring", "blob")
+DAYTIME_KINDS = (0.5, 0.35, 0.15)   # p45, lop Wu: nhieu vong (quang) hon (khong phai Wu: 0,7 / 0,1 / 0,2)
 REACH = 0.6     # nguon ngoai khung tat dan sau REACH x canh khung
 
 
 class LensFlareBank:
     """Cac cap (lop loe, nguon sang) cua Flare7K++ trong mot thu muc, chia train/valid/test theo khoi 10 anh."""
 
-    def __init__(self, root: str | Path, *, holdout_fraction: float, sources=LENS_SOURCES):
+    def __init__(self, root: str | Path, *, holdout_fraction: float, sources=LENS_SOURCES, wu_root=None):
         self.root = Path(root)
-        self.sources = tuple(sources)
+        # p45: the Wu et al. flare-only photos (qjepa/data/wu_flares.py) as two more sources. None: as before.
+        self.wu_root = Path(wu_root) if wu_root is not None else None
+        self.sources = tuple(sources) + (WU_SOURCES if self.wu_root is not None else ())
         self.holdout_fraction = float(holdout_fraction)
         self.splits: dict[str, dict[str, tuple[str, ...]]] = {split: {} for split in SPLITS}
         for source in self.sources:
+            if source in WU_SOURCES:
+                self._add_wu(source)
+                continue
             flare_dir, light_dir = (self.root / part for part in LAYOUT[source])
             if not flare_dir.is_dir() or not light_dir.is_dir():
                 raise FileNotFoundError(
@@ -91,17 +112,49 @@ class LensFlareBank:
                 raise ValueError(f"{source} o {self.root}: khong con lop nao cho {empty} ({len(names)} lop, "
                                  f"holdout_fraction {holdout_fraction})")
 
+    def _add_wu(self, source: str) -> None:
+        folder = self.wu_root / WU_LAYOUT[source]
+        if not folder.is_dir():
+            raise FileNotFoundError(f"data.wu_flare_root={self.wu_root}: thieu {WU_LAYOUT[source]}/ (notebook Cell 4 tai "
+                                    "bo anh loe Wu va cs. bang qjepa/data/wu_flares.py)")
+        names = sorted(name for name in os.listdir(folder) if name.lower().endswith(SUFFIXES))
+        if source == "Wu-simulated":
+            # Cung mot hinh la khau (4 muc mo x 4 o cat) o cung mot split: valid/test thay hinh la khau chua thay.
+            group = {name: f"{source}:{_aperture(name, index)}" for index, name in enumerate(names)}
+        else:
+            # Khung lien tiep cua cung mot lan quay: khoi 10 nhu Flare7K++.
+            group = {name: f"{source}:{_number(name, index) // GROUP}" for index, name in enumerate(names)}
+        counts: dict[str, int] = {}
+        for key in group.values():
+            counts[key] = counts.get(key, 0) + 1
+        assignment = split_scenes(counts, self.holdout_fraction)
+        for split in SPLITS:
+            self.splits[split][source] = tuple(name for name in names if assignment[group[name]] == split)
+        empty = [split for split in SPLITS if not self.splits[split][source]]
+        if empty:
+            raise ValueError(f"{source} o {folder}: khong con anh nao cho {empty} ({len(names)} anh)")
+
+    def has_wu(self) -> bool:
+        return self.wu_root is not None
+
     def pick(self, split: str, source: str, rng: np.random.Generator) -> str:
         names = self.splits[split][source]
         return names[int(rng.integers(len(names)))]
 
     def load(self, source: str, name: str) -> tuple[np.ndarray, np.ndarray]:
         """(lop loe, nguon sang) uint8 [S,S,3] vuong: anh khong vuong duoc dem hai ben bang gia tri nho nhat cua tung
-        kenh (nen cua lop loe; remove_background keo no ve 0), nhu flare7kpp-builder."""
+        kenh (nen cua lop loe; remove_background keo no ve 0), nhu flare7kpp-builder. Anh Wu: nguon sang = wu_light."""
+        if source in WU_SOURCES:
+            with Image.open(self.wu_root / WU_LAYOUT[source] / name) as image:
+                flare = np.asarray(image.convert("RGB"))
+            images = (flare, wu_light(flare))
+        else:
+            images = []
+            for part in LAYOUT[source]:
+                with Image.open(self.root / part / name) as image:
+                    images.append(np.asarray(image.convert("RGB")))
         out = []
-        for part in LAYOUT[source]:
-            with Image.open(self.root / part / name) as image:
-                pixels = np.asarray(image.convert("RGB"))
+        for pixels in images:
             height, width = pixels.shape[:2]
             if height != width:
                 side = max(height, width)
@@ -116,9 +169,23 @@ class LensFlareBank:
         return out[0], out[1]
 
     def describe(self) -> dict[str, object]:
-        return {"root": str(self.root), "holdout_fraction": self.holdout_fraction,
+        return {"root": str(self.root), "wu_root": str(self.wu_root) if self.wu_root else None,
+                "holdout_fraction": self.holdout_fraction,
                 "samples": {split: {source: len(names) for source, names in by_source.items()}
                             for split, by_source in self.splits.items()}}
+
+
+def wu_light(flare: np.ndarray) -> np.ndarray:
+    """Nguon sang cua mot anh loe Wu (uint8 [H,W,3]): pixel ma kenh lon nhat gan bao hoa, mem dan tu WU_LIGHT_LOW toi
+    WU_LIGHT_HIGH -- loi mat troi / den. Anh khong co diem bao hoa (nguon ngoai khung) cho nguon ~ 0."""
+    weight = np.clip((flare.max(axis=-1).astype(np.float32) - WU_LIGHT_LOW) / (WU_LIGHT_HIGH - WU_LIGHT_LOW), 0.0, 1.0)
+    return np.round(flare.astype(np.float32) * weight[..., None]).astype(np.uint8)
+
+
+def _aperture(name: str, index: int) -> int:
+    """So hinh la khau trong ten anh mo phong Wu (aperture0137_blur02_crop01.png -> 137)."""
+    match = re.search(r"aperture(\d+)", name)
+    return int(match.group(1)) if match else index
 
 
 def _number(name: str, index: int) -> int:
@@ -152,9 +219,18 @@ def _log_uniform(rng: np.random.Generator, bounds) -> float:
     return float(math.exp(rng.uniform(math.log(float(bounds[0])), math.log(float(bounds[1])))))
 
 
-def draw_lens_parameters(rng: np.random.Generator, cfg, bank: LensFlareBank, split: str) -> dict[str, object]:
-    """Moi tham so ngau nhien cua mot lan loe: lop Flare7K++ va phep bien doi cua no, roi (neu co) cac loi quang hoc."""
+def draw_lens_parameters(rng: np.random.Generator, cfg, bank: LensFlareBank, split: str,
+                         keep_source: str | None = None) -> dict[str, object]:
+    """Moi tham so ngau nhien cua mot lan loe: lop Flare7K++ va phep bien doi cua no, roi (neu co) cac loi quang hoc.
+    ``keep_source``: rut lai voi nguon nay (draw_lens_flare), cung so lan rut."""
     source = "Flare-R" if float(rng.random()) < cfg.lens_flare_real_fraction else "Flare7K"
+    if float(getattr(cfg, "lens_flare_wu_fraction", 0.0)) > 0:
+        # p45: own draws, taken only with the key on, so a config without it draws exactly as before.
+        wu, captured, wu_gain = float(rng.random()), float(rng.random()), _uniform(rng, cfg.lens_flare_wu_gain)
+        if bank.has_wu() and wu < cfg.lens_flare_wu_fraction:
+            source = "Wu-captured" if captured < cfg.lens_flare_wu_captured_fraction else "Wu-simulated"
+    if keep_source is not None:
+        source = keep_source
     shift = float(cfg.lens_flare_translate)
     drawn: dict[str, object] = {
         "source": source,
@@ -170,20 +246,49 @@ def draw_lens_parameters(rng: np.random.Generator, cfg, bank: LensFlareBank, spl
         "blur_sigma_px": _uniform(rng, cfg.lens_flare_blur_sigma_px),
         "dc_offset": float(rng.uniform(-cfg.lens_flare_dc_offset, cfg.lens_flare_dc_offset)),
     }
+    if source in WU_SOURCES:
+        drawn["gain"] = wu_gain
     optics = float(rng.random()) < cfg.lens_optics_probability
-    drawn["optics"] = _draw_optics(rng, cfg) if optics else None
+    # p45 (lens_wu_ghost_boost): a Wu layer always gets the daytime ghost chain.
+    daytime = source in WU_SOURCES and float(getattr(cfg, "lens_wu_ghost_boost", (0.0, 0.0))[1]) > 0
+    drawn["optics"] = _draw_optics(rng, cfg, daytime) if optics or daytime else None
     return drawn
 
 
-def _draw_optics(rng: np.random.Generator, cfg) -> dict[str, object]:
+def draw_lens_flare(rng: np.random.Generator, cfg, bank: LensFlareBank, split: str, height: int, width: int):
+    """(params, flare, light): draw_lens_parameters then lens_flare_layers. p45 (lens_wu_min_flare > 0): a Wu layer
+    whose flare beyond its light source averages under lens_wu_min_flare over the frame is drawn again with the same
+    source, at most WU_DRAWS times (the last draw stays). Anything else is one draw, as before."""
+    params = draw_lens_parameters(rng, cfg, bank, split)
+    flare, light = lens_flare_layers(bank, params, height, width)
+    floor = float(getattr(cfg, "lens_wu_min_flare", 0.0))
+    for _ in range(WU_DRAWS - 1):
+        if params["source"] not in WU_SOURCES or floor <= 0 or float((flare - light).mean()) >= floor:
+            break
+        params = draw_lens_parameters(rng, cfg, bank, split, keep_source=str(params["source"]))
+        flare, light = lens_flare_layers(bank, params, height, width)
+    return params, flare, light
+
+
+def _draw_optics(rng: np.random.Generator, cfg, daytime: bool = False) -> dict[str, object]:
     """Mot ong kinh (theo lens_flare_demo.draw_flare_parameters): khau do, chuoi bong ma, vanh halo, bui. Do dai tinh
-    theo canh khung (radius, soft) de cung mot ong kinh ra cung hinh o moi co anh."""
+    theo canh khung (radius, soft) de cung mot ong kinh ra cung hinh o moi co anh.
+
+    ``daytime`` (p45, lop Wu): la khau lens_wu_ghost_blades (bo tron con nua: canh ro), lens_wu_ghost_round bong ma
+    tron, nhieu vong hon (DAYTIME_KINDS), bong ma lon hon
+    (lens_wu_ghost_radius) va manh hon (x lens_wu_ghost_boost x (ban kinh / GHOST_REF_RADIUS)^2, tuc sang nhu nhau
+    tren moi pixel), vanh halo luon co va manh len cung he so."""
     aperture = {"blades": int(rng.integers(5, 10)), "rotation": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "roundness": float(rng.uniform(0.0, 0.3))}
+    boost, radii = 1.0, (0.015, 0.08)
+    if daytime:
+        if int(cfg.lens_wu_ghost_blades):
+            aperture.update(blades=int(cfg.lens_wu_ghost_blades), roundness=0.5 * aperture["roundness"])
+        boost, radii = _log_uniform(rng, cfg.lens_wu_ghost_boost), tuple(cfg.lens_wu_ghost_radius)
     ghosts = []
     for _ in range(int(rng.integers(cfg.lens_ghost_count[0], cfg.lens_ghost_count[1] + 1))):
-        kind = str(rng.choice(GHOST_KINDS, p=(0.7, 0.1, 0.2)))       # da so la hinh la khau dac
-        radius = _log_uniform(rng, (0.015, 0.08))
+        kind = str(rng.choice(GHOST_KINDS, p=DAYTIME_KINDS if daytime else (0.7, 0.1, 0.2)))  # da so: hinh la khau dac
+        radius = _log_uniform(rng, radii)
         color = np.asarray(COATINGS[int(rng.integers(len(COATINGS)))]) * rng.uniform(0.85, 1.0, 3)
         ghosts.append({
             "kind": kind,
@@ -191,12 +296,15 @@ def _draw_optics(rng: np.random.Generator, cfg) -> dict[str, object]:
             "radius": radius,                             # phan cua canh khung
             "soft": float(rng.uniform(0.004, max(0.006, 0.06 * radius)) if kind != "ring" else rng.uniform(0.002, 0.005)),
             "dispersion": float(rng.uniform(0.003, 0.012) if kind == "disk" else rng.uniform(0.006, 0.02)),
-            "reflectance": _log_uniform(rng, cfg.lens_ghost_strength),
+            "reflectance": _log_uniform(rng, cfg.lens_ghost_strength)
+                           * (boost * (radius / GHOST_REF_RADIUS) ** 2 if daytime else 1.0),
             "color": color.tolist(),
         })
-    halo_ring = bool(rng.random() < 0.5)
+        if daytime:                                                  # tron thay vi hinh la khau
+            ghosts[-1]["round"] = bool(rng.random() < cfg.lens_wu_ghost_round)
+    halo_ring = bool(rng.random() < 0.5) or daytime
     halo = {"kind": "ring", "t": float(rng.uniform(-0.6, -0.1)), "radius": float(rng.uniform(0.3, 0.45)),
-            "soft": 0.012, "dispersion": 0.05, "reflectance": 3e-4 * _log_uniform(rng, (0.5, 2.0)),
+            "soft": 0.012, "dispersion": 0.05, "reflectance": 3e-4 * _log_uniform(rng, (0.5, 2.0)) * boost,
             "color": [1.0, 0.9, 1.0]}
     return {"aperture": aperture, "ghosts": ghosts, "halo": halo if halo_ring else None,
             "energy": _log_uniform(rng, cfg.lens_optics_energy),
@@ -415,7 +523,7 @@ def optics_layers(height: int, width: int, x: float, y: float, optics: dict[str,
     centre = np.array([width / 2.0, height / 2.0])
     axis = np.array([x, y]) - centre
     for ghost in optics["ghosts"]:
-        _add_ghost(ghosts, centre, axis, ghost, energy, optics["aperture"], size)
+        _add_ghost(ghosts, centre, axis, ghost, energy, None if ghost.get("round") else optics["aperture"], size)
     if optics["halo"] is not None:
         _add_ghost(ghosts, centre, axis, optics["halo"], energy, None, size)
     layers = {"veil": veil[..., None] * energy, "bloom": bloom[..., None] * energy, "ghosts": ghosts}

@@ -490,3 +490,51 @@ def download_flare7kpp(cache_dir, drive_id: str | None = None) -> Path | None:
         raw.rename(target)
     print(f"Đã tải {target} ({target.stat().st_size / 2**20:.1f} MiB)", flush=True)
     return target
+
+
+def _is_uformer_stage(path) -> bool:
+    """``path`` is a flare-stage checkpoint (train-flare's last.pt/best.pt) holding a UformerFlareLayer."""
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return False
+    return (isinstance(payload, dict) and payload.get("metadata", {}).get("phase") == "flare_stage"
+            and "net.input_proj.proj.0.weight" in payload.get("model", {}))
+
+
+def find_stage_checkpoint(input_root, cache_dir, prefer: str = "", skip=(), max_depth: int = 12) -> Path | None:
+    """p45 (flare.uformer_init: stage): a previous run's flare/best.pt holding the fine-tuned Uformer, under
+    ``input_root`` (Kaggle Input) -- a file .../flare/best.pt, or a member .../flare/best.pt of a zip (extracted to
+    ``cache_dir``) -- paths containing ``prefer`` (e.g. "p44_uformer") first. Shards and image folders are not walked."""
+    root, skip = Path(input_root), {str(path) for path in skip}
+    files, archives = [], []
+    top = len(root.parts)
+    for directory, children, names in os.walk(root):
+        here = Path(directory)
+        if len(here.parts) - top >= max_depth:
+            children[:] = []
+        else:
+            children[:] = sorted(c for c in children if not c.startswith(SCAN_PRUNE) and str(here / c) not in skip)
+        for name in sorted(names):
+            if name == "best.pt" and here.name == "flare":
+                files.append(here / name)
+            elif name.endswith(".zip"):
+                archives.append(here / name)
+    rank = lambda text: (prefer not in str(text)) if prefer else False
+    for path in sorted(files, key=rank):
+        if _is_uformer_stage(path):
+            return path
+    for archive in sorted(archives, key=rank):
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                members = sorted((m for m in bundle.namelist() if m.endswith("flare/best.pt")), key=rank)
+                for member in members:
+                    target = Path(cache_dir) / member.replace("/", "__")
+                    _extract(bundle, member, target)
+                    if _is_uformer_stage(target):
+                        print("Giải nén", member, "từ", archive, flush=True)
+                        return target
+                    target.unlink(missing_ok=True)
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return None

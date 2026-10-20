@@ -582,7 +582,22 @@ FOG_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) i
 HALO_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("halo_"))
 LENS_KEYS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("lens_"))
 # Optional switches inside a group: absent means the old behaviour, so they need not be written out.
-OPTIONAL_KEYS = ("illum_highlight_rolloff", "illum_max_brighten_stops")
+OPTIONAL_KEYS = ("illum_highlight_rolloff", "illum_max_brighten_stops",
+                 # p45: absent means no Wu et al. layers (fraction 0), so p39's config hashes and draws as before; with
+                 # the fraction on, _require_wu_keys wants the other two written out.
+                 "lens_flare_wu_fraction", "lens_flare_wu_captured_fraction", "lens_flare_wu_gain",
+                 "lens_wu_ghost_boost", "lens_wu_ghost_radius", "lens_wu_ghost_blades", "lens_wu_ghost_round",
+                 "lens_wu_min_flare")
+WU_LENS_KEYS = ("lens_flare_wu_captured_fraction", "lens_flare_wu_gain", "lens_wu_ghost_boost", "lens_wu_ghost_radius",
+                "lens_wu_ghost_blades", "lens_wu_ghost_round", "lens_wu_min_flare")
+
+
+def _require_wu_keys(lens: dict[str, Any], where: str) -> None:
+    if float(lens.get("lens_flare_wu_fraction", 0.0)) > 0:
+        missing = [key for key in WU_LENS_KEYS if key not in lens]
+        if missing:
+            raise ValueError(f"{where}.lens_flare_wu_fraction > 0 needs {', '.join(missing)} written out (the hash "
+                             "records only what the config says)")
 
 
 def _validate_light(config: dict[str, Any]) -> None:
@@ -603,6 +618,10 @@ def _validate_light(config: dict[str, Any]) -> None:
             if missing:
                 raise ValueError(f"corruption.image.{switch} > 0 needs every {switch.split('_')[0]}_* key written "
                                  f"out (the hash records only what the config says); missing: {', '.join(missing)}")
+    _require_wu_keys(image, "corruption.image")
+    if float(image.get("lens_wu_min_flare", 0.0)) > 0:
+        raise ValueError("corruption.image.lens_wu_min_flare: the redraw of faint Wu layers is the flare stage's "
+                         "(flare.lens); keep it 0 here")
     if float(image.get("halo_probability", 0.0)) > 0:
         root = config["data"].get("halo_root")
         if not isinstance(root, str) or not root:
@@ -926,7 +945,11 @@ def _validate_target_brighten(config: dict[str, Any]) -> None:
 # its released checkpoint, data.uformer_checkpoint); uformer_scale: the Uformer's upsampling of each frame (2: a 256
 # crop to the 512 it was trained at); select_best: validate at update 0 and every validation_every_updates on the
 # held-out FlareImage pairs and keep the best weights (flare/best.pt) -- the pretrained ones if none beats them.
-FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best")
+# p45: uformer_init: "release" (absent: Flare7K++'s released weights) or "stage" (a previous run's flare/best.pt, e.g.
+# p44's, in data.uformer_checkpoint); select_on: "real" (absent: PSNR on the held-out FlareImage pairs) or
+# "real_and_composite" (the mean of the pairs' and the valid composites' PSNR gains -- the composites hold the Wu et
+# al. daytime flares the pairs do not).
+FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best", "uformer_init", "select_on")
 FLARE_MODELS = ("unet", "uformer_flare7kpp")
 
 
@@ -975,6 +998,14 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
                           stage.get("uformer_scale"))
     if "select_best" in stage and not isinstance(stage["select_best"], bool):
         raise ValueError("flare.select_best must be true or false")
+    if stage.get("uformer_init", "release") not in ("release", "stage"):
+        raise ValueError("flare.uformer_init must be release or stage")
+    if "uformer_init" in stage and stage.get("model", "unet") != "uformer_flare7kpp":
+        raise ValueError("flare.uformer_init starts the Uformer: set flare.model: uformer_flare7kpp")
+    if stage.get("select_on", "real") not in ("real", "real_and_composite"):
+        raise ValueError("flare.select_on must be real or real_and_composite")
+    if "select_on" in stage and not stage.get("select_best", False):
+        raise ValueError("flare.select_on chooses flare/best.pt: set flare.select_best: true")
     if not config["data"].get("lens_flare_root"):
         raise ValueError("flare needs data.lens_flare_root: the folder holding Flare7K/ and Flare-R/ (Kaggle "
                          "khoidb/flare7k)")
@@ -1014,7 +1045,8 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
     if not isinstance(stage["lens"], dict):
         raise ValueError("flare.lens must map lens_* keys to values")
     from .data.flare_stage import lens_config
-    lens_config(stage["lens"])                               # unknown keys or bad ranges fail here
+    lens_config(stage["lens"]).validate()                    # unknown keys or bad ranges fail here
+    _require_wu_keys(stage["lens"], "flare.lens")
 
 
 def _validate_exposure_standardize(config: dict[str, Any]) -> None:
@@ -1296,7 +1328,8 @@ def build_corruptors(config: dict[str, Any]):
                              effects=image_cfg.halo_effects, holdout_fraction=image_cfg.halo_holdout_fraction)
     lens = None
     if image_cfg.lens_flare_probability > 0:
-        lens = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=image_cfg.lens_flare_holdout_fraction)
+        lens = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=image_cfg.lens_flare_holdout_fraction,
+                             wu_root=config["data"].get("wu_flare_root") if image_cfg.lens_flare_wu_fraction > 0 else None)
     return (LowLightImageCorruptor(image_cfg, seed, halo_bank=halo, lens_bank=lens),
             TrajectoryImuCorruptor(imu_cfg, seed))
 

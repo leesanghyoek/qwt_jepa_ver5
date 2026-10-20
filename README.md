@@ -12,13 +12,73 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p45_sunflare — lóe ban ngày: mặt trời hắt vào ống kính, quầng chói, bóng ma đa giác** (config
+`configs/kaggle_sunflare.yaml` → OUT `outputs/p45_sunflare`). Bằng p44 cộng `flare.uformer_init: stage`,
+`flare.select_on: real_and_composite`, `flare.lens.lens_flare_wu_{fraction,captured_fraction,gain}` và
+`flare.lens.lens_wu_{ghost_boost,ghost_radius,ghost_blades,ghost_round,min_flare}` (thiếu khoá: như cũ, hash p44 không đổi). Dùng lại phase 1 của p40 (cùng hash phase 1); train lại giai đoạn lóe, **fine-tune tiếp từ
+`flare/best.pt` của p44**, rồi phase 2.
+
+![Kiến trúc p45_sunflare](docs/kien_truc_ijepa.svg)
+
+- **Yêu cầu** (người dùng, 20/10/2026): "nếu ban ngày bạn chụp 1 tấm ảnh, ảnh có thể bị lóe sáng do mặt trời, cũng có thể
+  bị ánh sáng hất vào ống kính, nó sẽ có các quầng và lục giác nên tôi cần xử lý nó"; với bài Wu et al.: "ảnh trong bài
+  báo khá đúng với mong muốn của tôi". Flare7K++ và FlareImage hầu hết là lóe đèn ban đêm; p44 gần như không gỡ quầng
+  chói lớn (HALO 001053: vùng lóe 9,08 → 9,36 dB).
+- **Dữ liệu** (`qjepa/data/wu_flares.py`): ảnh chỉ có lóe của Wu, He, Xue, Garg, Chen, Veeraraghavan, Barron, "How to
+  Train Neural Networks for Flare Removal" (ICCV 2021), bucket công khai `gs://gresearch/lens-flare`, CC BY 4.0: 2 001 ảnh
+  chụp thật qua ống kính với nguồn điểm rất sáng (bóng ma, quầng) và 3 000 ảnh mô phỏng quang học sóng (189 hình lá khẩu
+  × 4 mức mờ × 4 ô cắt: tia sao, chói), đều 1008×752 trên nền tối, ~2,3 GiB. `fetch_wu_flares` tải qua HTTPS, thu cạnh dài
+  về 640 px bằng BOX trên ánh sáng tuyến tính (giữ tổng ánh sáng), chạy lại thì bỏ qua file đã có; `find_wu_flares` tìm
+  bản dựng sẵn trong Input. `data.wu_flare_root` là đường dẫn, ngoài mọi hash.
+- **Lớp lóe** (`corruptions/lens_flare.py`): hai nguồn mới `Wu-captured` và `Wu-simulated` bên cạnh Flare7K++, cùng
+  đường ghép (gamma, phép biến hình, mờ, offset DC, quang học tùy chọn). Chia split theo nhóm để valid/test là hình chưa
+  thấy: ảnh mô phỏng theo hình lá khẩu, ảnh chụp theo khối 10 khung liền nhau (nguồn sáng di chuyển chậm giữa các khung).
+  Wu không có ảnh nguồn sáng riêng, nên nguồn sáng của ảnh đích là lõi gần bão hòa của chính ảnh lóe (`wu_light`: trọng
+  số tăng tuyến tính từ 225 tới 252 của kênh lớn nhất): ảnh đích giữ mặt trời, khung không có nguồn trong hình thì nguồn
+  bằng 0. Mỗi lớp Wu lấy hệ số riêng `lens_flare_wu_gain` [3, 10] (Wu et al. tổng hợp với hệ số tới 10 trên ánh sáng
+  tuyến tính; 1–3 gần như không thấy trên khung ban ngày).
+- **Bóng ma lục giác to** (người dùng, 20/10/2026, sau khi xem ảnh: "trong bài báo của họ ảnh có lóe và các quầng ống
+  kính nhưng data bạn tải về lại chỉ có lóe sáng"; rồi "bóng ma to hơn giống bài báo"). Đo trên 20 ảnh Wu tải về
+  (`~/Downloads/wu_flare_samples`): ảnh chụp có bóng ma đa giác và vòng cung quầng nhưng tối hơn lõi 10–40 lần, chỉ
+  thấy khi tăng sáng ×10–×40; ghép lên khung ban ngày thì màn chói của mặt trời làm trắng khung trước khi bóng ma hiện
+  ra. Ảnh mô phỏng chỉ có tia; `Flare7K/Reflective_Flare` của Flare7K++ chỉ là đốm tròn nhỏ. Nên mỗi lớp Wu kèm chuỗi
+  bóng ma + vòng halo của repo (`_draw_optics`, chuỗi theo trục qua tâm khung): lá khẩu `lens_wu_ghost_blades: 6`
+  (40% bóng ma tròn, `lens_wu_ghost_round: 0.4`; dạng vòng/quầng 35% thay vì 10%, `DAYTIME_KINDS`), bán
+  kính `lens_wu_ghost_radius` 0,04–0,16 cạnh khung (trước 0,015–0,08), độ phản xạ `lens_ghost_strength` ×
+  `lens_wu_ghost_boost` 6–20 × (bán kính / 0,035)² — bóng to phản xạ theo diện tích nên sáng như nhau trên mỗi pixel;
+  vòng halo luôn có, mạnh lên cùng hệ số. Xem trước: ×10–×30 ra lục giác màu trong mờ rõ; ×30 với bóng to thành khối
+  trắng đặc, nên lấy 6–20. Người dùng xem tiếp FlareX (NeurIPS 2025, Kaggle `lishenqu/flarex`) và PBFG (ICCV 2025):
+  không bộ nào có quầng lục giác/tròn như mong muốn, nên bộ sinh này là nguồn chính của kiểu lóe đó.
+- **Rút lại lớp Wu mờ** (`lens_wu_min_flare: 0.01`, chỉ ở giai đoạn lóe): lớp Wu mà lóe trừ nguồn trung bình dưới 0,01
+  trên khung (nguồn bị đẩy ra ngoài ô cắt, ảnh chụp không có nguồn trong khung, hệ số thấp) được rút lại với cùng nguồn,
+  tối đa 8 lần. Xem trước với hệ số 1–10 và không rút lại: 10/20 mẫu gần như vô hình; sau khi sửa: 0/40 dưới ngưỡng.
+  Khoảng 0,15 s mỗi mẫu ở 256² trên CPU.
+- **Giai đoạn lóe:** `lens_flare_wu_fraction: 0.5` (một nửa lớp lóe ghép là Wu; lóe ghép chiếm 60% mẫu, nên ~30% mẫu),
+  70% trong đó là ảnh chụp thật. `uformer_init: stage`: trọng số đầu là `flare/best.pt` của run trước (phải là checkpoint
+  giai đoạn lóe có Uformer; nạp strict, sha256 ghi lại); `uformer_init` vắng hoặc `release` giữ cách p44 (checkpoint
+  công bố). `select_on: real_and_composite`: `best.pt` theo trung bình PSNR lời (ra − vào) trên cặp FlareImage valid và
+  trên lóe ghép valid — chỉ lóe ghép valid có lớp Wu, nên chọn theo riêng cặp FlareImage như p44 sẽ không thấy lóe ban
+  ngày. Bước 0 là nhánh p44: không bản nào hơn thì giữ nguyên nó.
+- **Notebook:** RUN `p45_sunflare`, phase 1 từ `p40_flarefocus`. Cell 4 tìm `outputs/p44_uformer/flare/best.pt` trong
+  phiên hoặc trong zip Output của p44 gắn làm Input (`find_stage_checkpoint`, ưu tiên đường dẫn có `p44_uformer`), và tìm
+  ảnh Wu trong Input, không có thì tự tải về `/kaggle/working/wu_flare`.
+- **Kiến trúc:** `docs/kien_truc_ijepa.svg` vẽ lại cho p45 (mặc định đọc `configs/kaggle_sunflare.yaml`): ④ nguồn lóe Wu
+  50% + bóng ma lục giác/tròn + halo, khởi tạo từ best.pt của p44, validation trên cặp FlareImage và lóe ghép, DDP 2 GPU.
+- Bằng chứng: `tests/test_wu_flares.py`. Nguồn sáng là lõi bão hòa, khung không có nguồn thì bằng 0; bank thêm hai nguồn
+  Wu và giữ mỗi hình lá khẩu trong một split; lớp Wu lấy hệ số riêng, config thiếu khoá rút y như cũ; lớp Wu luôn có
+  chuỗi bóng ma 6 cạnh hoặc tròn (đúng tỉ lệ) trong khoảng bán kính và vòng halo, độ phản xạ chia diện tích nằm trong khoảng đặt, lớp khác giữ
+  quang học cũ; lớp Wu mờ được rút lại với cùng nguồn, không có ngưỡng thì `draw_lens_flare` y như một lần rút; `shrink` giữ tổng
+  ánh sáng, `fetch_wu_flares` không tải một ảnh hai lần, `find_wu_flares` bỏ bản thiếu ảnh; lóe ghép của giai đoạn lóe
+  rút lớp Wu đúng split; `select_on` tính đúng trung bình; train-flare với `uformer_init: stage` bắt đầu từ best.pt trước
+  (sha256 đúng), giữ best.pt đúng bản tốt nhất, từ chối file không phải giai đoạn lóe, và `find_stage_checkpoint` tìm thấy
+  best.pt trong zip; p45 là p44 cộng các khoá trên với hash phase 1 của p44, hash p44 không đổi, thư mục Wu ngoài mọi
+  hash; cài sai thì báo lỗi.
+
 **p44_uformer — nhánh khử lóe là Uformer của Flare7K++, fine-tune trên dữ liệu lóe của repo; loss phase 2 cân
 bằng theo loại ảnh** (config `configs/kaggle_uformer.yaml` → OUT `outputs/p44_uformer`). Bằng p43 cộng
 `flare.model: uformer_flare7kpp`, `flare.uformer_scale`, `flare.select_best`, `phase2.split_flare_model`,
 `phase2.split_flare_scale` và `phase2.kind_balance` (thiếu khoá: như cũ, hash p43 không đổi). Chỉ đổi giai đoạn lóe và
 phase 2: **dùng lại phase 1 của p40** (cùng hash phase 1).
-
-![Kiến trúc p44_uformer](docs/kien_truc_ijepa.svg)
 
 - **Yêu cầu** (người dùng, 16/10/2026): sau phép đo dưới đây chọn cách B, "tải model Uformer rồi train lại" (fine-tune).
 - **Phép đo dẫn tới nó** (Cell 12e trên p43, 108 cặp FlareImage test, so với gt gốc): vùng lóe vào 15,79 → nhánh p42/p43

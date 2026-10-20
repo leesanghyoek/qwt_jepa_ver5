@@ -25,7 +25,7 @@ import torch
 from scipy import ndimage
 
 from ..corruptions.image import LowLightImageCorruptionConfig
-from ..corruptions.lens_flare import LensFlareBank, draw_lens_parameters, lens_flare_layers
+from ..corruptions.lens_flare import LensFlareBank, draw_lens_flare
 from ..corruptions.light import linear_to_srgb, srgb_to_linear
 from ..corruptions.rng import derive_seed
 from .flare_pairs import FlarePairBank
@@ -141,8 +141,7 @@ class FlareStageDataset(torch.utils.data.Dataset):
         sigma, photons = self._camera(rng)
         if kind == "composite":
             background, info["frame"] = self._background(rng)
-            params = draw_lens_parameters(rng, self.lens, self.lens_bank, self.split)
-            flare, light = lens_flare_layers(self.lens_bank, params, *self.size)
+            params, flare, light = draw_lens_flare(rng, self.lens, self.lens_bank, self.split, *self.size)
             linear = srgb_to_linear(background)
             flared = linear_to_srgb(_blur(linear + flare, sigma))
             target = linear_to_srgb(_blur(linear + light, sigma))

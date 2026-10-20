@@ -164,6 +164,28 @@ class LowLightImageCorruptionConfig:
     # This fraction of the flared frames (mode "full") skips the environment, as halo_clear_probability does.
     lens_flare_clear_probability: float = 0.0
     lens_flare_real_fraction: float = 0.5                # Flare-R (real captures) vs Flare7K (synthetic)
+    # p45: of the flare layers, this fraction comes from Wu et al. 2021's daytime flare-only photos (data.wu_flare_root,
+    # qjepa/data/wu_flares.py) -- sun-like veiling glare, polygonal ghost chains, starbursts -- and of those, this
+    # fraction from the 2 001 real captures (the rest from the 3 000 wave-optics simulations). 0: as before.
+    lens_flare_wu_fraction: float = 0.0
+    lens_flare_wu_captured_fraction: float = 0.7
+    # Gain of a Wu layer (uniform; Wu et al.'s synthesis draws up to 10 after removing the background): their photos are
+    # far dimmer than Flare7K++'s layers, and a daytime scene needs a strong flare to show one.
+    lens_flare_wu_gain: tuple[float, float] = (1.0, 10.0)
+    # p45: every Wu layer also gets the lens's ghost chain and halo ring (the optics below), with aperture blades
+    # lens_wu_ghost_blades (0: 5-9 at random), radius lens_wu_ghost_radius (log-uniform, of the frame side) and
+    # reflectance lens_ghost_strength x lens_wu_ghost_boost (log-uniform) x (radius / 0.035)^2: a bigger ghost reflects
+    # in proportion to its area, so it is as bright per pixel. Wu et al.'s captures hold their ghosts 10-40x dimmer than
+    # the core -- gone on a daytime frame -- where their paper's photos show big, plain polygons. (0, 0): Wu layers take
+    # the optics as any other layer does.
+    lens_wu_ghost_boost: tuple[float, float] = (0.0, 0.0)
+    lens_wu_ghost_radius: tuple[float, float] = (0.015, 0.08)
+    lens_wu_ghost_blades: int = 0
+    lens_wu_ghost_round: float = 0.0     # of those ghosts, this fraction round instead of the aperture's polygon
+    # Flare stage only (flare.lens): a Wu layer whose flare beyond its light source averages under this (linear light,
+    # over the frame) is drawn again with the same source, at most 8 times -- source out of the crop, a capture with
+    # the source out of view, a low gain -- so a daytime sample shows its flare. 0: no redraw.
+    lens_wu_min_flare: float = 0.0
     lens_flare_holdout_fraction: float = 0.1             # of each source, blocks of 10, for valid and for test each
     lens_flare_gain: tuple[float, float] = (0.8, 3.0)    # uniform, Flare7K++ ColorJitter brightness (0.8, 3)
     lens_flare_gamma: tuple[float, float] = (1.8, 2.2)   # the layer's 8-bit values ^ gamma = linear light
@@ -183,12 +205,13 @@ class LowLightImageCorruptionConfig:
 
     def _validate_lens(self) -> None:
         for name in ("lens_flare_probability", "lens_flare_clear_probability", "lens_flare_real_fraction",
-                     "lens_optics_probability"):
+                     "lens_optics_probability", "lens_flare_wu_fraction", "lens_flare_wu_captured_fraction"):
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be in [0,1]")
         if not 0 < self.lens_flare_holdout_fraction <= 0.4:
             raise ValueError("lens_flare_holdout_fraction must be in (0, 0.4]: valid and test each keep that much")
-        for name, low_limit, strict in (("lens_flare_gain", 0.0, True), ("lens_flare_gamma", 0.0, True),
+        for name, low_limit, strict in (("lens_flare_gain", 0.0, True), ("lens_flare_wu_gain", 0.0, True),
+                                        ("lens_flare_gamma", 0.0, True),
                                         ("lens_flare_scale", 0.0, True), ("lens_flare_blur_sigma_px", 0.0, False),
                                         ("lens_optics_energy", 0.0, True), ("lens_ghost_count", 0.0, False),
                                         ("lens_ghost_strength", 0.0, True), ("lens_veil", 0.0, False),
@@ -199,6 +222,17 @@ class LowLightImageCorruptionConfig:
                 raise ValueError(f"{name} must be [low, high] with {'0 <' if strict else '0 <='} low <= high")
         if self.lens_ghost_count[1] > 12:
             raise ValueError("lens_ghost_count must stay at most 12")
+        boost, radius = self.lens_wu_ghost_boost, self.lens_wu_ghost_radius
+        if len(boost) != 2 or not (tuple(boost) == (0.0, 0.0) or 0 < boost[0] <= boost[1]):
+            raise ValueError("lens_wu_ghost_boost must be [0, 0] (off) or [low, high] with 0 < low <= high")
+        if len(radius) != 2 or not 0 < radius[0] <= radius[1] <= 0.5:
+            raise ValueError("lens_wu_ghost_radius must be [low, high] with 0 < low <= high <= 0.5 (of the frame side)")
+        if self.lens_wu_ghost_blades != 0 and not 3 <= self.lens_wu_ghost_blades <= 12:
+            raise ValueError("lens_wu_ghost_blades must be 0 (5-9 at random) or in [3, 12]")
+        if not 0 <= self.lens_wu_ghost_round <= 1:
+            raise ValueError("lens_wu_ghost_round must be in [0, 1]")
+        if not 0 <= self.lens_wu_min_flare < 1:
+            raise ValueError("lens_wu_min_flare must be in [0, 1) (linear light)")
         if not 0 <= self.lens_flare_shear_deg < 45 or not 0 <= self.lens_flare_translate <= 0.5 \
                 or not 0 <= self.lens_flare_dc_offset <= 0.1:
             raise ValueError("lens_flare_shear_deg must be in [0, 45), lens_flare_translate in [0, 0.5] and "

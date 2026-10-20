@@ -1,0 +1,39 @@
+# p45_sunflare: p44_uformer, nhung giai doan loe hoc them LOE BAN NGAY (mat troi / anh sang hat vao ong kinh: quang
+# choi, chuoi bong ma da giac, tia sao) tu anh chi co loe cua Wu va cs. 2021 (Google, CC BY 4.0), va fine-tune TIEP tu
+# nhanh loe da fine-tune cua p44 (flare/best.pt), khong tu Uformer goc. Phase 1 dung lai cua p40 (hash phase 1 bang
+# p40-p44); phase 2 train lai (nhanh loe moi).
+#
+# Nguoi dung (20/10/2026): "neu ban ngay ban chup 1 tam anh, anh co the bi loe sang do mat troi, cung co the bi anh
+# sang hat vao ong kinh, no se co cac quang va luc giac nen toi can xu ly no"; voi bai Wu va cs.: "anh trong bai bao
+# kha dung voi mong muon cua toi". Flare7K++ (ban dem) va FlareImage khong co loai nay; p44 Cell 12d: quang choi lon
+# (HALO 001053) gan nhu khong go (9,08 -> 9,36 dB).
+#
+# Du lieu: qjepa/data/wu_flares.py tai 5 001 anh tu gs://gresearch/lens-flare (2 001 chup that qua ong kinh voi nguon
+# diem rat sang, 3 000 mo phong quang hoc song), thu ve 640 px; data.wu_flare_root la duong dan (ngoai hash), Cell 4 tim
+# trong Input hoac tai. Nguon sang = phan gan bao hoa cua chinh anh loe (dich giu mat troi). He so cua lop Wu lay nhu
+# Wu va cs. (toi 10 tren anh sang tuyen tinh): anh cua ho toi hon lop Flare7K++ nhieu; xem truoc tren anh TartanAir ban
+# ngay (DesertGasStation, WaterMillDay) voi he so 0,8-3 cua Flare7K++ gan nhu khong thay loe.
+#
+# Chon best.pt (select_on: real_and_composite): trung binh PSNR loi (ra - vao) tren cap FlareImage valid VA tren loe
+# ghep valid -- loe ghep valid co lop Wu valid (hinh la khau / khung chua thay), cap FlareImage thi khong. Buoc 0 = nhanh
+# p44: khong ban nao hon thi giu nguyen nhanh p44.
+extends: kaggle_uformer.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p45_sunflare
+
+flare:
+  uformer_init: stage                # tu data.uformer_checkpoint = flare/best.pt cua p44 (Cell 4 tim trong Input)
+  select_on: real_and_composite
+  max_successful_updates: 3000
+  lens:
+    lens_flare_wu_fraction: 0.5      # nua so lop loe ghep la loe ban ngay cua Wu va cs. (60% mau la loe ghep -> ~30%)
+    lens_flare_wu_captured_fraction: 0.7   # trong do 70% anh chup that (bong ma, quang), 30% mo phong (tia, choi)
+    lens_flare_wu_gain: [3.0, 10.0]        # nhu Wu va cs. (toi 10), bo phan 1-3: gan nhu khong thay tren anh ban ngay
+    # Moi lop Wu kem chuoi bong ma luc giac + vanh halo cua repo (_draw_optics), TO va RO nhu anh trong bai bao: bong
+    # ma trong anh chup cua Wu toi hon loi 10-40 lan, ghep len khung ban ngay la mat (xem truoc 20/10/2026).
+    lens_wu_ghost_boost: [6.0, 20.0]       # x do phan xa lens_ghost_strength (log-deu); 30 thi bong to thanh khoi trang dac
+    lens_wu_ghost_radius: [0.04, 0.16]     # ban kinh / canh khung (p44: 0,015-0,08); to hon thi phan xa theo dien tich
+    lens_wu_ghost_blades: 6                # luc giac
+    lens_wu_ghost_round: 0.4               # 40% bong ma tron (nguoi dung: "quang luc giac hoac tron")
+    lens_wu_min_flare: 0.01                # lop Wu ma loe (tru nguon) trung binh < 0,01 thi rut lai (toi 8 lan)

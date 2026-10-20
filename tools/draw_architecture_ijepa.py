@@ -33,7 +33,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_uformer.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_sunflare.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -385,8 +385,15 @@ if STAGE:
     kinds = STAGE['kinds']
     optics = round(100 * float(lens['lens_optics_probability']))
     real = round(100 * float(lens['lens_flare_real_fraction']))
-    s1 = node(32, BY + 36, 258, 50, 'flare', 'Lớp lóe Flare7K++',
-              [f'{real}% chụp thật Flare-R · quang học {optics}%'], title_size=13)
+    wu = round(100 * float(lens.get('lens_flare_wu_fraction', 0.0)))
+    if wu:
+        ghosts = float(lens.get('lens_wu_ghost_boost', [0, 0])[1]) > 0
+        s1 = node(32, BY + 36, 258, 50, 'flare', f'Lóe: Wu 2021 ban ngày {wu}%',
+                  ['+ bóng ma lục giác/tròn · halo' if ghosts else f'+ Flare7K++ {100 - wu}% · quang học {optics}%'],
+                  title_size=13)
+    else:
+        s1 = node(32, BY + 36, 258, 50, 'flare', 'Lớp lóe Flare7K++',
+                  [f'{real}% chụp thật Flare-R · quang học {optics}%'], title_size=13)
     pair_bg = round(100 * float(STAGE['background_pair_fraction']))
     s2 = node(32, BY + 92, 258, 50, 'data', 'Ảnh nền sạch',
               [f'TartanAir {100 - pair_bg}% · gt FlareImage {pair_bg}%'], title_size=13)
@@ -398,7 +405,10 @@ if STAGE:
     precision = 'fp16' if STAGE['precision'] == 'amp_fp16' else 'fp32'
     every = f'{STAGE["validation_every_updates"]:,}'.replace(',', ' ')
     if UFORMER:
-        s4 = node(615, BY + 40, 250, 96, 'flare', 'UFORMER FLARE7K++', ['khởi tạo: trọng số công bố',
+        s4 = node(615, BY + 40, 250, 96, 'flare', 'UFORMER FLARE7K++', [
+                                                                       'khởi tạo: best.pt của p44'
+                                                                       if STAGE.get('uformer_init') == 'stage'
+                                                                       else 'khởi tạo: trọng số công bố',
                                                                        f'ảnh ×{float(STAGE["uformer_scale"]):g} → 512²'.replace('.', ','),
                                                                        'checkpointing · → lớp lóe đoán'], title_size=15)
     else:
@@ -406,11 +416,15 @@ if STAGE:
                                                                   '→ lớp lóe đoán'], title_size=15)
     s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe' + (' (fine-tune)' if UFORMER else ''),
               ['đích: vào (trước hạt) − đích', f'{STAGE["max_successful_updates"]:,} bước × {STAGE["batch_size"]}'.replace(',', ' '),
-               f'AdamW {STAGE["learning_rate"]:.0e} · {precision} · 1 GPU'.replace('e-0', 'e-')], title_size=15)
+               f'AdamW {STAGE["learning_rate"]:.0e} · {precision} · DDP 2 GPU'.replace('e-0', 'e-')], title_size=15)
     if STAGE.get('select_best', False):
+        both = STAGE.get('select_on') == 'real_and_composite'
         s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation → giữ best.pt',
-                  ['cặp FlareImage valid (ảnh thật)', f'bước 0 (chưa fine-tune) + mỗi {every} bước',
-                   'PSNR cả ô cắt cao nhất → best.pt', 'không hơn bước 0 → giữ Uformer gốc'], title_size=14)
+                  ['cặp FlareImage + lóe ghép valid' if both else 'cặp FlareImage valid (ảnh thật)',
+                   f'bước 0 (chưa fine-tune) + mỗi {every} bước',
+                   'PSNR lời TB cao nhất → best.pt' if both else 'PSNR cả ô cắt cao nhất → best.pt',
+                   'không hơn bước 0 → giữ nhánh p44' if STAGE.get('uformer_init') == 'stage'
+                   else 'không hơn bước 0 → giữ Uformer gốc'], title_size=14)
     else:
         s6 = node(1205, BY + 40, 285, 96, 'data', 'Validation (chưa thấy)',
                   ['lóe ghép valid: % lóe còn lại', 'cặp FlareImage valid (ảnh thật):', 'PSNR vùng lóe · ngoài lóe',

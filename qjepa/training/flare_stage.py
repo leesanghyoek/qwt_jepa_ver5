@@ -32,11 +32,21 @@ def build_flare_layer(stage: dict[str, Any]) -> nn.Module:
     return FlareLayer(widths=tuple(int(w) for w in stage["widths"]), blocks=int(stage["blocks"]), uses_latent=False)
 
 
-def selection_score(report: dict[str, float]) -> float:
+def selection_score(report: dict[str, float], select_on: str = "real") -> float:
     """p44 (flare.select_best): the flare stage's checkpoint score, higher is better -- PSNR over the whole crop of
-    the held-out FlareImage pairs (flare taken off AND the rest kept), or of the valid composites without pairs."""
-    value = report.get("real_psnr_out") if report.get("real_pairs") else report.get("composite_psnr_out")
-    return float(value) if value is not None and math.isfinite(float(value)) else float("-inf")
+    the held-out FlareImage pairs (flare taken off AND the rest kept), or of the valid composites without pairs.
+    p45 (flare.select_on: real_and_composite): the mean of the pairs' and the composites' PSNR gains (out - in)."""
+    def finite(key):
+        value = report.get(key)
+        return float(value) if value is not None and math.isfinite(float(value)) else None
+
+    if select_on == "real_and_composite":
+        gains = [finite(f"{kind}_psnr_out") - finite(f"{kind}_psnr_in") for kind in ("real", "composite")
+                 if finite(f"{kind}_psnr_out") is not None and finite(f"{kind}_psnr_in") is not None
+                 and (kind != "real" or report.get("real_pairs"))]
+        return sum(gains) / len(gains) if gains else float("-inf")
+    value = finite("real_psnr_out") if report.get("real_pairs") else finite("composite_psnr_out")
+    return value if value is not None else float("-inf")
 
 
 def _grad_scaler(enabled: bool):

@@ -29,7 +29,7 @@ import yaml
 from PIL import Image
 
 from qjepa.cli import _manifest, _train_dataset, main
-from qjepa.config import LENS_KEYS, build_corruptors, load_config, serializable_config, validate_config
+from qjepa.config import LENS_KEYS, OPTIONAL_KEYS, build_corruptors, load_config, serializable_config, validate_config
 from qjepa.corruptions.image import (LowLightImageCorruptionConfig, LowLightImageCorruptor, brightness_stops,
                                      frame_kind)
 from qjepa.corruptions.lens_flare import (FRAME_FRACTION, LensFlareBank, find_lens_flare_root, flare7k_layers,
@@ -324,11 +324,13 @@ def test_the_dataset_hands_the_target_with_its_light_to_both_phases(tmp_path):
 def test_kaggle_lensflare_is_p38_plus_the_lens_keys_and_spells_them_out(tmp_path):
     expnorm = serializable_config(load_config("configs/kaggle_expnorm.yaml"))
     lens = serializable_config(load_config("configs/kaggle_lensflare.yaml"))
-    assert set(LENS) == set(LENS_KEYS) and LENS["lens_flare_probability"] > 0
+    # p45's lens_flare_wu_* keys are optional (absent: no Wu layers), so p39 spells out every other lens key.
+    required = [key for key in LENS_KEYS if key not in OPTIONAL_KEYS]
+    assert set(LENS) == set(required) and LENS["lens_flare_probability"] > 0
     for config in (expnorm, lens):
         config.pop("_config_path", None)
         config["runtime"].pop("output_dir")
-    for key in LENS_KEYS:
+    for key in required:
         lens["corruption"]["image"].pop(key)
     assert lens["data"].pop("lens_flare_root")
     assert lens == expnorm
