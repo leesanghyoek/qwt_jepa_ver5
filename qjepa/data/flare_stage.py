@@ -10,7 +10,10 @@ mot lan rut moi (seed theo chi so), ba loai:
   hai) va hat (chi anh vao) nhu anh vao cua phase 2;
 * ``pair`` -- mot cap FlareImage that (anh loe / anh sach), o cat ngau nhien, xoay k x 90 do va lat;
 * ``plain`` -- mot anh TartanAir qua DUNG buoc nhieu cua phase 2 (toi, mo, hat...), KHONG co loe: dich cua lop loe
-  bang 0, de nhanh hoc de yen anh khong co loe (p40 lam hong ngoai vung loe 4-13 dB).
+  bang 0, de nhanh hoc de yen anh khong co loe (p40 lam hong ngoai vung loe 4-13 dB);
+* ``scene`` (p46, khi flare.kinds co khoa nay) -- mot cap canh da ghep loe san (data.scene_pairs_*, vd anh drone
+  VisDrone + loe Wu/FlareX): nhu ``pair``. ``flare.background_scene_fraction`` (p46): ngan ay phan nen cua anh ghep la
+  anh sach cua mot cap canh (khoa vang: nen nhu truoc).
 
 Dich cua nhanh: lop loe = anh vao (truoc hat) - anh dich, theo sRGB, dung phep tru nhanh se lam (anh ra = vao - lop).
 """
@@ -29,8 +32,9 @@ from ..corruptions.lens_flare import LensFlareBank, draw_lens_flare
 from ..corruptions.light import linear_to_srgb, srgb_to_linear
 from ..corruptions.rng import derive_seed
 from .flare_pairs import FlarePairBank
+from .scene_pairs import ScenePairBank
 
-FLARE_STAGE_KINDS = ("composite", "pair", "plain")
+FLARE_STAGE_KINDS = ("composite", "pair", "plain", "scene")   # "scene" chi khi flare.kinds co (p46)
 LENS_FIELDS = tuple(field.name for field in fields(LowLightImageCorruptionConfig) if field.name.startswith("lens_"))
 READ_NOISE = 2.0 / 255.0
 
@@ -63,7 +67,8 @@ class FlareStageDataset(torch.utils.data.Dataset):
     """Mau thu ``index`` = mot lan rut moi, chi phu thuoc (seed, split, index): resume doc lai dung cac mau do."""
 
     def __init__(self, tartan, *, lens_bank: LensFlareBank, flare_pairs: FlarePairBank | None,
-                 section: dict[str, Any], split: str, length: int, seed: int) -> None:
+                 section: dict[str, Any], split: str, length: int, seed: int,
+                 scene_pairs: ScenePairBank | None = None) -> None:
         self.tartan = tartan                     # PairedCameraImuDataset cung split (anh nen, anh "plain")
         self.lens_bank = lens_bank
         self.flare_pairs = flare_pairs
@@ -72,10 +77,14 @@ class FlareStageDataset(torch.utils.data.Dataset):
         self.length = int(length)
         self.seed = int(seed)
         kinds = section["kinds"]
-        self.kinds = FLARE_STAGE_KINDS
-        self.weights = np.asarray([float(kinds[kind]) for kind in FLARE_STAGE_KINDS])
+        # Khong co "scene" trong flare.kinds: dung ba loai cu, moi lan rut giong het truoc p46.
+        self.kinds = FLARE_STAGE_KINDS if "scene" in kinds else FLARE_STAGE_KINDS[:3]
+        self.weights = np.asarray([float(kinds[kind]) for kind in self.kinds])
         self.weights = self.weights / self.weights.sum()
         self.background_pair_fraction = float(section["background_pair_fraction"]) if flare_pairs else 0.0
+        self.scene_pairs = scene_pairs
+        self.background_scene_fraction = (float(section.get("background_scene_fraction", 0.0))
+                                          if scene_pairs is not None else 0.0)
         self.blur_probability = float(section["blur_probability"])
         self.blur_sigma = tuple(float(v) for v in section["blur_sigma_px"])
         self.grain_probability = float(section["grain_probability"])
@@ -83,6 +92,9 @@ class FlareStageDataset(torch.utils.data.Dataset):
         self.size = tuple(int(v) for v in tartan.image_size)
         if flare_pairs is None and self.weights[1] > 0:
             raise ValueError("flare.kinds.pair > 0 can cap FlareImage (data.flare_pairs_*)")
+        if scene_pairs is None and (len(self.kinds) > 3 and self.weights[3] > 0
+                                    or float(section.get("background_scene_fraction", 0.0)) > 0):
+            raise ValueError("flare.kinds.scene / flare.background_scene_fraction can cap canh (data.scene_pairs_*)")
 
     def __len__(self) -> int:
         return self.length
@@ -93,11 +105,13 @@ class FlareStageDataset(torch.utils.data.Dataset):
     def _rng(self, index: int) -> np.random.Generator:
         return np.random.default_rng(derive_seed(self.seed, "flare_stage", self.split, int(index)))
 
-    def _pair_crop(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, str]:
-        """(gt, anh loe) cua mot cap FlareImage cung split: o cat ngau nhien, xoay k x 90 do, co the lat."""
-        pairs = self.flare_pairs.pairs(self.split)
+    def _pair_crop(self, rng: np.random.Generator, bank=None) -> tuple[np.ndarray, np.ndarray, str]:
+        """(gt, anh loe) cua mot cap FlareImage (hoac cap canh, ``bank``) cung split: o cat ngau nhien, xoay k x 90 do,
+        co the lat."""
+        bank = self.flare_pairs if bank is None else bank
+        pairs = bank.pairs(self.split)
         pair = pairs[int(rng.integers(len(pairs)))]
-        gt, flared = self.flare_pairs.load(pair)
+        gt, flared = bank.load(pair)
         height, width = self.size
         top = int(rng.integers(0, gt.shape[0] - height + 1))
         left = int(rng.integers(0, gt.shape[1] - width + 1))
@@ -106,6 +120,10 @@ class FlareStageDataset(torch.utils.data.Dataset):
         return crop(gt), crop(flared), pair.name
 
     def _background(self, rng: np.random.Generator) -> tuple[np.ndarray, str]:
+        # p46: rut them MOT so chi khi co cap canh lam nen; khong co thi chuoi rut nhu truoc.
+        if self.background_scene_fraction > 0 and float(rng.random()) < self.background_scene_fraction:
+            gt, _, name = self._pair_crop(rng, self.scene_pairs)
+            return gt, f"scene/{name}"
         if float(rng.random()) < self.background_pair_fraction:
             gt, _, name = self._pair_crop(rng)
             return gt, f"flareimage/{name}"
@@ -148,7 +166,8 @@ class FlareStageDataset(torch.utils.data.Dataset):
             info.update(source=params["source"], layer=params["name"], gain=params["gain"],
                         optics=bool(params["optics"]))
         else:
-            gt, photo, info["pair"] = self._pair_crop(rng)
+            # "pair" (FlareImage) hoac "scene" (p46: cap canh da ghep loe san): cung mot cach.
+            gt, photo, info["pair"] = self._pair_crop(rng, self.scene_pairs if kind == "scene" else None)
             flared = linear_to_srgb(_blur(srgb_to_linear(photo), sigma))
             target = linear_to_srgb(_blur(srgb_to_linear(gt), sigma))
         flared = np.clip(flared, 0.0, 1.0).astype(np.float32)
@@ -166,8 +185,8 @@ def collate_flare_stage(batch: list[dict[str, Any]]) -> dict[str, Any]:
     return output
 
 
-def held_out_pairs(flare_pairs: FlarePairBank, split: str, size: tuple[int, int]) -> list[dict[str, Any]]:
-    """Moi cap FlareImage cua split (model chua thay): o cat GIUA co ``size``, khong them gi -- anh chup that."""
+def held_out_pairs(flare_pairs, split: str, size: tuple[int, int]) -> list[dict[str, Any]]:
+    """Moi cap FlareImage (hoac cap canh, p46) cua split (model chua thay): o cat GIUA co ``size``, khong them gi."""
     height, width = size
     items = []
     for pair in flare_pairs.pairs(split):

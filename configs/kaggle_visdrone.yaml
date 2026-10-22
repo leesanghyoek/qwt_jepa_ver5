@@ -1,0 +1,39 @@
+# p46_visdrone: p45_sunflare, them ANH CHUP THAT cua drone (VisDrone, ban ngay, giao thong) vao ca hai phase va giai
+# doan loe, va train mot phan mau KHONG CO IMU de model chay duoc ca khi chi co anh.
+#
+# Nguoi dung (22/10/2026): "toi muon model toi co the khu toi, khu loe, lam net khi dua bat ki anh nao vao", va khi
+# dung that thi anh "co luc co, co luc khong" kem IMU. TartanAir la anh render; VisDrone la anh chup that.
+#
+# Du lieu moi: Kaggle buidinhkhoi/visdrone-lens-flare-640 (notebook wu-visdrone-composite.ipynb): 2 000 cap 640x640,
+# anh sach = anh VisDrone2019-DET ban ngay co xe (gt/), anh vao = cung anh cong mot lop loe Wu et al. (bong ma da lam
+# sang) hoac FlareX (input/); index.csv chia san train / val (val: anh test-dev, khong chung chuoi voi train, ghep voi
+# lop loe nhom valid). Duong dan data.scene_pairs_root nam ngoai hash; Cell 4 tim trong Input.
+#
+# Moi batch (phase 1: 32, phase 2: 4): 1/4 cap FlareImage (p40: 1/2), 1/4 cap VisDrone, con lai 1/2 TartanAir -- noi duy
+# nhat anh va IMU cung mot chuyen dong. Cap VisDrone muon IMU cua mot mau TartanAir (nhu FlareImage tu p36); mo khong
+# lay tu IMU (motion_from_imu: false) nen khong mau thuan. 30% cap VisDrone lay anh CO LOE lam nguon (dich = anh sach,
+# nhu FlareImage), 70% lay anh SACH qua du buoc nhieu nhu TartanAir (toi, mo, hat): 2 000 lop loe co dinh de hoc thuoc,
+# phan loe da dang van do giai doan loe (ghep moi moi mau) lo.
+#
+# 25% mau (moi loai) khong co IMU: cua so IMU sach va nhieu deu bang 0 (IMU that luon doc trong luc, nen 0 la dau hieu
+# rieng), dich nhanh IMU cung bang 0. infer khong --imu dung dung cua so do. Validation phase 2 cham them chinh bank
+# TartanAir valid khi khong co IMU (dong "khong IMU").
+#
+# Doi data -> hash phase 1 doi: TRAIN LAI phase 1 (khong dung lai p40), giai doan loe va phase 2.
+extends: kaggle_sunflare.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p46_visdrone
+
+data:
+  flare_pairs_fraction: 0.25                 # p40-p45: 0.5; nhuong 1/4 batch cho VisDrone
+  scene_pairs_root: /kaggle/input/datasets/buidinhkhoi/visdrone-lens-flare-640   # Cell 4 tim lai trong Input
+  scene_pairs_fraction: 0.25
+  scene_pairs_short_side: 384                # 640 -> 384 roi cat 256, nhu FlareImage (data.flare_pairs_short_side)
+  scene_pairs_flare_probability: 0.3
+  imu_absent_probability: 0.25
+
+flare:
+  kinds: {composite: 0.5, pair: 0.15, plain: 0.15, scene: 0.2}
+  background_scene_fraction: 0.3             # 30% nen cua loe ghep moi la anh VisDrone sach (loe moi tren anh that)
+  select_on: real_composite_scene            # best.pt theo TB loi PSNR: FlareImage valid, loe ghep valid, VisDrone valid

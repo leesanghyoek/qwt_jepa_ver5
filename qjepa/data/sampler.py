@@ -119,3 +119,37 @@ class FlarePairSlots(Sampler[list[int]]):
     def __len__(self) -> int:
         return len(self.inner)
 
+
+
+class ExtraSlots(Sampler[list[int]]):
+    """p46: FlarePairSlots for several kinds of extra sample at once (FlareImage pairs and scene pairs).
+
+    ``groups`` lists (first_index, per_batch): slot j of group g in the b-th batch of the epoch reads index
+    ``first_index_g + b * per_batch_g + j``, so as in FlarePairSlots the index follows from the batch number alone and a
+    resume skipping batches still yields the batches the run would have seen. All the extra slots of a batch sit at the
+    evenly spaced positions FlarePairSlots uses for their total, and the groups take turns over them (each spread
+    evenly), so each DDP rank's contiguous share holds some of every group. One group gives FlarePairSlots' batches.
+    """
+
+    def __init__(self, inner, groups: list[tuple[int, int]]) -> None:
+        groups = [(int(first), int(count)) for first, count in groups if int(count) > 0]
+        if not groups:
+            raise ValueError("ExtraSlots needs at least one group with per_batch >= 1")
+        self.inner, self.groups = inner, groups
+        total = sum(count for _, count in groups)
+        # Which group each extra slot (in position order) belongs to: group g's c_g slots at (j + 0.5) / c_g.
+        keys = sorted(((j + 0.5) / count, g) for g, (_, count) in enumerate(groups) for j in range(count))
+        self.order = [g for _, g in keys]
+        self.total = total
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for number, batch in enumerate(self.inner):
+            size = len(batch) + self.total
+            slots = {round((j + 1) * size / self.total) - 1 for j in range(self.total)}
+            draws = [iter(range(first + number * count, first + (number + 1) * count)) for first, count in self.groups]
+            extra = iter(self.order)
+            samples = iter(batch)
+            yield [next(draws[next(extra)]) if position in slots else next(samples) for position in range(size)]
+
+    def __len__(self) -> int:
+        return len(self.inner)

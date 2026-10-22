@@ -373,6 +373,29 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
                     f"{'nhạt màu' if key == 'image_saturation' else 'phẳng, thiếu tương phản'}. "
                     "L1 từng pixel trả lời màu/độ sáng không chắc bằng trung vị, nghiêng về xám/phẳng.")
 
+    # Log-only validation lines: FlareImage valid (p36+), the scene pairs' valid split (p46, VisDrone) and the same
+    # TartanAir bank without IMU (p46 data.imu_absent_probability).
+    pair_rows = [(prefix, label) for prefix, label in (("flare_pairs_validation_", "FlareImage valid"),
+                                                       ("scene_pairs_validation_", "VisDrone valid"))
+                 if isinstance(final.get(prefix + "psnr_out"), (int, float))]
+    absent = final.get("imu_absent_validation_image_psnr_db")
+    if pair_rows or isinstance(absent, (int, float)):
+        print("\n  Ảnh lóe valid và ảnh không IMU tại checkpoint CUỐI (PSNR dB: vào -> ra)")
+    for prefix, label in pair_rows:
+        value = lambda key: final.get(prefix + key)
+        print(f"  {label:<18} n={int(value('count') or 0):<5} cả ảnh {fmt(value('psnr_in'), 7, 2)} ->"
+              f"{fmt(value('psnr_out'), 7, 2)} | vùng lóe {fmt(value('flare_in'), 7, 2)} ->{fmt(value('flare_out'), 7, 2)}"
+              f" | ngoài lóe {fmt(value('rest_in'), 7, 2)} ->{fmt(value('rest_out'), 7, 2)}")
+        if isinstance(value("psnr_in"), (int, float)) and value("psnr_out") < value("psnr_in"):
+            findings.append(f"{label}: ảnh ra ({value('psnr_out'):.2f} dB) tệ hơn ảnh vào ({value('psnr_in'):.2f} dB).")
+    if isinstance(absent, (int, float)):
+        with_imu = final.get("validation_image_psnr_db")
+        print(f"  {'không IMU':<18} {'':<7} cả ảnh {fmt(final.get('imu_absent_validation_baseline_image_psnr_db'), 7, 2)}"
+              f" ->{fmt(absent, 7, 2)} | có IMU cùng các ảnh: {fmt(with_imu, 7, 2)}")
+        if isinstance(with_imu, (int, float)) and absent < with_imu - 1.0:
+            findings.append(f"Không có IMU, PSNR ảnh ra {absent:.2f} dB, kém {with_imu - absent:.2f} dB so với khi có IMU "
+                            "trên cùng các ảnh: model còn dựa vào IMU để khôi phục ảnh.")
+
     # The variation metric is a rate (diff / 0.01 s), so scaling it back to a
     # per-sample difference makes it comparable with the absolute error. Near 1.0
     # the consecutive errors are uncorrelated -- jitter, not offset -- and no

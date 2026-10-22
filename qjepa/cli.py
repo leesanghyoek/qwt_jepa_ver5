@@ -33,19 +33,24 @@ from .config import (
     serializable_config,
 )
 from .data import (
+    ExtraSlots,
     FlarePairBank,
     FlarePairSlots,
     ImuNormalizer,
     PairedCameraImuDataset,
+    ScenePairBank,
     TrajectoryDiverseBatchSampler,
     build_manifest,
     collate_paired,
     read_manifest,
     write_manifest,
 )
-from .data.dataset import load_rgb
+from .data.dataset import SCENE_DRAW_BASE, load_rgb
 from .corruptions.image import FRAME_KINDS, LOG_KINDS, brightness_stops, degradation_vector, frame_kind
-from .evaluation.flare_pairs import evaluate_flare_pairs, flare_validation_dataset, flare_validation_text
+from .evaluation.flare_pairs import (
+    evaluate_flare_pairs, evaluate_scene_pairs, flare_validation_dataset, flare_validation_text, scene_validation_dataset,
+    scene_validation_text,
+)
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
 from .evaluation.reporting import (
@@ -138,6 +143,8 @@ def _dataset(
     flare_pairs: FlarePairBank | None = None,
     flare_layer: bool = False,
     target_brighten: bool = True,
+    scene_pairs: ScenePairBank | None = None,
+    imu_absent_probability: float = 0.0,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -169,7 +176,19 @@ def _dataset(
         flare_layer=flare_layer,
         # phase2.target_brighten: the phase-2 target. Phase 1 and the flare stage pass False and keep the plain frame.
         target_brighten=config["phase2"].get("target_brighten") if target_brighten else None,
+        scene_pairs=scene_pairs,
+        scene_pairs_fraction=float(config["data"].get("scene_pairs_fraction", 0.0)) if scene_pairs else 0.0,
+        scene_pairs_flare_probability=float(config["data"].get("scene_pairs_flare_probability", 0.0)),
+        imu_absent_probability=imu_absent_probability,
     )
+
+
+def scene_pair_bank(config: dict[str, Any]) -> ScenePairBank | None:
+    """p46: the scene pairs of data.scene_pairs_* (None when scene_pairs_fraction is absent or 0)."""
+    data = config["data"]
+    if float(data.get("scene_pairs_fraction", 0.0)) <= 0:
+        return None
+    return ScenePairBank(data["scene_pairs_root"], short_side=int(data["scene_pairs_short_side"]))
 
 
 def flare_pair_bank(config: dict[str, Any]) -> FlarePairBank | None:
@@ -199,11 +218,13 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
     # Only phase 2's flare layer reads the pairs' flare and tone labels without the flare (phase2.split_flare_layer).
     flare_layer = phase == "phase2" and bool(config["phase2"].get("split_flare_layer", False))
     # data.flare_pairs_*: FlareImage pairs in every training batch (both phases); validation stays TartanAir.
+    # p46 data.scene_pairs_* (scene pairs, e.g. VisDrone) likewise; data.imu_absent_probability: samples without IMU.
     return _dataset(config, manifest, "train", fixed_realization=False, sensor_reference=sensor_reference,
                     hflip_probability=HFLIP_PROBABILITY if section.get("augment_hflip", False) else 0.0,
                     brightness_target=brightness_target, tone_label=tone_label,
                     flare_pairs=flare_pair_bank(config), flare_layer=flare_layer,
-                    target_brighten=phase == "phase2", **kwargs)
+                    target_brighten=phase == "phase2", scene_pairs=scene_pair_bank(config),
+                    imu_absent_probability=float(config["data"].get("imu_absent_probability", 0.0)), **kwargs)
 
 
 def _loader(
@@ -245,9 +266,12 @@ def _training_batch_stream(
 ) -> Iterator[dict[str, Any]]:
     # data.flare_pairs_*: that many slots of each batch hold a FlareImage pair; TartanAir fills the rest.
     flare_slots = dataset.flare_pairs_per_batch(batch_size) if hasattr(dataset, "flare_pairs_per_batch") else 0
-    if flare_slots >= batch_size:
-        raise ValueError(f"{flare_slots} FlareImage slots leave no TartanAir sample in a batch of {batch_size}")
-    trajectory_batch = batch_size - flare_slots
+    # p46 data.scene_pairs_*: and that many a scene pair.
+    scene_slots = dataset.scene_pairs_per_batch(batch_size) if hasattr(dataset, "scene_pairs_per_batch") else 0
+    if flare_slots + scene_slots >= batch_size:
+        raise ValueError(f"{flare_slots} FlareImage and {scene_slots} scene-pair slots leave no TartanAir sample in a "
+                         f"batch of {batch_size}")
+    trajectory_batch = batch_size - flare_slots - scene_slots
     batches_per_epoch = len(dataset) // trajectory_batch
     if batches_per_epoch < 1:
         raise ValueError("Dataset has fewer samples than one full training batch")
@@ -264,7 +288,10 @@ def _training_batch_stream(
             config["data"]["minimum_trajectories_per_batch"],
             epoch_seed,
         )
-        if flare_slots:
+        if scene_slots:
+            batch_sampler = ExtraSlots(batch_sampler, [(len(dataset.samples), flare_slots),
+                                                       (len(dataset.samples) + SCENE_DRAW_BASE, scene_slots)])
+        elif flare_slots:
             batch_sampler = FlarePairSlots(batch_sampler, len(dataset.samples), flare_slots)
         sampler = _SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler
         loader = _loader(
@@ -1305,16 +1332,23 @@ def command_train_flare(args: argparse.Namespace) -> None:
     lens_bank = LensFlareBank(config["data"]["lens_flare_root"], holdout_fraction=lens.lens_flare_holdout_fraction,
                               wu_root=wu_root)
     pairs = flare_pair_bank(config)
+    # p46: the scene pairs (data.scene_pairs_*) when flare.kinds / background_scene_fraction / select_on read them.
+    uses_scenes = (float(stage["kinds"].get("scene", 0.0)) > 0
+                   or float(stage.get("background_scene_fraction", 0.0)) > 0
+                   or stage.get("select_on") == "real_composite_scene")
+    scenes = scene_pair_bank(config) if uses_scenes else None
     batch_size, maximum = int(stage["batch_size"]), int(stage["max_successful_updates"])
     train_set = FlareStageDataset(_dataset(config, manifest, "train", fixed_realization=False, target_brighten=False),
                                   lens_bank=lens_bank,
                                   flare_pairs=pairs, section=stage, split="train", length=maximum * batch_size,
-                                  seed=int(stage["seed"]))
+                                  seed=int(stage["seed"]), scene_pairs=scenes)
     valid_set = FlareStageDataset(_dataset(config, manifest, "valid", fixed_realization=True, target_brighten=False),
                                   lens_bank=lens_bank,
                                   flare_pairs=pairs, section=stage, split="valid",
-                                  length=int(stage["validation_composites"]), seed=int(stage["seed"]))
+                                  length=int(stage["validation_composites"]), seed=int(stage["seed"]),
+                                  scene_pairs=scenes)
     real = held_out_pairs(pairs, "valid", tuple(config["data"]["image_size"])) if pairs is not None else []
+    scene_valid = held_out_pairs(scenes, "valid", tuple(config["data"]["image_size"])) if scenes is not None else None
     common = {"num_workers": int(config["data"]["num_workers"]), "collate_fn": collate_flare_stage,
               "pin_memory": bool(config["data"]["pin_memory"]) and device.type == "cuda"}
     # Sample i of the run is always draw i: a resumed run reads the very samples it would have. With several ranks,
@@ -1326,7 +1360,8 @@ def command_train_flare(args: argparse.Namespace) -> None:
     loader = DataLoader(train_set, batch_size=share, drop_last=True, sampler=order, **common)
     valid_loader = DataLoader(valid_set, batch_size=batch_size, **common)
     print(f"flare stage | layer {sum(p.numel() for p in trainer.model.parameters()) / 1e6:.2f} M params | "
-          f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)} | device {device}"
+          f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)}"
+          + (f" | VisDrone valid {len(scene_valid)}" if scene_valid is not None else "") + f" | device {device}"
           f" | {'fp16' if trainer.amp else 'fp32'} | {world} GPU, {share} ảnh mỗi GPU mỗi bước", flush=True)
     log = _Jsonl(output / "train.jsonl" if lead else None)
 
@@ -1349,19 +1384,20 @@ def command_train_flare(args: argparse.Namespace) -> None:
             metadata = {**metadata_at(update), "selected_update": update, "selection_score": score}
             atomic_torch_save({"metadata": metadata, "model": trainer.model.state_dict(),
                                "config": serializable_config(config), "validation": report}, best_path)
-            print(f"  -> best.pt = update {update} (PSNR cặp FlareImage valid {score:.2f})", flush=True)
+            print(f"  -> best.pt = update {update} (điểm chọn {stage.get('select_on', 'real')}: {score:.2f})",
+                  flush=True)
 
     if select_best and trainer.successful_updates == 0:
         with rank0_section():
             if lead:                                         # the other ranks wait in share_rank0_rng
-                report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+                report = validate_flare_stage(trainer, valid_loader, real, batch_size, scene_valid)
                 log.write({"successful_updates": 0, "validation": report})
                 print(f"  validation update=0 (trước fine-tune) | {validation_text(report)}", flush=True)
                 keep_if_best(0, report)
         share_rank0_rng()
     recent = _RecentMean()
     keys = ("loss", "flare_l1_composite", "flare_size_composite", "flare_l1_pair", "flare_size_pair",
-            "flare_l1_plain")
+            "flare_l1_plain") + (("flare_l1_scene", "flare_size_scene") if "scene" in stage["kinds"] else ())
     started, first = time.perf_counter(), trainer.successful_updates
     waited = 0.0
     nonfinite = 0
@@ -1387,7 +1423,7 @@ def command_train_flare(args: argparse.Namespace) -> None:
             continue
         with rank0_section():
             if lead and validate:                            # rank 0 alone; the others wait in share_rank0_rng
-                report = validate_flare_stage(trainer, valid_loader, real, batch_size)
+                report = validate_flare_stage(trainer, valid_loader, real, batch_size, scene_valid)
                 log.write({"successful_updates": update, "validation": report})
                 print(f"  validation update={_progress(update, maximum)} | {validation_text(report)}", flush=True)
                 keep_if_best(update, report)
@@ -1563,6 +1599,17 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     pairs_bank = flare_pair_bank(config)
     flare_validation = None if pairs_bank is None else flare_validation_dataset(
         _dataset(config, manifest, "valid", fixed_realization=True, flare_pairs=pairs_bank, flare_layer=True))
+    # p46: the scene pairs' valid split (data.scene_pairs_*) the same way, flared photo as source; log only.
+    scenes_bank = scene_pair_bank(config)
+    scene_validation = None if scenes_bank is None else scene_validation_dataset(
+        _dataset(config, manifest, "valid", fixed_realization=True, scene_pairs=scenes_bank, flare_layer=True))
+    # p46 data.imu_absent_probability: the same TartanAir validation bank once more with NO IMU (log only), so the
+    # image PSNR with and without IMU sit side by side.
+    absent_dataset = absent_loader = None
+    if float(config["data"].get("imu_absent_probability", 0.0)) > 0:
+        absent_dataset = _dataset(config, manifest, "valid", fixed_realization=True, imu_absent_probability=1.0)
+        _fixed_validation_bank(absent_dataset, config["runtime"]["validation_batches"] * config["phase2"]["batch_size"])
+        absent_loader = _loader(config, absent_dataset, config["phase2"]["batch_size"], train=False)
     blur_dataset = blur_loader = None
     if "blur_validation_samples" in config["phase2"]:
         blur_dataset = _dataset(config, manifest, "valid", fixed_realization=True,
@@ -1695,6 +1742,15 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 if flare_validation is not None:
                     flare_report = evaluate_flare_pairs(flare_validation, trainer.evaluation_model, device,
                                                         config["phase2"]["batch_size"])
+                scene_report = None
+                if scene_validation is not None:
+                    scene_report = evaluate_scene_pairs(scene_validation, trainer.evaluation_model, device,
+                                                        config["phase2"]["batch_size"])
+                absent_report = None
+                if absent_loader is not None:
+                    absent_report = _evaluate_with_overlap(
+                        system, absent_loader, absent_dataset, device, config["runtime"]["validation_batches"],
+                        config["phase2"]["smooth_l1_beta"], forward_model=trainer.evaluation_model)
                 guard_pass = False
                 guard_failures: list[str] = []
                 if guard_reference is not None:
@@ -1707,6 +1763,11 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     record["blur_validation_worst_ratio"] = blur_score
                 if flare_report is not None:
                     record.update({f"flare_pairs_validation_{key}": value for key, value in flare_report.items()})
+                if scene_report is not None:
+                    record.update({f"scene_pairs_validation_{key}": value for key, value in scene_report.items()})
+                if absent_report is not None:
+                    record.update({f"imu_absent_validation_{key}": value for key, value in absent_report.items()
+                                   if "image" in key})
                 if guard_reference is not None:
                     record["guard_pass"] = guard_pass
                     record["guard_failures"] = guard_failures
@@ -1738,6 +1799,12 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     print(f"  theo loai anh: {kinds}")
                 if flare_report is not None:
                     print(f"  {flare_validation_text(flare_report)}")
+                if scene_report is not None:
+                    print(f"  {scene_validation_text(scene_report)}")
+                if absent_report is not None:
+                    print(f"  khong IMU: PSNR {absent_report['image_psnr_db']:.2f} vs"
+                          f" {absent_report['baseline_image_psnr_db']:.2f} | SSIM {absent_report['image_ssim']:.3f}"
+                          f" (co IMU: PSNR {validation['validation_image_psnr_db']:.2f})")
                 if blur_validation:
                     print(
                         f"  blur actual={blur_validation['blur_validation_active_frames']}"
@@ -1853,7 +1920,11 @@ def command_evaluate(args: argparse.Namespace) -> None:
         "validation_realization": config["data"]["validation_realization"],
         "evaluation_clean_probability": 0.0,
         "execution": execution,
+        "imu_absent": bool(getattr(args, "imu_absent", False)),
     })
+    if getattr(args, "imu_absent", False) and float(config["data"].get("imu_absent_probability", 0.0)) <= 0:
+        print("⚠ --imu-absent: this checkpoint never trained without IMU (data.imu_absent_probability); the image "
+              "metrics show how it copes, the IMU metrics are of an all-zero window", flush=True)
     for number, (name, (image_mode, imu_mode)) in enumerate(scenarios.items(), start=1):
         dataset = _dataset(
             config,
@@ -1863,6 +1934,8 @@ def command_evaluate(args: argparse.Namespace) -> None:
             image_mode=image_mode,
             imu_mode=imu_mode,
             full_frame=bool(getattr(args, "full_frame", False)),
+            # p46 --imu-absent: every sample without IMU (all-zero window), as infer without --imu.
+            imu_absent_probability=1.0 if getattr(args, "imu_absent", False) else 0.0,
         )
         if args.every > 1:
             _every_nth_frame(dataset, args.every)
@@ -1908,7 +1981,14 @@ def command_infer(args: argparse.Namespace) -> None:
     system, config = _system_from_phase2(args.checkpoint, device)
     # data.source_size: the model trained on crops of frames this size and runs on whole ones.
     image = load_rgb(args.image, tuple(config["data"].get("source_size") or config["data"]["image_size"]))
-    imu, timestamps = _read_imu_csv(args.imu, config["data"]["imu_window"])
+    if args.imu is None:
+        # p46: no IMU -- the all-zero window the model saw for samples without IMU (data.imu_absent_probability).
+        if float(config["data"].get("imu_absent_probability", 0.0)) <= 0:
+            print("⚠ No --imu, and this checkpoint never trained without IMU (data.imu_absent_probability): the "
+                  "restored image may be worse than with an IMU window", flush=True)
+        imu, timestamps = np.zeros((int(config["data"]["imu_window"]), 6), dtype=np.float32), None
+    else:
+        imu, timestamps = _read_imu_csv(args.imu, config["data"]["imu_window"])
     if timestamps is None:
         timestamps = np.arange(len(imu), dtype=np.float64) * args.imu_dt
     image_time = args.image_time if args.image_time is not None else 0.5 * (timestamps[0] + timestamps[-1])
@@ -1934,7 +2014,8 @@ def command_infer(args: argparse.Namespace) -> None:
         comments="",
     )
     (output / "metadata.json").write_text(
-        json.dumps({"checkpoint": str(Path(args.checkpoint).resolve()), "image_time": image_time}, indent=2),
+        json.dumps({"checkpoint": str(Path(args.checkpoint).resolve()), "image_time": image_time,
+                    "imu": None if args.imu is None else str(Path(args.imu).resolve())}, indent=2),
         encoding="utf-8",
     )
     print(f"Saved restored image and IMU to {output}")
@@ -2107,6 +2188,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="fp16 autocast on CUDA, as a phase 2 trained with precision amp_fp16; metrics stay fp32")
     evaluate.add_argument("--full-frame", action="store_true",
                           help="With data.source_size: score whole source frames (e.g. 640x640), not training crops")
+    evaluate.add_argument("--imu-absent", action="store_true",
+                          help="p46: every sample without IMU (all-zero window), as infer without --imu; image metrics "
+                               "only mean something")
     evaluate.add_argument(
         "--image-mode",
         choices=("full", "clean", "low_light_only", "blur_only", "sensor_noise_only"),
@@ -2122,7 +2206,8 @@ def build_parser() -> argparse.ArgumentParser:
     infer = subparsers.add_parser("infer", help="Restore one image and one IMU window")
     infer.add_argument("--checkpoint", required=True)
     infer.add_argument("--image", required=True)
-    infer.add_argument("--imu", required=True)
+    infer.add_argument("--imu", help="IMU CSV [L,6] or [L,7] with timestamps; omit for an image alone (p46: an all-zero "
+                                     "window, what data.imu_absent_probability trained the model on)")
     infer.add_argument("--output", required=True)
     infer.add_argument("--image-time", type=float)
     infer.add_argument("--imu-dt", type=float, default=0.01)

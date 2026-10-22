@@ -12,6 +12,70 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p46_visdrone — ảnh chụp thật của drone vào cả ba bước train, và một phần mẫu không có IMU** (config
+`configs/kaggle_visdrone.yaml` → OUT `outputs/p46_visdrone`). Bằng p45 cộng `data.scene_pairs_{root,fraction,short_side,
+flare_probability}`, `data.imu_absent_probability`, `flare.kinds.scene`, `flare.background_scene_fraction` và
+`flare.select_on: real_composite_scene`; `data.flare_pairs_fraction` 0,5 → 0,25. Thiếu khoá thì như cũ: hash của p40–p45
+không đổi. Đổi `data` nên **train lại phase 1**, giai đoạn lóe (tiếp từ `flare/best.pt` của p45, không có thì của p44)
+và phase 2.
+
+- **Yêu cầu** (người dùng, 22/10/2026): "tôi muốn model tôi có thể khử tối, khử lóe, làm nét khi đưa bất kì ảnh nào
+  vào"; khi dùng thật, ảnh "có lúc có, có lúc không" kèm IMU. TartanAir là ảnh render; mọi ảnh chụp thật trước đây chỉ
+  là 1 053 cặp FlareImage.
+- **Dữ liệu** (`qjepa/data/scene_pairs.py`): Kaggle `buidinhkhoi/visdrone-lens-flare-640`, dựng bằng ba notebook
+  ở gốc repo:
+  - `visdrone-day-builder.ipynb` chọn ảnh ban ngày có xe của VisDrone2019-DET;
+  - `wu-flare-builder.ipynb` đưa 5 001 ảnh lóe của Wu et al. về 640×640;
+  - `wu-visdrone-composite.ipynb` ghép một lớp lóe Wu (bóng ma làm sáng lên) hoặc FlareX (NeurIPS 2025) lên ảnh trên
+    ánh sáng tuyến tính.
+
+  Kết quả là 2 000 cặp 640×640: `gt/` sạch (giữ lõi nguồn sáng như đích của repo), `input/` có lóe, `index.csv` chia
+  sẵn `train` / `val`. Val là ảnh test-dev, không chung chuỗi với train, ghép với lớp lóe nhóm valid. `ScenePairBank`
+  giữ nguyên phép chia đó, thu mỗi cặp về cạnh ngắn `scene_pairs_short_side` (384, như FlareImage) một lần trên ánh
+  sáng tuyến tính rồi đọc cache. `data.scene_pairs_root` là đường dẫn, ngoài mọi hash; Cell 4 tìm trong Input
+  (`find_scene_pairs_root`, không nhầm với thư mục `visdrone-day-2000`).
+- **Mỗi batch** của phase 1 (32) và phase 2 (4) gồm 1/2 TartanAir, 1/4 FlareImage và 1/4 VisDrone.
+  - TartanAir là nơi duy nhất ảnh và IMU cùng một chuyển động.
+  - `sampler.ExtraSlots` đặt hai loại chỗ thêm vào các vị trí cách đều của `FlarePairSlots`, hai loại xen kẽ, nên
+    resume và mỗi rank DDP dựng lại đúng batch.
+  - Cặp VisDrone mượn cửa sổ IMU của một mẫu TartanAir, như FlareImage từ p36. Mờ không lấy từ IMU
+    (`motion_from_imu: false`) nên không mâu thuẫn.
+  - Mỗi lần rút có `scene_pairs_flare_probability` = 30% lấy **ảnh có lóe** làm nguồn ("clear", như cặp FlareImage),
+    70% lấy **ảnh sạch** qua đủ bước tối, mờ, hạt như một khung TartanAir. Lý do: 2 000 lớp lóe cố định rất dễ học
+    thuộc, còn lóe đa dạng thì giai đoạn lóe đã ghép mới cho mỗi mẫu.
+  - Ô cắt train xoay k × 90° và có thể lật, vì ảnh drone nhìn từ trên không có chiều lên.
+- **Không IMU** (`data.imu_absent_probability: 0.25`): một phần tư mẫu (mọi loại, theo seed của mẫu) có cửa sổ IMU
+  sạch và nhiễu đều bằng 0.
+  - IMU thật luôn đọc trọng lực, nên cửa sổ toàn 0 là dấu hiệu riêng, không cần đổi kiến trúc. Đích của nhánh IMU khi
+    đó cũng là 0.
+  - Số hạng Jacobian tự bỏ các mẫu này: hướng nhiễu bằng 0 nên bị đánh dấu không hợp lệ.
+  - `infer` chạy được không cần `--imu` (dùng đúng cửa sổ 0 đó). `evaluate --imu-absent` chấm cả tập khi không có
+    IMU.
+- **Giai đoạn lóe:** thêm loại mẫu `scene` (20%), là cặp VisDrone xử lý như cặp FlareImage. 30% nền của lóe ghép là ảnh
+  VisDrone sạch, tức lóe Flare7K++/Wu mới ghép lên ảnh thật. `best.pt` chọn theo trung bình lời PSNR (ra − vào) của
+  FlareImage valid, lóe ghép valid và VisDrone valid (`select_on: real_composite_scene`).
+- **Đọc kết quả:**
+  - Log phase 2 có thêm dòng `VisDrone valid` (cả ảnh, vùng lóe, ngoài lóe, như `FlareImage valid`).
+  - Dòng `khong IMU: PSNR … (co IMU: …)` chạy lại chính bank TartanAir valid mà không có IMU, để hai con số đứng cạnh
+    nhau.
+  - Cell 9b có thêm `VisDrone valid`. Cell 13 (`tools/training_report.py`) in cả ba dòng ở checkpoint cuối và báo khi
+    ảnh không IMU kém hơn 1 dB.
+- **Giới hạn:** VisDrone chỉ là cảnh drone nhìn từ trên. Ảnh trong nhà, chân dung hay đường phố nhìn ngang vẫn phải
+  đo riêng. Tối và mờ vẫn là tổng hợp.
+- **Bằng chứng** (`tests/test_scene_pairs.py`):
+  - Bank giữ phép chia của index.csv, thu nhỏ một lần rồi đọc cache, từ chối thư mục hỏng; Cell 4 tìm thấy dù Kaggle
+    gắn kiểu nào.
+  - Mẫu VisDrone là ô cắt có lóe hoặc sạch vào, ô sạch ra, IMU của mẫu cho; chỉ xoay ở split train; tỉ lệ có lóe đúng.
+  - Mỗi batch giữ đúng chỗ FlareImage và VisDrone; resume và hai rank dựng lại đúng batch; một nhóm thì ra đúng batch
+    của `FlarePairSlots`.
+  - Mẫu TartanAir và FlareImage giống từng bit khi có hay không có cặp VisDrone.
+  - Mẫu không IMU đến đúng tỉ lệ, cửa sổ toàn 0, ảnh không đổi.
+  - p46 là p45 cộng các khoá trên, đổi cả ba hash, đường dẫn ngoài hash; cài sai thì báo lỗi.
+  - Loại `scene` và nền VisDrone dựng đúng vào, đích và lớp lóe; mục `flare` không có khoá mới thì rút y như trước.
+  - `train-flare` chấm VisDrone valid và chọn `best.pt` theo đó.
+  - Hai phase train qua CLI và in hai dòng validation mới; `infer` không `--imu` và `evaluate --imu-absent` chạy được.
+  - Hai tiến trình DDP train ra như một.
+
 **p45_sunflare — lóe ban ngày: mặt trời hắt vào ống kính, quầng chói, bóng ma đa giác** (config
 `configs/kaggle_sunflare.yaml` → OUT `outputs/p45_sunflare`). Bằng p44 cộng `flare.uformer_init: stage`,
 `flare.select_on: real_and_composite`, `flare.lens.lens_flare_wu_{fraction,captured_fraction,gain}` và

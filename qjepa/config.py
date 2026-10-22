@@ -154,6 +154,8 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_exposure_standardize(config)
     _validate_source_size(config)
     _validate_flare_pairs(config)
+    _validate_scene_pairs(config)
+    _validate_imu_absent(config)
     _validate_flare_layer(config)
     _validate_flare_stage(config)
     _validate_target_brighten(config)
@@ -699,6 +701,61 @@ def _validate_flare_pairs(config: dict[str, Any]) -> None:
                              f"FlareImage, leaving fewer than minimum_trajectories_per_batch {minimum} TartanAir samples")
 
 
+SCENE_PAIR_KEYS = ("scene_pairs_root", "scene_pairs_fraction", "scene_pairs_short_side",
+                   "scene_pairs_flare_probability")
+
+
+def _validate_scene_pairs(config: dict[str, Any]) -> None:
+    """p46 data.scene_pairs_*: scene pairs (photo with a composited flare / clean photo, e.g. VisDrone) in every
+    training batch of both phases, beside the FlareImage pairs (qjepa/data/scene_pairs.py). Absent: as before.
+
+    On (scene_pairs_fraction > 0): every key written out (the hash reads only the config file); scene_pairs_root is
+    a path, out of the hash like flare_pairs_root. FlareImage, scene pairs and minimum_trajectories_per_batch
+    TartanAir samples must all fit each batch."""
+    data = config["data"]
+    unknown = sorted(key for key in data if key.startswith("scene_pairs_") and key not in SCENE_PAIR_KEYS)
+    if unknown:
+        raise ValueError(f"data: unknown keys {unknown}; scene-pair keys are {list(SCENE_PAIR_KEYS)}")
+    fraction = data.get("scene_pairs_fraction", 0.0)
+    if not _nonnegative_number(fraction) or fraction > 0.5:
+        raise ValueError("data.scene_pairs_fraction must be a number in [0, 0.5]")
+    if fraction == 0:
+        return
+    missing = [key for key in SCENE_PAIR_KEYS if key not in data]
+    if missing:
+        raise ValueError(f"data.scene_pairs_fraction > 0 needs every scene_pairs_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    if not isinstance(data["scene_pairs_root"], str) or not data["scene_pairs_root"]:
+        raise ValueError("data.scene_pairs_root must name the scene-pair folder (index.csv, gt/, input/)")
+    short_side = data["scene_pairs_short_side"]
+    if isinstance(short_side, bool) or not isinstance(short_side, int) or short_side < max(data["image_size"]):
+        raise ValueError("data.scene_pairs_short_side must be an integer of at least the training crop data.image_size")
+    flared = data["scene_pairs_flare_probability"]
+    if not _nonnegative_number(flared) or flared > 1:
+        raise ValueError("data.scene_pairs_flare_probability must be in [0, 1]")
+    if data["image_size"][0] != data["image_size"][1]:
+        raise ValueError("data.scene_pairs_* turn each training crop by k x 90 degrees: data.image_size must be square")
+    minimum = data.get("minimum_trajectories_per_batch", 1)
+    flare_fraction = float(data.get("flare_pairs_fraction", 0.0))
+    for phase in ("phase1", "phase2"):
+        size = config[phase]["batch_size"]
+        scene_slots = max(1, round(fraction * size))
+        flare_slots = max(1, round(flare_fraction * size)) if flare_fraction > 0 else 0
+        if size - scene_slots - flare_slots < minimum:
+            raise ValueError(f"data.scene_pairs_fraction {fraction}: {scene_slots} scene pairs and {flare_slots} "
+                             f"FlareImage pairs of {phase}.batch_size {size} leave fewer than "
+                             f"minimum_trajectories_per_batch {minimum} TartanAir samples")
+
+
+def _validate_imu_absent(config: dict[str, Any]) -> None:
+    """p46 data.imu_absent_probability: the share of training samples that come without IMU (all-zero window), so the
+    model also restores an image alone. Absent: every sample has its IMU, as before. Below 1: the IMU branch must
+    still learn from the rest."""
+    value = config["data"].get("imu_absent_probability", 0.0)
+    if not _nonnegative_number(value) or value >= 1:
+        raise ValueError("data.imu_absent_probability must be a number in [0, 1)")
+
+
 SPLIT_LIGHT_KEYS = ("split_light_width", "split_light_scale", "split_light_levels", "split_light_weight",
                     "split_light_loss_scale")
 
@@ -949,7 +1006,12 @@ def _validate_target_brighten(config: dict[str, Any]) -> None:
 # p44's, in data.uformer_checkpoint); select_on: "real" (absent: PSNR on the held-out FlareImage pairs) or
 # "real_and_composite" (the mean of the pairs' and the valid composites' PSNR gains -- the composites hold the Wu et
 # al. daytime flares the pairs do not).
-FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best", "uformer_init", "select_on")
+# p46: kinds may add "scene" (a scene pair of data.scene_pairs_*, e.g. VisDrone: its flared photo -> its clean one);
+# background_scene_fraction: of the composites' backgrounds, the share that is a scene pair's clean photo (absent: 0,
+# drawn as before); select_on "real_composite_scene" adds the valid scene pairs' PSNR gain to real_and_composite's.
+FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best", "uformer_init", "select_on",
+                             "background_scene_fraction")
+FLARE_SELECT_ON = ("real", "real_and_composite", "real_composite_scene")
 FLARE_MODELS = ("unet", "uformer_flare7kpp")
 
 
@@ -1002,8 +1064,8 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
         raise ValueError("flare.uformer_init must be release or stage")
     if "uformer_init" in stage and stage.get("model", "unet") != "uformer_flare7kpp":
         raise ValueError("flare.uformer_init starts the Uformer: set flare.model: uformer_flare7kpp")
-    if stage.get("select_on", "real") not in ("real", "real_and_composite"):
-        raise ValueError("flare.select_on must be real or real_and_composite")
+    if stage.get("select_on", "real") not in FLARE_SELECT_ON:
+        raise ValueError(f"flare.select_on must be one of {', '.join(FLARE_SELECT_ON)}")
     if "select_on" in stage and not stage.get("select_best", False):
         raise ValueError("flare.select_on chooses flare/best.pt: set flare.select_best: true")
     if not config["data"].get("lens_flare_root"):
@@ -1028,9 +1090,19 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
     if stage["precision"] not in ("fp32", "amp_fp16"):
         raise ValueError("flare.precision must be fp32 or amp_fp16")
     kinds = stage["kinds"]
-    if (not isinstance(kinds, dict) or set(kinds) != {"composite", "pair", "plain"}
+    if (not isinstance(kinds, dict) or set(kinds) not in ({"composite", "pair", "plain"},
+                                                          {"composite", "pair", "plain", "scene"})
             or not all(_nonnegative_number(v) for v in kinds.values()) or sum(kinds.values()) <= 0):
-        raise ValueError("flare.kinds must give composite, pair and plain nonnegative weights, not all 0")
+        raise ValueError("flare.kinds must give composite, pair and plain (and optionally scene) nonnegative weights, "
+                         "not all 0")
+    background_scene = stage.get("background_scene_fraction", 0.0)
+    if not _nonnegative_number(background_scene) or background_scene > 1:
+        raise ValueError("flare.background_scene_fraction must be in [0, 1]")
+    uses_scenes = (float(kinds.get("scene", 0.0)) > 0 or float(background_scene) > 0
+                   or stage.get("select_on") == "real_composite_scene")
+    if uses_scenes and float(config["data"].get("scene_pairs_fraction", 0.0)) <= 0:
+        raise ValueError("flare.kinds.scene, flare.background_scene_fraction and flare.select_on real_composite_scene "
+                         "read the scene pairs: set data.scene_pairs_*")
     for key in ("background_pair_fraction", "blur_probability", "grain_probability"):
         if not _nonnegative_number(stage[key]) or stage[key] > 1:
             raise ValueError(f"flare.{key} must be in [0, 1]")

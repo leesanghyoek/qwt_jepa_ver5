@@ -40,10 +40,12 @@ def selection_score(report: dict[str, float], select_on: str = "real") -> float:
         value = report.get(key)
         return float(value) if value is not None and math.isfinite(float(value)) else None
 
-    if select_on == "real_and_composite":
-        gains = [finite(f"{kind}_psnr_out") - finite(f"{kind}_psnr_in") for kind in ("real", "composite")
+    if select_on in ("real_and_composite", "real_composite_scene"):
+        # p46 real_composite_scene: also the valid scene pairs' gain (e.g. VisDrone with its held-out flares).
+        kinds = ("real", "composite", "scene") if select_on == "real_composite_scene" else ("real", "composite")
+        gains = [finite(f"{kind}_psnr_out") - finite(f"{kind}_psnr_in") for kind in kinds
                  if finite(f"{kind}_psnr_out") is not None and finite(f"{kind}_psnr_in") is not None
-                 and (kind != "real" or report.get("real_pairs"))]
+                 and (kind == "composite" or report.get(f"{kind}_pairs"))]
         return sum(gains) / len(gains) if gains else float("-inf")
     value = finite("real_psnr_out") if report.get("real_pairs") else finite("composite_psnr_out")
     return value if value is not None else float("-inf")
@@ -118,7 +120,7 @@ class FlareStageTrainer:
             kinds = batch["kind"].to(self.device)
             report = {"loss": float(loss), "learning_rate": lr, "gradient_norm": norm, "amp_overflow": overflow,
                       "nonfinite": False, "successful_updates": self.successful_updates}
-            for index, name in enumerate(("composite", "pair", "plain")):
+            for index, name in enumerate(("composite", "pair", "plain", "scene")):
                 chosen = kinds == index
                 if bool(chosen.any()):
                     report[f"flare_l1_{name}"] = float(error[chosen].mean())
@@ -146,8 +148,9 @@ def _mean(values: list[float]) -> float:
 
 @torch.no_grad()
 def validate_flare_stage(trainer: FlareStageTrainer, composites, real_pairs: list[dict[str, Any]],
-                         batch_size: int) -> dict[str, float]:
-    """Loe ghep valid (lop loe valid tren anh TartanAir valid) va cap FlareImage valid: model chua thay ca hai."""
+                         batch_size: int, scene_pairs: list[dict[str, Any]] | None = None) -> dict[str, float]:
+    """Loe ghep valid (lop loe valid tren anh TartanAir valid) va cap FlareImage valid: model chua thay ca hai.
+    p46 ``scene_pairs``: cap canh valid (vd VisDrone), cham nhu cap FlareImage, khoa ``scene_*``."""
     trainer.model.eval()
     device = trainer.device
     left, size, plain = [], [], []
@@ -161,6 +164,8 @@ def validate_flare_stage(trainer: FlareStageTrainer, composites, real_pairs: lis
             if int(batch["kind"][k]) == 2:
                 plain.append(float(flare[k].abs().mean()))
                 continue
+            if int(batch["kind"][k]) == 3:                 # p46 cap canh: cham rieng o scene_pairs, khong tinh vao ghep
+                continue
             left.append(float((flare[k] - target[k]).abs().mean()))
             size.append(float(target[k].abs().mean()))
             psnr_in.append(_psnr(image[k], clean[k]))
@@ -168,22 +173,25 @@ def validate_flare_stage(trainer: FlareStageTrainer, composites, real_pairs: lis
     report = {"composite_flare_left": sum(left) / max(sum(size), 1e-12),
               "composite_psnr_in": _mean(psnr_in), "composite_psnr_out": _mean(psnr_out),
               "plain_flare_mean": _mean(plain)}
-    rows = {key: [] for key in ("psnr_in", "psnr_out", "flare_in", "flare_out", "rest_in", "rest_out")}
-    for start in range(0, len(real_pairs), batch_size):
-        chunk = real_pairs[start:start + batch_size]
-        image = torch.stack([item["image_noisy"] for item in chunk]).to(device)
-        clean = torch.stack([item["image_target"] for item in chunk]).to(device)
-        out = image - trainer._forward(image)
-        for k in range(image.shape[0]):
-            mask = (image[k] - clean[k]).abs().mean(0) > FLARE_THRESHOLD
-            rows["psnr_in"].append(_psnr(image[k], clean[k]))
-            rows["psnr_out"].append(_psnr(out[k], clean[k]))
-            rows["flare_in"].append(_psnr(image[k], clean[k], mask))
-            rows["flare_out"].append(_psnr(out[k], clean[k], mask))
-            rows["rest_in"].append(_psnr(image[k], clean[k], ~mask))
-            rows["rest_out"].append(_psnr(out[k], clean[k], ~mask))
-    report.update({f"real_{key}": _mean(values) for key, values in rows.items()})
-    report["real_pairs"] = len(real_pairs)
+    for name, items in (("real", real_pairs), ("scene", scene_pairs)):
+        if items is None:
+            continue
+        rows = {key: [] for key in ("psnr_in", "psnr_out", "flare_in", "flare_out", "rest_in", "rest_out")}
+        for start in range(0, len(items), batch_size):
+            chunk = items[start:start + batch_size]
+            image = torch.stack([item["image_noisy"] for item in chunk]).to(device)
+            clean = torch.stack([item["image_target"] for item in chunk]).to(device)
+            out = image - trainer._forward(image)
+            for k in range(image.shape[0]):
+                mask = (image[k] - clean[k]).abs().mean(0) > FLARE_THRESHOLD
+                rows["psnr_in"].append(_psnr(image[k], clean[k]))
+                rows["psnr_out"].append(_psnr(out[k], clean[k]))
+                rows["flare_in"].append(_psnr(image[k], clean[k], mask))
+                rows["flare_out"].append(_psnr(out[k], clean[k], mask))
+                rows["rest_in"].append(_psnr(image[k], clean[k], ~mask))
+                rows["rest_out"].append(_psnr(out[k], clean[k], ~mask))
+        report.update({f"{name}_{key}": _mean(values) for key, values in rows.items()})
+        report[f"{name}_pairs"] = len(items)
     trainer.model.train(True)
     return report
 
@@ -191,8 +199,10 @@ def validate_flare_stage(trainer: FlareStageTrainer, composites, real_pairs: lis
 def validation_text(report: dict[str, float]) -> str:
     text = (f"loe ghep: PSNR {report['composite_psnr_in']:.2f} -> {report['composite_psnr_out']:.2f}, "
             f"loe con {100 * report['composite_flare_left']:.0f}% | anh khong loe: lop |F| {report['plain_flare_mean']:.4f}")
-    if report.get("real_pairs"):
-        text += (f" | FlareImage valid n={report['real_pairs']}: ca anh {report['real_psnr_in']:.2f} -> "
-                 f"{report['real_psnr_out']:.2f}, vung loe {report['real_flare_in']:.2f} -> {report['real_flare_out']:.2f}"
-                 f", ngoai loe {report['real_rest_in']:.2f} -> {report['real_rest_out']:.2f}")
+    for name, label in (("real", "FlareImage"), ("scene", "VisDrone")):
+        if report.get(f"{name}_pairs"):
+            text += (f" | {label} valid n={report[f'{name}_pairs']}: ca anh {report[f'{name}_psnr_in']:.2f} -> "
+                     f"{report[f'{name}_psnr_out']:.2f}, vung loe {report[f'{name}_flare_in']:.2f} -> "
+                     f"{report[f'{name}_flare_out']:.2f}, ngoai loe {report[f'{name}_rest_in']:.2f} -> "
+                     f"{report[f'{name}_rest_out']:.2f}")
     return text

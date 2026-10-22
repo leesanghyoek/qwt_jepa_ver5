@@ -284,7 +284,11 @@ def detail_energy_gap(predicted: torch.Tensor, target: torch.Tensor, dim: int) -
     # Gop moi truc tru batch va bang: moi bang co mot nang luong rieng, va LH/HL
     # hanh xu khac HH nen khong duoc tron chung.
     axes = tuple(range(2, got.ndim))
-    return (got.square().mean(axes).sqrt() - want.square().mean(axes).sqrt()).abs().mean()
+    # p46: a band with no energy at all (an IMU window without IMU, data.imu_absent_probability: all zero in and
+    # out) has sqrt's infinite slope at 0, and 0 * inf = NaN in the gradient. Below 1e-12 the energy is held at 1e-12
+    # (gradient 0); any real band is far above it, so the value and gradient stay those of before.
+    rms = lambda bands: bands.square().mean(axes).clamp_min(1e-12).sqrt()
+    return (rms(got) - rms(want)).abs().mean()
 
 
 def color_edge_split_loss(

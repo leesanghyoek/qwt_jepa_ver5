@@ -7,6 +7,9 @@ phase-2 target), and scores PSNR in -> out over the whole crop, INSIDE the flare
 differs from its clean photo by more than FLARE_THRESHOLD (mean of 3 channels), as in tools/flare_image_test.py -- and
 OUTSIDE it, where the model should leave the frame alone (p40 lost 4-5 dB there). Log only: no checkpoint choice
 reads it.
+
+p46: the scene pairs' valid split (data.scene_pairs_*, e.g. VisDrone test-dev scenes with held-out flare layers) is
+scored the same way, its flared photo always the source ("VisDrone valid" line).
 """
 
 from __future__ import annotations
@@ -44,15 +47,38 @@ def _mean(values: list[float]) -> float:
     return sum(kept) / len(kept) if kept else float("nan")
 
 
+def scene_validation_dataset(dataset: PairedCameraImuDataset) -> PairedCameraImuDataset | None:
+    """``dataset`` (built with the scene bank and flare_layer=True) reading the scene pairs' valid split; None when
+    there is no bank."""
+    if dataset.scene_bank is None:
+        return None
+    dataset.scene_pairs_split = "valid"
+    return dataset if dataset.scene_bank.pairs("valid") else None
+
+
 @torch.no_grad()
 def evaluate_flare_pairs(dataset: PairedCameraImuDataset, forward_model: torch.nn.Module, device: torch.device,
                          batch_size: int) -> dict[str, float]:
     """Every valid pair once (draws 0..n-1 of the fixed realization: the same crops each validation)."""
     count = len(dataset.flare_bank.pairs(dataset.flare_pairs_split))
+    return _evaluate_pairs(dataset._flare_item, count, forward_model, device, batch_size)
+
+
+@torch.no_grad()
+def evaluate_scene_pairs(dataset: PairedCameraImuDataset, forward_model: torch.nn.Module, device: torch.device,
+                         batch_size: int) -> dict[str, float]:
+    """p46: every valid scene pair once, its flared photo as the source (draws 0..n-1 of the fixed realization)."""
+    count = len(dataset.scene_bank.pairs(dataset.scene_pairs_split))
+    return _evaluate_pairs(lambda draw: dataset._scene_item(draw, flared=True), count, forward_model, device,
+                           batch_size)
+
+
+def _evaluate_pairs(item, count: int, forward_model: torch.nn.Module, device: torch.device,
+                    batch_size: int) -> dict[str, float]:
     rows: dict[str, list[float]] = {key: [] for key in (
         "psnr_in", "psnr_out", "flare_in", "flare_out", "rest_in", "rest_out", "flare_fraction")}
     for start in range(0, count, batch_size):
-        batch = collate_paired([dataset._flare_item(draw) for draw in range(start, min(count, start + batch_size))])
+        batch = collate_paired([item(draw) for draw in range(start, min(count, start + batch_size))])
         restored = forward_model(batch["image_noisy"].to(device), batch["imu_noisy_phys"].to(device),
                                  batch["image_time"].to(device), batch["imu_times"].to(device))
         out = restored["image"].float().clamp(0, 1).cpu()
@@ -74,8 +100,12 @@ def evaluate_flare_pairs(dataset: PairedCameraImuDataset, forward_model: torch.n
     return report
 
 
-def flare_validation_text(report: dict[str, Any]) -> str:
-    return (f"FlareImage valid n={int(report['count'])}: ca anh {report['psnr_in']:.2f} -> {report['psnr_out']:.2f}"
+def flare_validation_text(report: dict[str, Any], name: str = "FlareImage") -> str:
+    return (f"{name} valid n={int(report['count'])}: ca anh {report['psnr_in']:.2f} -> {report['psnr_out']:.2f}"
             f" ({100 * report['worse_fraction']:.0f}% te hon vao) | vung loe ({100 * report['flare_fraction']:.0f}% khung)"
             f" {report['flare_in']:.2f} -> {report['flare_out']:.2f} | ngoai loe {report['rest_in']:.2f} ->"
             f" {report['rest_out']:.2f} ({100 * report['rest_worse_fraction']:.0f}% tut > 0,5 dB)")
+
+
+def scene_validation_text(report: dict[str, Any]) -> str:
+    return flare_validation_text(report, "VisDrone")

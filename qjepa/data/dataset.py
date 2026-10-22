@@ -16,6 +16,7 @@ from ..corruptions.light import brighten_dark
 from ..corruptions.rng import derive_seed
 from .flare_pairs import FlarePair, FlarePairBank
 from .manifest import PairedSample
+from .scene_pairs import ScenePair, ScenePairBank
 from .tartanair import Trajectory
 
 # A horizontal flip mirrors the world across the camera's forward-down plane.
@@ -23,6 +24,9 @@ from .tartanair import Trajectory
 # corruptions/motion.py), so the polar accel flips y and the axial gyro flips
 # every component but y: [ax, -ay, az, -gx, gy, -gz].
 IMU_MIRROR_SIGNS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
+# p46 (data.scene_pairs_*): a scene pair's draw d sits at index len(samples) + SCENE_DRAW_BASE + d, far past any
+# FlareImage draw (len(samples) + d), so both kinds of extra slot share one index space (sampler.ExtraSlots).
+SCENE_DRAW_BASE = 1 << 40
 
 
 def mirror_imu(imu: np.ndarray) -> np.ndarray:
@@ -106,6 +110,10 @@ class PairedCameraImuDataset(Dataset):
         flare_pairs_augment: str = "none",
         flare_layer: bool = False,
         target_brighten: dict | None = None,
+        scene_pairs: ScenePairBank | None = None,
+        scene_pairs_fraction: float = 0.0,
+        scene_pairs_flare_probability: float = 0.0,
+        imu_absent_probability: float = 0.0,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -126,6 +134,25 @@ class PairedCameraImuDataset(Dataset):
         if flare_pairs_augment == "dihedral" and image_size[0] != image_size[1]:
             raise ValueError("flare_pairs_augment dihedral needs a square image_size")
         self.flare_pairs_augment = flare_pairs_augment
+        # p46 data.scene_pairs_*: pairs of real scene photos with a flare composited on (scene_pairs.py) fill
+        # scene_pairs_per_batch() slots of every training batch. Each draw's source is the flared photo with
+        # probability scene_pairs_flare_probability (a FlareImage-like pair), else the clean photo, which goes through
+        # the whole corruption like a TartanAir frame. None: as before.
+        if scene_pairs is not None and not 0.0 < scene_pairs_fraction < 1.0:
+            raise ValueError("scene_pairs_fraction must lie in (0, 1) when scene pairs are given")
+        if not 0.0 <= scene_pairs_flare_probability <= 1.0:
+            raise ValueError("scene_pairs_flare_probability must be in [0, 1]")
+        self.scene_bank = scene_pairs
+        self.scene_pairs_split = "train"   # validation (evaluation.flare_pairs) reads the valid pairs instead
+        self.scene_pairs_fraction = float(scene_pairs_fraction)
+        self.scene_pairs_flare_probability = float(scene_pairs_flare_probability)
+        # p46 data.imu_absent_probability: that share of the samples comes with NO IMU -- clean and noisy window all
+        # zero, which no real IMU gives (the accelerometer always reads gravity) -- so the model learns to restore an
+        # image alone (infer without --imu); the IMU branch's target is then zero too. 1.0: every sample (evaluate
+        # --imu-absent). 0: as before.
+        if not 0.0 <= imu_absent_probability <= 1.0:
+            raise ValueError("imu_absent_probability must be in [0, 1]")
+        self.imu_absent_probability = float(imu_absent_probability)
         # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
         self.sensor_reference = sensor_reference
         # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
@@ -209,7 +236,25 @@ class PairedCameraImuDataset(Dataset):
             return 0
         return max(1, round(self.flare_pairs_fraction * batch_size))
 
+    def scene_pairs_per_batch(self, batch_size: int) -> int:
+        """How many slots of a training batch of ``batch_size`` hold a scene pair (0 without data.scene_pairs_*)."""
+        if self.scene_bank is None:
+            return 0
+        return max(1, round(self.scene_pairs_fraction * batch_size))
+
+    def imu_absent(self, sample_id: str) -> bool:
+        """Whether ``sample_id`` comes without IMU in this realization (data.imu_absent_probability): reproducible."""
+        if self.imu_absent_probability <= 0.0:
+            return False
+        if self.imu_absent_probability >= 1.0:
+            return True
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "imu_absent", sample_id, self.realization))
+        return bool(rng.random() < self.imu_absent_probability)
+
     def __getitem__(self, index: int) -> dict[str, object]:
+        if index >= len(self.samples) + SCENE_DRAW_BASE:
+            # p46: the draw-th scene pair of this realization (sampler.ExtraSlots).
+            return self._scene_item(index - len(self.samples) - SCENE_DRAW_BASE)
         if index >= len(self.samples):
             # Past the TartanAir samples: the draw-th FlareImage pair of this realization (sampler.FlarePairSlots).
             return self._flare_item(index - len(self.samples))
@@ -264,6 +309,50 @@ class PairedCameraImuDataset(Dataset):
                           flare_pair=info, imu_donor=host.sample_id,
                           flare_target=flared_crop - gt_crop if self.flare_layer else None)
 
+    def scene_pair_of_draw(self, draw: int) -> ScenePair:
+        """The scene pair draw ``draw`` of this realization reads: a fresh permutation of the split's pairs per cycle."""
+        pairs = self.scene_bank.pairs(self.scene_pairs_split)
+        cycle, slot = divmod(int(draw), len(pairs))
+        order = np.random.default_rng(derive_seed(
+            self.scenario_seed, "scene_pair_order", self.realization, cycle)).permutation(len(pairs))
+        return pairs[int(order[slot])]
+
+    def _scene_item(self, draw: int, *, flared: bool | None = None) -> dict[str, object]:
+        """A scene pair (p46): a crop of its clean photo is the target; the source is the flared photo of the same crop
+        (input = flared photo through the corruption, like a FlareImage pair: "clear", the environment steps skipped)
+        or the clean photo (through the whole corruption, like a TartanAir frame). A training draw turns the crop by
+        k x 90 degrees and maybe flips it: a drone's view from above has no up. The IMU window is borrowed from a
+        TartanAir sample drawn here. ``flared`` forces the source (evaluation: the flared one)."""
+        pair = self.scene_pair_of_draw(draw)
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "scene_pair", self.realization, draw))
+        host = self.samples[int(rng.integers(len(self.samples)))]
+        drawn = bool(rng.random() < self.scene_pairs_flare_probability)
+        flared = drawn if flared is None else bool(flared)
+        gt, photo = self.scene_bank.load(pair)
+        height, width = self.image_size
+        if gt.shape[0] < height or gt.shape[1] < width:
+            raise ValueError(f"Scene pair {pair.name}: {gt.shape[1]}x{gt.shape[0]} is smaller than the crop "
+                             f"{width}x{height}; raise data.scene_pairs_short_side")
+        top = int(rng.integers(0, gt.shape[0] - height + 1))
+        left = int(rng.integers(0, gt.shape[1] - width + 1))
+        crop = lambda image: np.ascontiguousarray(image[top:top + height, left:left + width], dtype=np.float32) / 255.0
+        gt_crop, flared_crop = crop(gt), crop(photo)
+        info: dict[str, object] = {"name": pair.name, "source": f"scene/{pair.source or '?'}", "clear": True}
+        if self.scene_pairs_split == "train" and height == width:
+            turns, flip = int(rng.integers(4)), bool(rng.random() < 0.5)
+            turn = lambda image: np.ascontiguousarray(np.rot90(image, turns)[:, ::-1] if flip else np.rot90(image, turns))
+            gt_crop, flared_crop = turn(gt_crop), turn(flared_crop)
+            info.update(rot90=turns, flip=flip)
+        sample_id = f"scenepair/{pair.name}#{self.realization}:{draw}"
+        image_mode, imu_mode = self._modes(sample_id)
+        if flared:
+            return self._item(host, sample_id, f"scenepair/{pair.source or '?'}", gt_crop, flared_crop, image_mode,
+                              imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0, flare_pair=info,
+                              imu_donor=host.sample_id,
+                              flare_target=flared_crop - gt_crop if self.flare_layer else None)
+        return self._item(host, sample_id, "scenepair/clean", gt_crop, gt_crop, image_mode, imu_mode,
+                          trajectory=sample_id, timestamp=0.0, frame_index=0, imu_donor=host.sample_id)
+
     def _item(self, host: PairedSample, sample_id: str, trajectory_key: str, clean_image: np.ndarray,
               source_image: np.ndarray, image_mode: str, imu_mode: str, *, trajectory: str, timestamp: float,
               frame_index: int, flare_pair: dict[str, object] | None = None,
@@ -308,6 +397,11 @@ class PairedCameraImuDataset(Dataset):
             trajectory=host.trajectory_key,
             mode=imu_mode,
         )
+        absent = self.imu_absent(sample_id)
+        if absent:
+            # p46: no IMU for this sample. The window above is still drawn (every stream stays a run's without it).
+            clean_imu, noisy_imu = np.zeros_like(clean_imu), np.zeros_like(noisy_imu)
+            imu_parameters = {**imu_parameters, "absent": True}
         gain = 1.0
         if self.target_brighten is not None:
             clean_image, gain = brighten_dark(clean_image, **self.target_brighten)
@@ -341,6 +435,8 @@ class PairedCameraImuDataset(Dataset):
         }
         if imu_donor is not None:
             item["corruption"]["imu_donor"] = imu_donor
+        if self.imu_absent_probability > 0:
+            item["imu_present"] = torch.tensor([0.0 if absent else 1.0])
         if noise_free is not None:
             item["image_noise_free"] = chw(noise_free)
         if stops is not None:
@@ -360,7 +456,8 @@ def collate_paired(batch: list[dict[str, object]]) -> dict[str, object]:
     output: dict[str, object] = {}
     for key in ("image_clean", "image_noisy", "image_time", "imu_times", "imu_start"):
         output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
-    for key in ("image_degradation", "image_noise_free", "image_stops", "image_tone_label", "image_flare_target"):
+    for key in ("image_degradation", "image_noise_free", "image_stops", "image_tone_label", "image_flare_target",
+                "imu_present"):
         if key in batch[0]:
             output[key] = torch.stack([item[key] for item in batch])  # type: ignore[list-item]
     for key in ("imu_clean_phys", "imu_noisy_phys"):
