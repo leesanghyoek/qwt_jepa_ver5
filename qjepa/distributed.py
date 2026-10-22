@@ -107,6 +107,19 @@ def rank0_section() -> Iterator[None]:
         raise
 
 
+def line_buffered(stream) -> None:
+    """Write ``stream`` out at every newline.
+
+    mp.spawn starts the ranks without the notebook's ``python -u``, so rank 0's stdout
+    into Kaggle's pipe was block-buffered: p46's phase 1 showed no line for an hour.
+    Every DataLoader worker forked from it then also wrote out its copy of the unflushed
+    buffer when it exited (the "Execution:" line came twice).
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -122,6 +135,8 @@ def _entry(rank: int, world: int, port: int, cuda: bool, target: Callable[[Any],
         os.environ["CUDA_VISIBLE_DEVICES"] = ids[rank].strip()
     if rank:
         sys.stdout = open(os.devnull, "w")          # one log: rank 0's; errors still reach stderr
+    else:
+        line_buffered(sys.stdout)
     # Rank 0 validates and saves while the others wait at the next collective; NCCL's
     # default 10-minute timeout would kill a run whose validation runs long. A rank
     # that fails still ends the run at once: spawn stops the others.

@@ -75,6 +75,11 @@ và phase 2.
   - `train-flare` chấm VisDrone valid và chọn `best.pt` theo đó.
   - Hai phase train qua CLI và in hai dòng validation mới; `infer` không `--imu` và `evaluate --imu-absent` chạy được.
   - Hai tiến trình DDP train ra như một.
+- **Sửa log DDP (lần chạy p46 đầu trên Kaggle):** `train-phase1` chỉ in hai dòng `Execution:` rồi im hơn một giờ.
+  `mp.spawn` không truyền `python -u` của notebook sang các rank, nên stdout của rank 0 bị gom bộ đệm. Mỗi worker
+  DataLoader fork từ rank 0 còn in lại bản sao bộ đệm khi thoát, nên dòng `Execution:` hiện hai lần. Bản sửa cho rank 0
+  in từng dòng (`distributed.line_buffered`). Bằng chứng: `tests/test_ddp.py::test_rank_zero_prints_each_line_at_once_and_a_forked_worker_does_not_print_it_again`.
+  Không có bản sửa, test chỉ đọc được bản sao do worker in, đúng như trên Kaggle.
 
 **p45_sunflare — lóe ban ngày: mặt trời hắt vào ống kính, quầng chói, bóng ma đa giác** (config
 `configs/kaggle_sunflare.yaml` → OUT `outputs/p45_sunflare`). Bằng p44 cộng `flare.uformer_init: stage`,

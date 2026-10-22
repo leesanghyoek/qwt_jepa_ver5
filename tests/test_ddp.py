@@ -291,3 +291,59 @@ def test_phase1_on_two_processes_trains_what_one_does(tmp_path):
     for key, value in finals["single"].items():
         if value.is_floating_point():
             assert torch.allclose(value, finals["ddp"][key], atol=max(drift, 1e-6)), key
+
+
+_RANK_PRINTS = '''
+import multiprocessing, sys, time
+from pathlib import Path
+
+
+def _quiet():
+    pass
+
+
+def target(flag):
+    print("first line")
+    worker = multiprocessing.get_context("fork").Process(target=_quiet)   # as a DataLoader worker
+    worker.start()
+    worker.join()
+    print("second line")
+    deadline = time.monotonic() + 120
+    while not Path(flag).exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+'''
+
+
+def test_rank_zero_prints_each_line_at_once_and_a_forked_worker_does_not_print_it_again(tmp_path):
+    """p46 on Kaggle: rank 0's log sat in its stdout buffer for an hour, and the DataLoader workers wrote their copy
+    of it out ("Execution:" twice). Here a rank prints, forks, prints, then waits: both lines must reach the pipe
+    while it still runs, once each."""
+    import os
+    import selectors
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    (tmp_path / "rank_prints.py").write_text(_RANK_PRINTS)
+    flag = tmp_path / "done"
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), repo]))
+    env.pop("PYTHONUNBUFFERED", None)
+    code = ("from qjepa.distributed import spawn\nimport rank_prints\n"
+            f"spawn(rank_prints.target, {str(flag)!r}, 2, cuda=False)\n")
+    process = subprocess.Popen([sys.executable, "-u", "-c", code], stdout=subprocess.PIPE, env=env)
+    try:
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        lines = []
+        while len(lines) < 2 and selector.select(timeout=90):
+            line = process.stdout.readline()
+            if not line:
+                break
+            lines.append(line.decode().strip())
+        assert lines == ["first line", "second line"], lines
+    finally:
+        flag.touch()
+        rest, _ = process.communicate(timeout=120)
+    assert process.returncode == 0
+    assert b"first line" not in rest
