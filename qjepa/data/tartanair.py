@@ -159,6 +159,85 @@ def link_trajectories(roots: list[str | Path], target: str | Path) -> Path:
     return target
 
 
+COPIED_FOLDERS = ("imu", IMAGE_DIRECTORY)
+
+
+def copy_trajectories(roots: list[str | Path], target: str | Path, *, workers: int = 128,
+                      report_every: float = 30.0, log=print) -> Path:
+    """link_trajectories, but each trajectory's imu/ and image_lcam_front/ are copied onto ``target``'s disk.
+
+    p46 on Kaggle: /kaggle/input answered every file after ~1 s (one 640 PNG 1.15 s, one trajectory's IMU 9.8 s),
+    so phase 1 waited ~6 s per update for its data. The wait is per file, not bandwidth: 8 threads read 7x as
+    fast, 32 threads 28x. So the files are read here by ``workers`` threads, once. A link left by an earlier
+    link_trajectories into ``target`` becomes a folder; files already copied are kept, so a rerun copies only
+    what is missing. A file appears under its name only once complete (written aside, then renamed).
+    The manifest resolves frame paths, so one built on the copy names the local files.
+    """
+    import shutil
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    target = Path(target)
+    staging = target / ".staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    found: dict[str, Trajectory] = {}
+    for root in roots:
+        for trajectory in discover_trajectories(root):
+            if trajectory.key in found:
+                raise ValueError(f"{trajectory.key} is in both {found[trajectory.key].path} and {trajectory.path}")
+            found[trajectory.key] = trajectory
+
+    def listing(trajectory: Trajectory) -> tuple[Path, list[tuple[Path, Path]]]:
+        destination = target / trajectory.environment / trajectory.difficulty / trajectory.trajectory_id
+        files = []
+        for folder in COPIED_FOLDERS:
+            with os.scandir(trajectory.path / folder) as entries:
+                files += [(Path(entry.path), destination / folder / entry.name) for entry in entries if entry.is_file()]
+        return destination, files
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(workers) as pool:
+        listed = list(pool.map(listing, found.values()))
+    jobs = []
+    for destination, files in listed:
+        if destination.is_symlink():
+            destination.unlink()                        # the link, not what it points at
+        for folder in COPIED_FOLDERS:
+            (destination / folder).mkdir(parents=True, exist_ok=True)
+        jobs += [(source, copy) for source, copy in files if not copy.is_file()]
+    total = sum(len(files) for _, files in listed)
+    log(f"{len(found)} trajectory, {total} file: {total - len(jobs)} đã có, chép {len(jobs)} "
+        f"({workers} luồng; liệt kê {time.perf_counter() - started:.0f} s)", flush=True)
+    counter = iter(range(len(jobs)))
+    lock = threading.Lock()
+
+    def copy(job: tuple[Path, Path]) -> int:
+        source, destination = job
+        with lock:
+            partial = staging / f"{next(counter)}.part"
+        shutil.copyfile(source, partial)
+        size = partial.stat().st_size
+        os.replace(partial, destination)
+        return size
+
+    copied, done, last = 0, 0, time.perf_counter()
+    started = last
+    with ThreadPoolExecutor(workers) as pool:
+        for future in as_completed([pool.submit(copy, job) for job in jobs]):
+            copied += future.result()
+            done += 1
+            now = time.perf_counter()
+            if now - last >= report_every or done == len(jobs):
+                rate = done / max(now - started, 1e-9)
+                log(f"  chép {done}/{len(jobs)} file · {copied / 2**30:.1f} GiB · {rate:.0f} file/s · "
+                    f"{copied / max(now - started, 1e-9) / 2**20:.0f} MiB/s · còn ~{(len(jobs) - done) / rate / 60:.0f} phút",
+                    flush=True)
+                last = now
+    shutil.rmtree(staging, ignore_errors=True)
+    return target
+
+
 def find_shard_roots(
     base: str | Path = "/kaggle/input", depth: int = 4, shards: tuple[int, ...] | list[int] | None = None
 ) -> dict[int, Path]:

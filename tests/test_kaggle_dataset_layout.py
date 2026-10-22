@@ -131,6 +131,50 @@ def test_link_trajectories_merges_shards_whatever_their_nesting(tmp_path):
         link_trajectories([shard1, shard1], tmp_path / "twice")
 
 
+def test_copy_trajectories_puts_real_files_where_the_links_were_and_the_manifest_reads_them(tmp_path):
+    """p46: /kaggle/input answers each file after ~1 s, so the trajectories are copied to local disk once. The copy
+    replaces the links of link_trajectories at the same path; the frames and IMU are byte for byte the originals; a
+    manifest built on it names only local files and holds the same samples; a rerun copies only what is missing."""
+    import os
+
+    from qjepa.data.tartanair import copy_trajectories, link_trajectories
+
+    shard0 = tmp_path / "input" / "tartanair640-s0" / "tartanair640_archives"
+    _trajectory(shard0 / "AmericanDiner" / "tartanair640", "AmericanDiner", "Data_easy", "P000", 40)
+    shard1 = tmp_path / "input" / "tartanair640-s1" / "tartanair640"
+    _trajectory(shard1, "Office", "Data_easy", "P000", 40)
+    _trajectory(shard1, "Office", "Data_hard", "P001", 40)
+    merged = tmp_path / "merged"
+    linked = build_manifest(link_trajectories([shard0, shard1], merged), window=WINDOW)
+    messages = []
+    log = lambda text, **_: messages.append(text)
+    assert copy_trajectories([shard0, shard1], merged, workers=4, log=log) == merged
+    assert not any(path.is_symlink() for path in merged.rglob("*")) and not (merged / ".staging").exists()
+    originals = {item.key: item.path for item in discover_trajectories(tmp_path / "input")}
+    for item in discover_trajectories(merged):
+        for folder in ("imu", "image_lcam_front"):
+            names = sorted(os.listdir(originals[item.key] / folder))
+            assert names and sorted(os.listdir(item.path / folder)) == names
+            assert all((item.path / folder / name).read_bytes() == (originals[item.key] / folder / name).read_bytes()
+                       for name in names)
+    copied = build_manifest(merged, window=WINDOW)
+    for split, samples in copied["samples"].items():
+        assert samples and all(sample.image_path.startswith(str(merged.resolve())) for sample in samples)
+        assert all(str(tmp_path / "input") in sample.image_path for sample in linked["samples"][split])
+        assert [(sample.sample_id, sample.image_index, sample.imu_start) for sample in samples] == [
+            (sample.sample_id, sample.image_index, sample.imu_start) for sample in linked["samples"][split]]
+        # The same frame: env/difficulty/Pxxx/image_lcam_front/<name> agree.
+        assert [Path(sample.image_path).parts[-5:] for sample in samples] == [
+            Path(sample.image_path).parts[-5:] for sample in linked["samples"][split]]
+    # Interrupted copy: one frame missing -> the rerun copies that one alone; the originals are untouched.
+    frame = next((merged / "Office" / "Data_easy" / "P000" / "image_lcam_front").iterdir())
+    frame.unlink()
+    messages.clear()
+    copy_trajectories([shard0, shard1], merged, workers=4, log=log)
+    assert "chép 1 " in messages[0] and frame.is_file()
+    assert sum(1 for _ in tmp_path.joinpath("input").rglob("*.png")) == 120
+
+
 def test_per_environment_split_draws_valid_and_test_from_every_environment():
     from qjepa.data.manifest import SHARED_PATH_SCENES
     from qjepa.data.tartanair import Trajectory

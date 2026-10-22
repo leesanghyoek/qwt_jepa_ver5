@@ -80,6 +80,15 @@ và phase 2.
   DataLoader fork từ rank 0 còn in lại bản sao bộ đệm khi thoát, nên dòng `Execution:` hiện hai lần. Bản sửa cho rank 0
   in từng dòng (`distributed.line_buffered`). Bằng chứng: `tests/test_ddp.py::test_rank_zero_prints_each_line_at_once_and_a_forked_worker_does_not_print_it_again`.
   Không có bản sửa, test chỉ đọc được bản sao do worker in, đúng như trên Kaggle.
+- **Chép TartanAir về ổ cục bộ (lần chạy p46 thứ hai):** phase 1 chờ dữ liệu khoảng 6 s mỗi update (trước đây khoảng
+  0,3 s), trong khi load average chỉ khoảng 1,4. Đo trên Kaggle:
+  - đọc một PNG 640 từ `/kaggle/input` mất 1 151 ms, IMU của một trajectory mất 9,8 s; giải mã chỉ mất 17 ms;
+  - 8 luồng đọc nhanh gấp khoảng 7 lần, 32 luồng gấp khoảng 28 lần (24 ảnh/s).
+
+  Ổ chậm vì độ trễ của từng file, không phải băng thông. `tartanair.copy_trajectories` chép mọi trajectory bằng nhiều
+  luồng vào đúng chỗ symlink cũ (`/tmp/tartanair640_all`), rồi manifest dựng lại trên bản chép (Cell 1 `LOCAL_COPY`).
+  Ảnh và IMU giống từng byte, mẫu và thứ tự giữ nguyên. Manifest hash đổi vì đường dẫn đổi. Bằng chứng:
+  `tests/test_kaggle_dataset_layout.py::test_copy_trajectories_puts_real_files_where_the_links_were_and_the_manifest_reads_them`.
 
 **p45_sunflare — lóe ban ngày: mặt trời hắt vào ống kính, quầng chói, bóng ma đa giác** (config
 `configs/kaggle_sunflare.yaml` → OUT `outputs/p45_sunflare`). Bằng p44 cộng `flare.uformer_init: stage`,
