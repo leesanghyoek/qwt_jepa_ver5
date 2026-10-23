@@ -100,3 +100,12 @@ def test_out_of_gpu_memory_on_the_whole_frame_retries_with_a_shorter_side(tmp_pa
           "--size", "full", "--khong-hien"])
     assert tried == [(384, 448), (320, 384)]
     assert Image.open(tmp_path / "out/to_full_ra.png").size == (384, 320)
+
+
+def test_the_viewer_puts_input_and_output_side_by_side_or_stacked_whichever_shows_them_larger():
+    from tools.photo_test import layout
+    screen = (1920, 900)
+    assert layout(576, 384, screen, 2) == (1, 2)         # portrait: side by side
+    assert layout(384, 768, screen, 2) == (1, 2)         # 2:1 still larger side by side on a wide screen
+    assert layout(384, 1024, screen, 2) == (2, 1)        # wider: one above the other
+    assert layout(384, 384, screen, 3) == (1, 3)

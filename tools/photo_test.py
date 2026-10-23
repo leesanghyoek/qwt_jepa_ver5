@@ -16,8 +16,10 @@ Duong dan (doi so vi tri; khong dua thi dung DUONG_DAN_ANH ngay duoi cac import,
 muc con), theo ten. Khong --checkpoint: tim best_joint_validation.pt trong cac thu muc da dua, roi ~/Downloads. Khong
 --output: <thu muc dau tien>/ket_qua_test (hoac canh anh). Chay bang python khong co torch (vd /usr/bin/python3) thi
 script tu chay lai bang ~/venv-torch/bin/python neu co. Het bo nho GPU o ban ca khung (vd GPU dang chia voi chuong
-trinh khac) thi chay lai voi canh ngan nho dan (moi lan bot 64, toi 256) va in ra canh da dung. Co man hinh (DISPLAY) thi mo cua so hien anh vao | ra, moi
-trang 4 anh (dong cua so -> trang sau); --khong-hien: chi luu file.
+trinh khac) thi chay lai voi canh ngan nho dan (moi lan bot 64, toi 256) va in ra canh da dung.
+Co man hinh (DISPLAY) thi mo mot cua so phong to het man hinh, MOI LAN MOT ANH: vao | ra canh nhau hoac chong len nhau
+(cach nao anh to hon); -> / cach / click: anh sau, <-: anh truoc, l: hien them "sau lop loe", q: thoat.
+--khong-hien: chi luu file.
 
 Moi anh ghi: <anh>_<co>_so_sanh.png (vao | sau lop loe | ra | |ra - vao|), _vao.png, _ra.png; <anh>_imu.csv (IMU vao
 va IMU model khoi phuc, cung timestamp) va <anh>_imu.png (6 kenh vao / ra). In: do sang vao -> ra, |ra - vao| trung
@@ -56,8 +58,8 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 # Anh dau vao khi chay khong kem duong dan: sua o day (file anh hoac thu muc anh, mot hay nhieu).
-DUONG_DAN_ANH = ["/home/buidinhkhoi/Downloads/pexels-tu-nguyen-477344610-18589658.jpg"]
-
+DUONG_DAN_ANH = ["/home/buidinhkhoi/Downloads/testmodel"]
+#setagaya4-scaled.jpeg 20230818_200825-1-scaled-e1693459472153.webp MS5-02.jpg 740-202608262339543.jpg
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
@@ -153,25 +155,72 @@ def imu_plot(path: Path, title: str, times: np.ndarray, given: np.ndarray, resto
     plt.close(figure)
 
 
-def show_pages(pairs: list[tuple[str, np.ndarray, np.ndarray]], per_page: int = 4) -> None:
-    """Cua so matplotlib (TkAgg): moi dong mot anh, vao | ra; dong cua so de sang trang sau."""
+def layout(height: int, width: int, screen: tuple[int, int], count: int) -> tuple[int, int]:
+    """(hang, cot) cho ``count`` anh cung co: canh nhau hay chong len nhau, cach nao cho moi anh to hon tren man hinh."""
+    across = min(screen[0] / (count * width), screen[1] / height)
+    stacked = min(screen[0] / width, screen[1] / (count * height))
+    return (count, 1) if stacked > across else (1, count)
+
+
+def show_viewer(shown: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray]]) -> None:
+    """Mot cua so to (TkAgg, phong to het man hinh), MOT anh moi luc: vao | ra, canh nhau hoac chong len nhau tuy
+    hinh dang anh. Phim: -> / cach / click = anh sau, <- = anh truoc, l = them "sau lop loe", q / Esc = thoat."""
     try:
         plt.switch_backend("TkAgg")
     except Exception as error:                      # khong co tkinter / man hinh: anh van nam trong thu muc ket qua
         print(f"Không mở được cửa sổ ({error}); xem ảnh trong thư mục kết quả.")
         return
-    pages = [pairs[start:start + per_page] for start in range(0, len(pairs), per_page)]
-    for number, page in enumerate(pages, 1):
-        figure, axes = plt.subplots(len(page), 2, figsize=(12, 4.6 * len(page)), squeeze=False)
-        for row, (title, frame, restored) in zip(axes, page):
-            for axis, picture, name in zip(row, (frame, restored), ("vào", "ra")):
-                axis.imshow(np.clip(picture, 0, 1))
-                axis.set_title(f"{title} — {name}", fontsize=10)
-                axis.axis("off")
-        figure.suptitle(f"Trang {number}/{len(pages)} — đóng cửa sổ để xem trang sau", fontsize=11)
-        figure.tight_layout()
-        plt.show()
-        plt.close(figure)
+    for key in ("keymap.back", "keymap.forward", "keymap.home", "keymap.pan", "keymap.zoom", "keymap.save"):
+        plt.rcParams[key] = []                     # mui ten va chu cai la cua trinh xem, khong phai cua matplotlib
+    figure = plt.figure(figsize=(16, 9))
+    screen = (1600, 900)
+    try:
+        window = figure.canvas.manager.window
+        screen = (window.winfo_screenwidth(), window.winfo_screenheight())
+        try:
+            window.attributes("-zoomed", True)     # Linux (Tk)
+        except Exception:
+            window.state("zoomed")                 # Windows
+    except Exception:
+        pass
+    usable = (screen[0], screen[1] * 0.85)         # thanh tieu de, thanh cong cu
+    state = {"index": 0, "flare": False}
+
+    def draw() -> None:
+        figure.clf()
+        title, frame, deflared, restored = shown[state["index"]]
+        pictures = [(frame, "vào")] + ([(deflared, "sau lớp lóe")] if state["flare"] and deflared is not None
+                                       else []) + [(restored, "ra")]
+        rows, cols = layout(frame.shape[0], frame.shape[1], usable, len(pictures))
+        for number, (picture, name) in enumerate(pictures, 1):
+            axis = figure.add_subplot(rows, cols, number)
+            axis.imshow(np.clip(picture, 0, 1), interpolation="lanczos")
+            axis.set_title(name, fontsize=13)
+            axis.axis("off")
+        figure.suptitle(f"[{state['index'] + 1}/{len(shown)}] {title}      → / cách / click: ảnh sau · ←: ảnh trước"
+                        f" · l: {'ẩn' if state['flare'] else 'hiện'} sau lớp lóe · q: thoát", fontsize=12)
+        figure.subplots_adjust(left=0.003, right=0.997, top=0.93, bottom=0.003, wspace=0.01, hspace=0.05)
+        figure.canvas.draw_idle()
+
+    def step(delta: int) -> None:
+        state["index"] = min(len(shown) - 1, max(0, state["index"] + delta))
+        draw()
+
+    def on_key(event) -> None:
+        if event.key in ("right", " ", "n", "pagedown", "down"):
+            step(1)
+        elif event.key in ("left", "p", "pageup", "up", "backspace"):
+            step(-1)
+        elif event.key == "l":
+            state["flare"] = not state["flare"]
+            draw()
+        elif event.key in ("q", "escape"):
+            plt.close(figure)
+
+    figure.canvas.mpl_connect("key_press_event", on_key)
+    figure.canvas.mpl_connect("button_press_event", lambda event: step(1))
+    draw()
+    plt.show()
 
 
 def panel(path: Path, title: str, frame: np.ndarray, deflared: np.ndarray | None, restored: np.ndarray) -> None:
@@ -257,7 +306,7 @@ def main(argv: list[str] | None = None) -> None:
             flare = float(np.abs(deflared - frame).mean()) if deflared is not None else float("nan")
             label = f"{frame.shape[1]}x{frame.shape[0]}"
             if name == SIZES[args.size][-1]:
-                shown.append((f"{path.name} ({label})", frame, restored))
+                shown.append((f"{path.name} ({label})", frame, deflared, restored))
             panel(output / f"{stem}_so_sanh.png", f"{path.name} | {name} {label} | cổng tone {gate:.2f}",
                   frame, deflared, restored)
             print(f"  {name:>5s} {label:>9s} {frame.mean():6.3f} → {restored.mean():.3f}"
@@ -278,7 +327,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Đã lưu {output}: <ảnh>_<256|full>_so_sanh.png (vào | sau lớp lóe | ra | |ra − vào|), _vao.png, _ra.png,"
           f" <ảnh>_imu.csv / _imu.png (IMU vào và ra)")
     if not args.khong_hien and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        show_pages(shown)
+        show_viewer(shown)
 
 
 if __name__ == "__main__":
