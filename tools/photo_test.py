@@ -18,7 +18,7 @@ muc con), theo ten. Khong --checkpoint: tim best_joint_validation.pt trong cac t
 script tu chay lai bang ~/venv-torch/bin/python neu co. Het bo nho GPU o ban ca khung (vd GPU dang chia voi chuong
 trinh khac) thi chay lai voi canh ngan nho dan (moi lan bot 64, toi 256) va in ra canh da dung.
 Co man hinh (DISPLAY) thi mo mot cua so phong to het man hinh, MOI LAN MOT ANH: vao | ra canh nhau hoac chong len nhau
-(cach nao anh to hon); -> / cach / click: anh sau, <-: anh truoc, l: hien them "sau lop loe", q: thoat.
+(cach nao anh to hon); nut "Sau" / "Truoc" / "Lop loe" hoac phim -> / <- / l doi anh, q: thoat.
 --khong-hien: chi luu file.
 
 Moi anh ghi: <anh>_<co>_so_sanh.png (vao | sau lop loe | ra | |ra - vao|), _vao.png, _ra.png; <anh>_imu.csv (IMU vao
@@ -54,6 +54,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.widgets import Button  # noqa: E402
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -164,7 +165,8 @@ def layout(height: int, width: int, screen: tuple[int, int], count: int) -> tupl
 
 def show_viewer(shown: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray]]) -> None:
     """Mot cua so to (TkAgg, phong to het man hinh), MOT anh moi luc: vao | ra, canh nhau hoac chong len nhau tuy
-    hinh dang anh. Phim: -> / cach / click = anh sau, <- = anh truoc, l = them "sau lop loe", q / Esc = thoat."""
+    hinh dang anh. Nut Truoc / Lop loe / Sau o duoi, hoac phim: -> / cach = anh sau, <- = anh truoc, l = them
+    "sau lop loe", q / Esc = thoat."""
     try:
         plt.switch_backend("TkAgg")
     except Exception as error:                      # khong co tkinter / man hinh: anh van nam trong thu muc ket qua
@@ -183,8 +185,8 @@ def show_viewer(shown: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray
             window.state("zoomed")                 # Windows
     except Exception:
         pass
-    usable = (screen[0], screen[1] * 0.85)         # thanh tieu de, thanh cong cu
-    state = {"index": 0, "flare": False}
+    usable = (screen[0], screen[1] * 0.80)         # thanh tieu de, nut, thanh cong cu
+    state = {"index": 0, "flare": False, "buttons": []}
 
     def draw() -> None:
         figure.clf()
@@ -197,10 +199,22 @@ def show_viewer(shown: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray
             axis.imshow(np.clip(picture, 0, 1), interpolation="lanczos")
             axis.set_title(name, fontsize=13)
             axis.axis("off")
-        figure.suptitle(f"[{state['index'] + 1}/{len(shown)}] {title}      → / cách / click: ảnh sau · ←: ảnh trước"
-                        f" · l: {'ẩn' if state['flare'] else 'hiện'} sau lớp lóe · q: thoát", fontsize=12)
-        figure.subplots_adjust(left=0.003, right=0.997, top=0.93, bottom=0.003, wspace=0.01, hspace=0.05)
+        figure.suptitle(f"Ảnh {state['index'] + 1}/{len(shown)}: {title}      (→ ảnh sau · ← ảnh trước · l lớp lóe"
+                        f" · q thoát)", fontsize=12)
+        figure.subplots_adjust(left=0.003, right=0.997, top=0.93, bottom=0.07, wspace=0.01, hspace=0.05)
+        # Nut bam (giu tham chieu, khong thi widget bi thu hoi); clf() o lan ve sau xoa chung.
+        state["buttons"] = []
+        for left, label, action in ((0.30, "◀ Trước", lambda event: step(-1)),
+                                    (0.42, "Lớp lóe", lambda event: toggle()),
+                                    (0.54, "Sau ▶", lambda event: step(1))):
+            button = Button(figure.add_axes((left, 0.01, 0.10, 0.045)), label)
+            button.on_clicked(action)
+            state["buttons"].append(button)
         figure.canvas.draw_idle()
+
+    def toggle() -> None:
+        state["flare"] = not state["flare"]
+        draw()
 
     def step(delta: int) -> None:
         state["index"] = min(len(shown) - 1, max(0, state["index"] + delta))
@@ -212,13 +226,13 @@ def show_viewer(shown: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray
         elif event.key in ("left", "p", "pageup", "up", "backspace"):
             step(-1)
         elif event.key == "l":
-            state["flare"] = not state["flare"]
-            draw()
+            toggle()
         elif event.key in ("q", "escape"):
             plt.close(figure)
 
     figure.canvas.mpl_connect("key_press_event", on_key)
-    figure.canvas.mpl_connect("button_press_event", lambda event: step(1))
+    print(f"\nCửa sổ hiện {len(shown)} ảnh, MỖI LẦN MỘT ẢNH: bấm nút 'Sau ▶' hoặc phím → để xem ảnh tiếp, "
+          f"'◀ Trước' hoặc ← để quay lại, 'Lớp lóe' hoặc l để thêm cột sau lớp lóe, q để thoát.", flush=True)
     draw()
     plt.show()
 
