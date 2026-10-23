@@ -27,6 +27,8 @@ IMU_MIRROR_SIGNS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
 # p46 (data.scene_pairs_*): a scene pair's draw d sits at index len(samples) + SCENE_DRAW_BASE + d, far past any
 # FlareImage draw (len(samples) + d), so both kinds of extra slot share one index space (sampler.ExtraSlots).
 SCENE_DRAW_BASE = 1 << 40
+# p47 (data.lowlight_pairs_*): a real low-light pair's draw d sits at index len(samples) + LOWLIGHT_DRAW_BASE + d.
+LOWLIGHT_DRAW_BASE = 1 << 41
 
 
 def mirror_imu(imu: np.ndarray) -> np.ndarray:
@@ -114,6 +116,9 @@ class PairedCameraImuDataset(Dataset):
         scene_pairs_fraction: float = 0.0,
         scene_pairs_flare_probability: float = 0.0,
         imu_absent_probability: float = 0.0,
+        source_scale_range: tuple[float, float] | None = None,
+        lowlight_pairs: ScenePairBank | None = None,
+        lowlight_pairs_fraction: float = 0.0,
     ) -> None:
         if not samples:
             raise ValueError("Dataset cannot be empty")
@@ -153,6 +158,14 @@ class PairedCameraImuDataset(Dataset):
         if not 0.0 <= imu_absent_probability <= 1.0:
             raise ValueError("imu_absent_probability must be in [0, 1]")
         self.imu_absent_probability = float(imu_absent_probability)
+        # p47 data.lowlight_pairs_*: real low-light photo pairs (LOL: dark photo in, the same scene exposed right out)
+        # fill lowlight_pairs_per_batch() slots of every training batch. Their input keeps its own grain; only the
+        # camera blur of the borrowed IMU goes on top. None: as before.
+        if lowlight_pairs is not None and not 0.0 < lowlight_pairs_fraction < 1.0:
+            raise ValueError("lowlight_pairs_fraction must lie in (0, 1) when low-light pairs are given")
+        self.lowlight_bank = lowlight_pairs
+        self.lowlight_pairs_split = "train"
+        self.lowlight_pairs_fraction = float(lowlight_pairs_fraction)
         # The frame without sensor grain, for the phase-1 Jacobian's noise direction.
         self.sensor_reference = sensor_reference
         # phase2.split_relight: the stops the corruption moved each pixel's light by ("image_stops").
@@ -181,6 +194,18 @@ class PairedCameraImuDataset(Dataset):
             raise ValueError("source_size must be at least image_size")
         self.source_size = None if source_size is None else tuple(int(v) for v in source_size)
         self.full_frame = bool(full_frame) and self.source_size is not None
+        # p47 data.source_scale_range: each sample's source frame is read at a fraction s of source_size, drawn per
+        # (sample, realization), before the crop -- the same scene at many pixel scales, so a blur of so many pixels,
+        # and the size of things, varies as in photos of any resolution. The gyro blur's focal length scales with s.
+        # None: the frame at source_size, as before.
+        if source_scale_range is not None:
+            low, high = (float(v) for v in source_scale_range)
+            if self.source_size is None or not 0.0 < low <= high <= 1.0:
+                raise ValueError("source_scale_range needs source_size and 0 < low <= high <= 1")
+            if any(round(side * low) < crop for side, crop in zip(self.source_size, image_size)):
+                raise ValueError("source_scale_range: the smallest scale must still hold one image_size crop")
+            source_scale_range = (low, high)
+        self.source_scale_range = source_scale_range
         self.realization = realization
         self.image_mode = image_mode
         self.imu_mode = imu_mode
@@ -224,11 +249,34 @@ class PairedCameraImuDataset(Dataset):
     def _clean_frame(self, sample: PairedSample) -> np.ndarray:
         if self.source_size is None:
             return load_rgb(sample.image_path, self.image_size)
+        if self.source_scale_range is not None and not self.full_frame:
+            scale, (top, left) = self.source_geometry(sample)
+            size = tuple(max(crop, round(side * scale)) for side, crop in zip(self.source_size, self.image_size))
+            frame = load_rgb(sample.image_path, size)
+            return np.ascontiguousarray(frame[top:top + self.image_size[0], left:left + self.image_size[1]])
         frame = load_rgb(sample.image_path, self.source_size)
         if self.full_frame:
             return frame
         top, left = self.crop_origin(sample)
         return np.ascontiguousarray(frame[top:top + self.image_size[0], left:left + self.image_size[1]])
+
+    def source_geometry(self, sample: PairedSample) -> tuple[float, tuple[int, int]]:
+        """p47 (data.source_scale_range): the scale s this sample's frame is read at, and its crop's top-left corner
+        in the frame read at that scale. Deterministic per (sample, realization), from a stream of its own."""
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "source_scale", sample.sample_id, self.realization))
+        scale = float(rng.uniform(*self.source_scale_range))
+        size = tuple(max(crop, round(side * scale)) for side, crop in zip(self.source_size, self.image_size))
+        return scale, (int(rng.integers(0, size[0] - self.image_size[0] + 1)),
+                       int(rng.integers(0, size[1] - self.image_size[1] + 1)))
+
+    def _focal_scale(self, sample: PairedSample | None = None, bank=None) -> float:
+        """The fraction of focal_length_px (given for a frame of source_size) this item's pixels see (p47). 1 without
+        data.source_scale_range. A pair photo read at short side S counts as a frame of S across its short side."""
+        if self.source_scale_range is None:
+            return 1.0
+        if bank is not None:
+            return float(bank.short_side) / float(min(self.source_size))
+        return self.source_geometry(sample)[0] if not self.full_frame else 1.0
 
     def flare_pairs_per_batch(self, batch_size: int) -> int:
         """How many slots of a training batch of ``batch_size`` hold a FlareImage pair (0 without data.flare_pairs_*)."""
@@ -242,6 +290,12 @@ class PairedCameraImuDataset(Dataset):
             return 0
         return max(1, round(self.scene_pairs_fraction * batch_size))
 
+    def lowlight_pairs_per_batch(self, batch_size: int) -> int:
+        """How many slots of a training batch hold a real low-light pair (0 without data.lowlight_pairs_*)."""
+        if self.lowlight_bank is None:
+            return 0
+        return max(1, round(self.lowlight_pairs_fraction * batch_size))
+
     def imu_absent(self, sample_id: str) -> bool:
         """Whether ``sample_id`` comes without IMU in this realization (data.imu_absent_probability): reproducible."""
         if self.imu_absent_probability <= 0.0:
@@ -252,6 +306,9 @@ class PairedCameraImuDataset(Dataset):
         return bool(rng.random() < self.imu_absent_probability)
 
     def __getitem__(self, index: int) -> dict[str, object]:
+        if index >= len(self.samples) + LOWLIGHT_DRAW_BASE:
+            # p47: the draw-th real low-light pair of this realization (sampler.ExtraSlots).
+            return self._lowlight_item(index - len(self.samples) - LOWLIGHT_DRAW_BASE)
         if index >= len(self.samples) + SCENE_DRAW_BASE:
             # p46: the draw-th scene pair of this realization (sampler.ExtraSlots).
             return self._scene_item(index - len(self.samples) - SCENE_DRAW_BASE)
@@ -263,7 +320,7 @@ class PairedCameraImuDataset(Dataset):
         clean_image = self._clean_frame(sample)
         return self._item(sample, sample.sample_id, sample.trajectory_key, clean_image, clean_image,
                           image_mode, imu_mode, trajectory=sample.trajectory_key, timestamp=sample.image_time,
-                          frame_index=sample.image_index)
+                          frame_index=sample.image_index, focal_scale=self._focal_scale(sample))
 
     def flare_pair_of_draw(self, draw: int) -> FlarePair:
         """The pair draw ``draw`` of this realization reads, without loading it: a fresh permutation of the split's
@@ -307,7 +364,8 @@ class PairedCameraImuDataset(Dataset):
         return self._item(host, sample_id, f"flareimage/{pair.source}", gt_crop, flared_crop, image_mode,
                           imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0,
                           flare_pair=info, imu_donor=host.sample_id,
-                          flare_target=flared_crop - gt_crop if self.flare_layer else None)
+                          flare_target=flared_crop - gt_crop if self.flare_layer else None,
+                          focal_scale=self._focal_scale(bank=self.flare_bank))
 
     def scene_pair_of_draw(self, draw: int) -> ScenePair:
         """The scene pair draw ``draw`` of this realization reads: a fresh permutation of the split's pairs per cycle."""
@@ -349,14 +407,56 @@ class PairedCameraImuDataset(Dataset):
             return self._item(host, sample_id, f"scenepair/{pair.source or '?'}", gt_crop, flared_crop, image_mode,
                               imu_mode, trajectory=sample_id, timestamp=0.0, frame_index=0, flare_pair=info,
                               imu_donor=host.sample_id,
-                              flare_target=flared_crop - gt_crop if self.flare_layer else None)
+                              flare_target=flared_crop - gt_crop if self.flare_layer else None,
+                              focal_scale=self._focal_scale(bank=self.scene_bank))
         return self._item(host, sample_id, "scenepair/clean", gt_crop, gt_crop, image_mode, imu_mode,
-                          trajectory=sample_id, timestamp=0.0, frame_index=0, imu_donor=host.sample_id)
+                          trajectory=sample_id, timestamp=0.0, frame_index=0, imu_donor=host.sample_id,
+                          focal_scale=self._focal_scale(bank=self.scene_bank))
+
+    def lowlight_pair_of_draw(self, draw: int) -> ScenePair:
+        """The low-light pair draw ``draw`` of this realization reads: a fresh permutation of the split's pairs per cycle."""
+        pairs = self.lowlight_bank.pairs(self.lowlight_pairs_split)
+        cycle, slot = divmod(int(draw), len(pairs))
+        order = np.random.default_rng(derive_seed(
+            self.scenario_seed, "lowlight_pair_order", self.realization, cycle)).permutation(len(pairs))
+        return pairs[int(order[slot])]
+
+    def _lowlight_item(self, draw: int) -> dict[str, object]:
+        """A real low-light pair (p47): a crop of the dark photo is the input, the same crop of the photo exposed right
+        the target. The corruption keeps only the camera blur ("clear", no environment; no grain or JPEG: the photo has
+        its own). A training draw turns the crop by k x 90 degrees and maybe flips it, both photos alike, before the
+        blur. The IMU window is borrowed from a TartanAir sample drawn here, and it is that window's motion that
+        blurs the frame (motion_time), so image and IMU agree."""
+        pair = self.lowlight_pair_of_draw(draw)
+        rng = np.random.default_rng(derive_seed(self.scenario_seed, "lowlight_pair", self.realization, draw))
+        host = self.samples[int(rng.integers(len(self.samples)))]
+        gt, dark = self.lowlight_bank.load(pair)
+        height, width = self.image_size
+        if gt.shape[0] < height or gt.shape[1] < width:
+            raise ValueError(f"Low-light pair {pair.name}: {gt.shape[1]}x{gt.shape[0]} is smaller than the crop "
+                             f"{width}x{height}; raise data.lowlight_pairs_short_side")
+        top = int(rng.integers(0, gt.shape[0] - height + 1))
+        left = int(rng.integers(0, gt.shape[1] - width + 1))
+        crop = lambda image: np.ascontiguousarray(image[top:top + height, left:left + width], dtype=np.float32) / 255.0
+        gt_crop, dark_crop = crop(gt), crop(dark)
+        info: dict[str, object] = {"name": pair.name, "source": f"lowlight/{pair.source or '?'}", "clear": True,
+                                   "grain": False, "lowlight": True}
+        if self.lowlight_pairs_split == "train" and height == width:
+            turns, flip = int(rng.integers(4)), bool(rng.random() < 0.5)
+            turn = lambda image: np.ascontiguousarray(np.rot90(image, turns)[:, ::-1] if flip else np.rot90(image, turns))
+            gt_crop, dark_crop = turn(gt_crop), turn(dark_crop)
+            info.update(rot90=turns, flip=flip)
+        sample_id = f"lowlight/{pair.name}#{self.realization}:{draw}"
+        image_mode, imu_mode = self._modes(sample_id)
+        return self._item(host, sample_id, f"lowlight/{pair.source or '?'}", gt_crop, dark_crop, image_mode, imu_mode,
+                          trajectory=sample_id, timestamp=0.0, frame_index=0, flare_pair=info,
+                          imu_donor=host.sample_id, focal_scale=self._focal_scale(bank=self.lowlight_bank))
 
     def _item(self, host: PairedSample, sample_id: str, trajectory_key: str, clean_image: np.ndarray,
               source_image: np.ndarray, image_mode: str, imu_mode: str, *, trajectory: str, timestamp: float,
               frame_index: int, flare_pair: dict[str, object] | None = None,
-              imu_donor: str | None = None, flare_target: np.ndarray | None = None) -> dict[str, object]:
+              imu_donor: str | None = None, flare_target: np.ndarray | None = None,
+              focal_scale: float = 1.0) -> dict[str, object]:
         """One training/validation item: ``source_image`` through the corruption is the input, ``clean_image`` the
         target, and the IMU window is ``host``'s. For a TartanAir sample source and target are its own frame."""
         imu_all, imu_times_all = self.cache.get(host)
@@ -377,6 +477,10 @@ class PairedCameraImuDataset(Dataset):
         )
         if flare_pair is not None:
             corrupt["flare_pair"] = flare_pair
+        if getattr(getattr(self.image_corruptor, "config", None), "motion_from_imu", False):
+            # p47: the gyro blur follows the IMU window this item carries, around that window's frame time (a pair's
+            # own timestamp 0 lies outside its borrowed window), at this item's pixel scale.
+            corrupt.update(motion_time=float(host.image_time), focal_scale=float(focal_scale))
         noise_free = None
         if self.sensor_reference:
             noisy_image, noise_free, image_parameters = self.image_corruptor.render_with_sensor_reference(

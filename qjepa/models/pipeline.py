@@ -261,7 +261,10 @@ class RestorationSystem(nn.Module):
         return self.decoders.image.exposure_rows(self.image_latent(latent), image)
 
     def image_latent(self, latent: LatentBatch) -> torch.Tensor:
-        """ZI, plus the frozen predictor's clean-latent prediction when there is one."""
+        """ZI, plus the frozen predictor's clean-latent prediction when there is one. Zeros with
+        phase2.image_latent: none (p46_nolatent, the control run without the JEPA latent)."""
+        if getattr(self.decoders, "image_latent", "zi") == "none":
+            return torch.zeros_like(latent.ZI)
         if self.latent_predictor is None:
             return latent.ZI
         condition = self.degradation_head(latent.ZI) if self.degradation_head is not None else None
@@ -271,7 +274,19 @@ class RestorationSystem(nn.Module):
         predicted = tokens.transpose(1, 2).reshape(latent.ZI.shape)
         return latent.ZI + self.decoders.predictor_merge(predicted)
 
-    def decode(self, latent: LatentBatch) -> RestoredBatch:
+    def motion_field(self, imu_noisy_phys: torch.Tensor, image_time: torch.Tensor, imu_times: torch.Tensor,
+                     width: int) -> torch.Tensor | None:
+        """p47 (phase2.motion_field): the camera's path during the exposure from the noisy gyro (GyroBlurField), None
+        when the image decoder takes none."""
+        field = getattr(self.decoders.image, "motion", None)
+        return None if field is None else field(imu_noisy_phys, imu_times, image_time, width)
+
+    def motion_for(self, batch: dict) -> torch.Tensor | None:
+        """motion_field of a collated batch: what forward() hands decode(), for tools that call decode themselves."""
+        return self.motion_field(batch["imu_noisy_phys"], batch["image_time"], batch["imu_times"],
+                                 batch["image_noisy"].shape[-1])
+
+    def decode(self, latent: LatentBatch, motion: torch.Tensor | None = None) -> RestoredBatch:
         transform = self.backbone.image_transform
         parts = None
         if self.decoders.image_decoder in PIXEL_IMAGE_DECODERS:
@@ -286,6 +301,8 @@ class RestorationSystem(nn.Module):
             if getattr(self.decoders.image, "uses_stages", False):
                 # The JEPA encoder's finer stages (image_skips: 1/8, 1/4, 1/2 of the frame).
                 image = self.decoders.image(zi, blurry, stages=latent.image_skips)
+            elif getattr(self.decoders.image, "motion", None) is not None:
+                image = self.decoders.image(zi, blurry, motion=motion)
             else:
                 image = self.decoders.image(zi, blurry)
             if isinstance(image, tuple):
@@ -318,4 +335,5 @@ class RestorationSystem(nn.Module):
     def forward(
         self, image_noisy: torch.Tensor, imu_noisy_phys: torch.Tensor, image_time: torch.Tensor, imu_times: torch.Tensor
     ) -> RestoredBatch:
-        return self.decode(self.encode(image_noisy, imu_noisy_phys, image_time, imu_times))
+        latent = self.encode(image_noisy, imu_noisy_phys, image_time, imu_times)
+        return self.decode(latent, self.motion_field(imu_noisy_phys, image_time, imu_times, image_noisy.shape[-1]))

@@ -120,25 +120,35 @@ class ScenePairBank:
                             for split, pairs in self.splits.items()}}
 
 
-def is_scene_pairs_root(path: Path) -> bool:
-    """``path`` co index.csv (cot file, split, scene_split), gt/ va input/: dau ra cua wu-visdrone-composite.ipynb."""
+def is_scene_pairs_root(path: Path, kind: str = "") -> bool:
+    """``path`` co index.csv (cot file, split, scene_split), gt/ va input/: dau ra cua wu-visdrone-composite.ipynb.
+
+    p47: ``kind`` la cot ``kind`` cua index.csv (dong dau): "" cho bo khong co cot do (VisDrone), "lowlight" cho cap
+    anh toi that (lowlight-pairs-builder.ipynb). Hai bo cung bo cuc nen phai phan biet o day."""
     index = path / "index.csv"
     if not index.is_file() or not (path / "gt").is_dir() or not (path / "input").is_dir():
         return False
     with index.open(encoding="utf-8") as handle:
         header = handle.readline().strip().split(",")
-    return all(column in header for column in ("file", "split", "scene_split"))
+        first = handle.readline().strip().split(",")
+    if not all(column in header for column in ("file", "split", "scene_split")):
+        return False
+    found = first[header.index("kind")] if "kind" in header and len(first) == len(header) else ""
+    return found == kind
 
 
-def find_scene_pairs_root(base: str | Path = "/kaggle/input", depth: int = 6, skip=()) -> Path:
-    """Thu muc cap canh (index.csv + gt/ + input/) trong ``base``, Kaggle gan theo kieu nao cung duoc. Bo qua ``skip``."""
+def find_scene_pairs_root(base: str | Path = "/kaggle/input", depth: int = 6, skip=(), kind: str = "") -> Path:
+    """Thu muc cap canh (index.csv + gt/ + input/) trong ``base``, Kaggle gan theo kieu nao cung duoc. Bo qua ``skip``.
+    ``kind`` nhu is_scene_pairs_root: "lowlight" tim bo anh toi that (p47)."""
     base, skip = Path(base), {str(path) for path in skip}
     found = sorted({path.parent for level in range(1, depth + 1)
                     for path in base.glob("/".join(["*"] * level) + "/index.csv")
-                    if not any(str(path).startswith(s) for s in skip) and is_scene_pairs_root(path.parent)})
+                    if not any(str(path).startswith(s) for s in skip) and is_scene_pairs_root(path.parent, kind)})
     if not found:
+        wanted = ("lowlight-pairs (lowlight-pairs-builder.ipynb)" if kind == "lowlight"
+                  else "visdrone-lens-flare-640 (wu-visdrone-composite.ipynb)")
         raise FileNotFoundError(f"Khong thay index.csv + gt/ + input/ trong {depth} tang cua {base}: gan dataset "
-                                "visdrone-lens-flare-640 (wu-visdrone-composite.ipynb)")
+                                f"{wanted}")
     if len(found) > 1:
         raise ValueError(f"Cap canh duoc gan hon mot lan: {[str(path) for path in found]}; giu mot ban")
     return found[0]

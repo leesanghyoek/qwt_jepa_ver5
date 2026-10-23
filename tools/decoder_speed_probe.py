@@ -100,6 +100,13 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
             with torch.no_grad(), autocast():
                 system.encode(image, imu, image_time, imu_times)
 
+        def restore_net():
+            # p47 restore_rgb: the RGB NAFNet on the toned frame, the deflared frame and the gyro path's channels.
+            channels = decoder.net.intro.in_channels
+            with autocast():
+                out = decoder.net(zi, torch.rand(batch, channels, height, width, device=device), base=image)
+            out.float().square().mean().backward()
+
         def colour():
             with autocast():
                 out = decoder.color(zi, small)
@@ -136,9 +143,10 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
             scaler.update()
 
         row = {"setting": f"{precision}{' + benchmark' if benchmark else ''}"}
-        for name, fn in (("backbone (no grad)", backbone), ("colour branch", colour), ("NAFNet edge", nafnet),
-                         ("edge refiner", refiner), (f"VGG {'crop ' + str(crop) if crop else 'full'}", perceptual),
-                         ("whole step", whole_step)):
+        blocks = ((("restore NAFNet", restore_net),) if hasattr(decoder, "net")
+                  else (("colour branch", colour), ("NAFNet edge", nafnet), ("edge refiner", refiner)))
+        for name, fn in (("backbone (no grad)", backbone), *blocks,
+                         (f"VGG {'crop ' + str(crop) if crop else 'full'}", perceptual), ("whole step", whole_step)):
             row[name] = _timed(fn, device, steps, warmup)
             system.decoders.zero_grad(set_to_none=True)
         rows.append(row)

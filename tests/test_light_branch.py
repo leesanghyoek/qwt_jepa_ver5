@@ -127,7 +127,7 @@ def test_old_configs_build_no_light_layers_and_kaggle_light_spells_its_keys_out(
                              "kaggle_flarefocus.yaml", "kaggle_flarelayer.yaml",
                              "kaggle_flarestage.yaml", "kaggle_brightgt.yaml",
                              "kaggle_uformer.yaml", "kaggle_sunflare.yaml",
-                             "kaggle_visdrone.yaml"):  # p23-p46 extend p22
+                             "kaggle_visdrone.yaml", "kaggle_nolatent.yaml"):  # p23-p46 extend p22
             assert "split_light_branch" not in load_config(path)["phase2"], path
     assert build_decoders(_config(False)).image.light is None
     glare = serializable_config(load_config("configs/kaggle_glare.yaml"))

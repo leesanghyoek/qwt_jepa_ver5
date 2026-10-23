@@ -388,6 +388,16 @@ def validation_section(checkpoints: list[dict], max_rows: int) -> list[str]:
               f" | ngoài lóe {fmt(value('rest_in'), 7, 2)} ->{fmt(value('rest_out'), 7, 2)}")
         if isinstance(value("psnr_in"), (int, float)) and value("psnr_out") < value("psnr_in"):
             findings.append(f"{label}: ảnh ra ({value('psnr_out'):.2f} dB) tệ hơn ảnh vào ({value('psnr_in'):.2f} dB).")
+    low = lambda key: final.get("lowlight_pairs_validation_" + key)
+    if isinstance(low("psnr_out"), (int, float)):
+        # p47: the real low-light pairs' valid split (LOL), whole crop, and how bright the output came out.
+        print(f"  {'LOL valid':<18} n={int(low('count') or 0):<5} cả ảnh {fmt(low('psnr_in'), 7, 2)} ->"
+              f"{fmt(low('psnr_out'), 7, 2)} | độ sáng vào {fmt(low('luma_in'), 6, 3)} -> ra {fmt(low('luma_out'), 6, 3)}"
+              f" (đích {fmt(low('luma_target'), 6, 3)})")
+        if low("psnr_out") < low("psnr_in"):
+            findings.append(f"LOL valid: ảnh ra ({low('psnr_out'):.2f} dB) tệ hơn ảnh tối vào ({low('psnr_in'):.2f} dB).")
+        elif isinstance(low("luma_target"), (int, float)) and low("luma_out") < 0.8 * low("luma_target"):
+            findings.append(f"LOL valid: ảnh ra còn tối ({low('luma_out'):.3f} so với đích {low('luma_target'):.3f}).")
     if isinstance(absent, (int, float)):
         with_imu = final.get("validation_image_psnr_db")
         print(f"  {'không IMU':<18} {'':<7} cả ảnh {fmt(final.get('imu_absent_validation_baseline_image_psnr_db'), 7, 2)}"

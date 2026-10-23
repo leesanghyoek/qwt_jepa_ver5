@@ -31,7 +31,7 @@ from .models.backbone import ENCODER_TYPES
 from .models.blocks import ENCODER_NORMS
 from .models.ijepa import CONTEXT_INPUTS, IJEPAPretrainingModel
 from .models.vit import INPUT_STANDARDIZATIONS, TOKEN_STRIDE
-from .models.decoders import PIXEL_IMAGE_DECODERS
+from .models.decoders import IMAGE_LATENTS, PIXEL_IMAGE_DECODERS
 from .models.predictors import PREDICTOR_TYPES
 from .training.losses import LOWFREQ_SCALE
 from .training.phase1 import NOISE_DIRECTIONS
@@ -156,6 +156,9 @@ def validate_config(config: dict[str, Any]) -> None:
     _validate_flare_pairs(config)
     _validate_scene_pairs(config)
     _validate_imu_absent(config)
+    _validate_source_scale(config)
+    _validate_lowlight_pairs(config)
+    _validate_restore(config)
     _validate_flare_layer(config)
     _validate_flare_stage(config)
     _validate_target_brighten(config)
@@ -226,8 +229,8 @@ def validate_config(config: dict[str, Any]) -> None:
     if phase2.get("image_detail_source", "decoder_coefficients") not in ("decoder_coefficients", "restored_image"):
         raise ValueError("phase2.image_detail_source must be decoder_coefficients or restored_image")
     image_decoder = phase2.get("image_decoder", "qwt_coefficients")
-    if image_decoder not in ("qwt_coefficients", "resnet_pixel", "split_color_edge"):
-        raise ValueError("phase2.image_decoder must be qwt_coefficients, resnet_pixel or split_color_edge")
+    if image_decoder not in ("qwt_coefficients", "resnet_pixel", "split_color_edge", "restore_rgb"):
+        raise ValueError("phase2.image_decoder must be qwt_coefficients, resnet_pixel, split_color_edge or restore_rgb")
     if image_decoder == "split_color_edge":
         # Explicit, like skip_gating: the hash must record what was trained.
         for key in SPLIT_INTEGER_KEYS:
@@ -747,6 +750,136 @@ def _validate_scene_pairs(config: dict[str, Any]) -> None:
                              f"minimum_trajectories_per_batch {minimum} TartanAir samples")
 
 
+def _validate_source_scale(config: dict[str, Any]) -> None:
+    """p47 data.source_scale_range [low, high]: each frame is read at a drawn fraction of data.source_size before the
+    training crop, so the same scenes come at many pixel scales. Absent: at source_size, as before."""
+    value = config["data"].get("source_scale_range")
+    if value is None:
+        return
+    source = config["data"].get("source_size")
+    if not source:
+        raise ValueError("data.source_scale_range scales data.source_size: set data.source_size")
+    if (not isinstance(value, (list, tuple)) or len(value) != 2 or not all(_nonnegative_number(v) for v in value)
+            or not 0 < value[0] <= value[1] <= 1):
+        raise ValueError("data.source_scale_range must be [low, high] with 0 < low <= high <= 1")
+    if any(round(side * value[0]) < crop for side, crop in zip(source, config["data"]["image_size"])):
+        raise ValueError("data.source_scale_range: source_size x low must still hold the training crop data.image_size")
+
+
+LOWLIGHT_PAIR_KEYS = ("lowlight_pairs_root", "lowlight_pairs_fraction", "lowlight_pairs_short_side")
+
+
+def _validate_lowlight_pairs(config: dict[str, Any]) -> None:
+    """p47 data.lowlight_pairs_*: real low-light photo pairs (LOL; lowlight-pairs-builder.ipynb) in every training batch
+    of both phases, beside the FlareImage and scene pairs. Absent: as before. On: every key written out;
+    lowlight_pairs_root is a path, out of the hash. All the pairs and minimum_trajectories_per_batch TartanAir samples
+    must fit each batch."""
+    data = config["data"]
+    unknown = sorted(key for key in data if key.startswith("lowlight_pairs_") and key not in LOWLIGHT_PAIR_KEYS)
+    if unknown:
+        raise ValueError(f"data: unknown keys {unknown}; low-light pair keys are {list(LOWLIGHT_PAIR_KEYS)}")
+    fraction = data.get("lowlight_pairs_fraction", 0.0)
+    if not _nonnegative_number(fraction) or fraction > 0.5:
+        raise ValueError("data.lowlight_pairs_fraction must be a number in [0, 0.5]")
+    if fraction == 0:
+        return
+    missing = [key for key in LOWLIGHT_PAIR_KEYS if key not in data]
+    if missing:
+        raise ValueError(f"data.lowlight_pairs_fraction > 0 needs every lowlight_pairs_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    if not isinstance(data["lowlight_pairs_root"], str) or not data["lowlight_pairs_root"]:
+        raise ValueError("data.lowlight_pairs_root must name the low-light pair folder (index.csv, gt/, input/)")
+    short_side = data["lowlight_pairs_short_side"]
+    if isinstance(short_side, bool) or not isinstance(short_side, int) or short_side < max(data["image_size"]):
+        raise ValueError("data.lowlight_pairs_short_side must be an integer of at least data.image_size")
+    if data["image_size"][0] != data["image_size"][1]:
+        raise ValueError("data.lowlight_pairs_* turn each training crop by k x 90 degrees: image_size must be square")
+    minimum = data.get("minimum_trajectories_per_batch", 1)
+    for phase in ("phase1", "phase2"):
+        size = config[phase]["batch_size"]
+        slots = sum(max(1, round(float(data.get(key, 0.0)) * size)) for key in (
+            "flare_pairs_fraction", "scene_pairs_fraction", "lowlight_pairs_fraction")
+            if float(data.get(key, 0.0)) > 0)
+        if size - slots < minimum:
+            raise ValueError(f"{slots} pair slots of {phase}.batch_size {size} leave fewer than "
+                             f"minimum_trajectories_per_batch {minimum} TartanAir samples")
+
+
+RESTORE_KEYS = ("restore_widths", "restore_enc_blocks", "restore_middle_blocks", "restore_dec_blocks",
+                "restore_fourier_levels", "restore_fourier_width", "restore_tone_width", "restore_tone_weight",
+                "restore_fft_weight")
+MOTION_FIELD_KEYS = ("seconds", "samples", "focal_px", "scale_px", "max_px")
+# The split decoder's stages: restore_rgb has none of them, so they must be off (or absent) beside it.
+SPLIT_ONLY_SWITCHES = ("split_light_branch", "split_tone_grid", "split_relight", "split_chroma_detail",
+                       "split_tone_gate", "split_exposure_stats", "split_exposure_standardize",
+                       "split_color_global", "decoder_predictor_input", "encoder_skips")
+
+
+def _validate_restore(config: dict[str, Any]) -> None:
+    """p47 phase2.image_decoder restore_rgb (RestoreRGBDecoder), phase2.motion_field and phase2.image_latent.
+
+    restore_rgb: every restore_* key written out (the hash reads only the config file), and none of the split
+    decoder's stages switched on. motion_field: only with restore_rgb, and only when the gyro is what blurs the frame
+    (corruption.image.motion_from_imu). image_latent: zi (absent: as before) or none."""
+    phase2 = config["phase2"]
+    latent = phase2.get("image_latent", "zi")
+    if latent not in IMAGE_LATENTS:
+        raise ValueError(f"phase2.image_latent must be one of {IMAGE_LATENTS}")
+    if latent == "none" and phase2.get("image_decoder") not in ("split_color_edge", "restore_rgb"):
+        raise ValueError("phase2.image_latent none is for the pixel decoders split_color_edge and restore_rgb")
+    field = phase2.get("motion_field")
+    restore = phase2.get("image_decoder") == "restore_rgb"
+    unknown = sorted(key for key in phase2 if key.startswith("restore_") and key not in RESTORE_KEYS)
+    if unknown:
+        raise ValueError(f"phase2: unknown keys {unknown}; restore_rgb's keys are {list(RESTORE_KEYS)}")
+    if not restore:
+        if field is not None or any(key in phase2 for key in RESTORE_KEYS):
+            raise ValueError("phase2.motion_field and phase2.restore_* belong to phase2.image_decoder restore_rgb")
+        return
+    missing = [key for key in RESTORE_KEYS if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.image_decoder restore_rgb needs every restore_* key written out; missing: "
+                         f"{', '.join(missing)}")
+    switched = [key for key in SPLIT_ONLY_SWITCHES if phase2.get(key, False)]
+    if switched or "split_tone_gate_lr_scale" in phase2 or phase2.get("split_edge_refiner_blocks", 0):
+        raise ValueError(f"phase2.image_decoder restore_rgb has none of the split decoder's stages: turn off "
+                         f"{switched or ['split_tone_gate_lr_scale / split_edge_refiner_blocks']}")
+    widths = phase2["restore_widths"]
+    if not _positive_ints(widths) or len(widths) < 2:
+        raise ValueError("phase2.restore_widths must list at least two positive channel counts")
+    if any(side % 2 ** (len(widths) - 1) for side in config["data"]["image_size"]):
+        raise ValueError(f"phase2.restore_widths: image sides must divide by {2 ** (len(widths) - 1)}")
+    for key in ("restore_enc_blocks", "restore_dec_blocks"):
+        if not _positive_ints(phase2[key], len(widths) - 1):
+            raise ValueError(f"phase2.{key} must list len(restore_widths) - 1 positive block counts")
+    for key in ("restore_middle_blocks", "restore_fourier_width", "restore_tone_width"):
+        if not _positive_int(phase2[key]):
+            raise ValueError(f"phase2.{key} must be a positive integer")
+    levels = phase2["restore_fourier_levels"]
+    if (not isinstance(levels, (list, tuple)) or len(set(levels)) != len(levels)
+            or any(isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= len(widths) - 2
+                   for level in levels)):
+        raise ValueError(f"phase2.restore_fourier_levels must list distinct levels in 0..{len(widths) - 2}")
+    for key in ("restore_tone_weight", "restore_fft_weight"):
+        if not _nonnegative_number(phase2[key]):
+            raise ValueError(f"phase2.{key} must be a nonnegative number")
+    if phase2["restore_tone_weight"] > 0 and any(side % LOWFREQ_SCALE for side in config["data"]["image_size"]):
+        raise ValueError(f"phase2.restore_tone_weight needs image sides divisible by {LOWFREQ_SCALE}")
+    if field is None:
+        return
+    if not isinstance(field, dict) or set(field) != set(MOTION_FIELD_KEYS):
+        raise ValueError(f"phase2.motion_field must give exactly {', '.join(MOTION_FIELD_KEYS)}")
+    samples = field["samples"]
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 3 or samples % 2 == 0:
+        raise ValueError("phase2.motion_field.samples must be an odd integer >= 3")
+    for key in ("seconds", "focal_px", "scale_px", "max_px"):
+        if not _nonnegative_number(field[key]) or field[key] <= 0:
+            raise ValueError(f"phase2.motion_field.{key} must be a positive number")
+    if not config["corruption"]["image"].get("motion_from_imu", False):
+        raise ValueError("phase2.motion_field reads the gyro that blurs the frame: set "
+                         "corruption.image.motion_from_imu: true")
+
+
 def _validate_imu_absent(config: dict[str, Any]) -> None:
     """p46 data.imu_absent_probability: the share of training samples that come without IMU (all-zero window), so the
     model also restores an image alone. Absent: every sample has its IMU, as before. Below 1: the IMU branch must
@@ -935,8 +1068,8 @@ def _validate_flare_layer(config: dict[str, Any]) -> None:
         raise ValueError("phase2.split_flare_layer must be true or false")
     if not enabled:
         return
-    if phase2.get("image_decoder") != "split_color_edge":
-        raise ValueError("phase2.split_flare_layer is a stage of the split_color_edge decoder")
+    if phase2.get("image_decoder") not in ("split_color_edge", "restore_rgb"):
+        raise ValueError("phase2.split_flare_layer is a stage of the split_color_edge or restore_rgb decoder")
     if float(config["data"].get("flare_pairs_fraction", 0.0)) <= 0:
         raise ValueError("phase2.split_flare_layer learns from FlareImage pairs: set data.flare_pairs_fraction")
     missing = [key for key in FLARE_LAYER_KEYS if key not in phase2]
@@ -1308,6 +1441,10 @@ def build_decoders(
         image_decoder=image_decoder,
         resnet_width=int(config["phase2"].get("image_resnet_width", 64)),
         resnet_blocks=int(config["phase2"].get("image_resnet_blocks", 8)),
+        # Absent before p46_nolatent: the image decoder reads ZI.
+        image_latent=str(config["phase2"].get("image_latent", "zi")),
+        # p47: RestoreRGBDecoder (phase2.image_decoder restore_rgb).
+        restore=_restore_settings(config) if image_decoder == "restore_rgb" else None,
         imu_refiner={
             "width": int(config["phase2"].get("imu_refiner_width", 32)),
             "blocks": int(config["phase2"]["imu_refiner_blocks"]),
@@ -1386,6 +1523,37 @@ def build_decoders(
             } if int(config["phase2"].get("split_edge_refiner_blocks", 0)) > 0 else None,
         },
     )
+
+
+def _flare_settings(phase2: dict[str, Any]) -> dict[str, Any] | None:
+    """The flare layer of phase2.split_flare_* (None when split_flare_layer is off)."""
+    if not phase2.get("split_flare_layer", False):
+        return None
+    return {
+        "widths": tuple(int(width) for width in phase2["split_flare_widths"]),
+        "blocks": int(phase2["split_flare_blocks"]),
+        "latent": bool(phase2.get("split_flare_latent", True)),
+        "model": phase2.get("split_flare_model", "unet"),
+        "scale": float(phase2.get("split_flare_scale") or 1.0),
+    }
+
+
+def _restore_settings(config: dict[str, Any]) -> dict[str, Any]:
+    """RestoreRGBDecoder's arguments from phase2.restore_*, split_flare_* and motion_field (p47)."""
+    phase2 = config["phase2"]
+    field = phase2.get("motion_field")
+    return {
+        "naf": {"widths": tuple(phase2["restore_widths"]), "enc_blocks": tuple(phase2["restore_enc_blocks"]),
+                "middle_blocks": int(phase2["restore_middle_blocks"]), "dec_blocks": tuple(phase2["restore_dec_blocks"]),
+                "fourier_levels": tuple(phase2["restore_fourier_levels"]),
+                "fourier_width": int(phase2["restore_fourier_width"])},
+        "tone_width": int(phase2["restore_tone_width"]),
+        "flare": _flare_settings(phase2),
+        "motion": None if field is None else {
+            "seconds": float(field["seconds"]), "samples": int(field["samples"]), "focal_px": float(field["focal_px"]),
+            "scale_px": float(field["scale_px"]), "max_px": float(field["max_px"]),
+            "reference_width": int(config["data"]["image_size"][1])},
+    }
 
 
 def build_corruptors(config: dict[str, Any]):

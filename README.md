@@ -12,6 +12,103 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p47_restore — làm nét + làm sáng + khử lóe với kiến trúc gọn lại; IMU có vai trò thật** (config
+`configs/kaggle_restore.yaml` → OUT `outputs/p47_restore`). Config **phẳng**, không `extends`: chuỗi p46 sâu khoảng 30 tầng
+với 358 khoá, nhiều khoá của các tầng đã tắt; file này chỉ chép những khoá còn tác dụng. Đổi `data`, `corruption` và decoder
+nên **train lại phase 1**, giai đoạn lóe (tiếp từ `flare/best.pt` của p46) và phase 2. Mọi khoá mới đều thiếu thì như cũ:
+hash của cả 39 config cũ giữ nguyên (đối chiếu với code ở 555652f).
+
+- **Yêu cầu** (người dùng, 23/10/2026): "làm cả 1 2 3 và 4, sửa lại kiến trúc … miễn làm sao ảnh đầu vào tốt lên là được",
+  sau bản đánh giá kiến trúc. Bản đánh giá nêu bốn điểm:
+  1. latent I-JEPA cố ý bất biến với hư hỏng, chưa có run đối chứng (đó là p46_nolatent bên dưới);
+  2. IMU không mang thông tin gì về ảnh vì mờ được rút độc lập (`motion_from_imu: false`);
+  3. mờ và tối tổng hợp nhẹ hơn ảnh thật nhiều;
+  4. phase 2 có 11 khối, 6 khối có loss riêng.
+- **(2) IMU có vai trò thật.**
+  - `corruption.image.motion_from_imu: true`: mờ chuyển động là chính chuyển động quay của camera (gyro sạch) trong lúc
+    phơi sáng. Đường nối này đã dựng từ trước (`corruptions/motion.py`, hình học đã đo) nhưng tắt theo quyết định
+    23/09.
+  - Decoder đọc đường đi đó từ gyro **nhiễu** (`phase2.motion_field`, `qjepa/models/motion_field.py`): 9 điểm trong 66 ms
+    quanh lúc chụp. Thời gian phơi sáng không biết lúc dùng thật nên đường đi phủ lần phơi dài nhất; khung tối phơi lâu hơn.
+  - Các số đó đi vào NAFNet thành kênh hằng, như SRMD (Zhang và cs., CVPR 2018) đưa kernel mờ và DeepGyro (Mustaniemi và cs.,
+    WACV 2019) đưa trường mờ từ gyro. Thêm một kênh "có IMU" (cửa sổ toàn 0 của p46 không đọc trọng lực).
+  - Cặp FlareImage / VisDrone / LOL mượn IMU của một mẫu TartanAir thì bị làm mờ bằng đúng chuyển động của cửa sổ đó quanh
+    thời điểm của nó (`motion_time`). Trước đây `timestamp` 0 nằm ngoài cửa sổ và `np.interp` giữ gyro ở mẫu đầu; đường đó tắt
+    từ p36 nên không run nào bị ảnh hưởng.
+  - Kernel rộng hơn 9 px tích chập bằng FFT (`convolve_reflect`): kernel 49 × 49 bằng `ndimage.convolve` mất ~0,4 s mỗi khung
+    256² trên một CPU, trong khi phase 1 vốn chờ CPU. Kết quả bằng `ndimage` tới ~1e-12.
+- **(3) Dữ liệu nặng và thật hơn.**
+  - `data.source_scale_range: [0.4, 1.0]`: khung TartanAir đọc ở 640 × s rồi cắt 256. Cùng cảnh ở nhiều tỉ lệ pixel, nên vệt
+    mờ dài bao nhiêu pixel và cỡ vật thể đổi như ảnh ở mọi độ phân giải. s = 0,4 là cả khung như p46. Tiêu cự của bước mờ
+    nhân s (`focal_length_px` 320 cho khung 640).
+  - Tối hơn: `exposure_gain` 0,08–1,0 (p46: 0,5–1,0, tức tối đa ~1 stop).
+  - Phơi sáng 4–66 ms theo độ tối. Khoá mới `exposure_follows_light`: khung mà bước làm tối để yên (biến thể chỉ hạt, môi
+    trường trong, ảnh của cặp thật) chụp đủ sáng nên phơi ngắn nhất.
+  - Lệch nét σ 0,3–2,0 px (p46: 0,3–0,95).
+  - **Cặp ảnh tối THẬT** (`data.lowlight_pairs_*`, 1/8 mỗi batch). Dataset `lowlight-pairs` dựng bằng
+    `lowlight-pairs-builder.ipynb`: LOL-v1 (485 + 15 cặp, tự tải từ bản sao Hugging Face `geekyrakshit/LoL-Dataset`) và
+    LOL-v2 Real nếu gắn, gộp cặp trùng, ảnh val không lọt vào train. Ảnh vào giữ nguyên hạt của nó; chỉ thêm mờ gyro
+    của IMU mượn. Cột `kind = lowlight` của `index.csv` tách nó khỏi bộ VisDrone cùng bố cục.
+  - Nhãn loại ảnh (`log_kind`, cũng là trọng số của `kind_balance`): vệt gyro dưới 1 px không tính là mờ.
+- **Đo trên máy** (300 mẫu train TartanAir local, chỉ tạo nhiễu, không train; script đo trong phiên, không thuộc
+  `tools/`):
+
+  | | p46 | p47 |
+  |---|---|---|
+  | vệt mờ chuyển động: trung vị / p90 / max | 0 / 3,0 / 4 px | 0,98 / 8,0 / 24,1 px |
+  | khung có vệt ≥ 2 px / ≥ 5 px | 17% / 0% | 34% / 16% |
+  | PSNR ảnh vào: trung vị / p10 | 19,56 / 10,77 dB | 18,02 / 8,56 dB |
+  | loại ảnh nhe / mo / toi / toi_mo | 40 / 42 / 85 / 133 | 38 / 47 / 45 / 170 |
+  | CPU mỗi mẫu (trung vị) | 33 ms | 35 ms |
+
+  - Lần đo đầu, chưa có `exposure_follows_light` và ngưỡng 1 px, chỉ còn 4/300 khung `nhe`, trong khi ảnh thật chụp đủ sáng
+    phần lớn là nét. Hai thay đổi đó đưa tỉ lệ loại ảnh về gần p46.
+- **(4) Decoder ảnh mới `restore_rgb`** (`RestoreRGBDecoder`, `qjepa/models/decoders.py`), ba bước:
+  1. Uformer khử lóe của giai đoạn lóe (đóng băng). Lóe là ánh sáng cộng thêm nên gỡ trước khi làm sáng.
+  2. `GlobalToneColor`: một đường cong tone + ma trận màu cho cả ảnh, đọc thống kê phơi sáng **đã chuẩn hoá** của ảnh đã khử
+     lóe (hằng số đo một lần trên bank validation, như p38).
+  3. **NAFNet RGB** ở 256², ZI ở đáy (`phase2.restore_*`), đọc ảnh đã tone, ảnh đã khử lóe và các kênh đường đi gyro, cộng
+     phần hiệu chỉnh vào ảnh đã tone.
+
+  Mọi lớp cuối khởi tạo 0: ở update 0 đầu ra là ảnh đã khử lóe. Bỏ nhánh màu 128², nhánh đường nét Y, lưới tone, bản đồ
+  stop, cổng tone, chi tiết màu, CNN làm nét và hai đầu phụ. Tham số không kể nhánh lóe: 4,60 M → 3,36 M (đếm trên thiết bị
+  `meta`, không dựng model thật). Mọi loss chấm ảnh ra (L1, chi tiết QWT, năng lượng chi tiết, MSE tần số thấp, VGG, cộng
+  `restore_fft_weight` cho phổ), thêm một L1 cho riêng bước tone ở 1/8 (`restore_tone_weight`). Mỗi update 8 khung trong
+  một microbatch (p46: 4 × 2), đủ chỗ cho FlareImage 2, VisDrone 2, LOL 1, TartanAir 3.
+- **Đọc kết quả:**
+  - Validation phase 2 có thêm dòng `LOL valid n=…: ca anh vào -> ra | do sang vao … -> ra … (dich …)`.
+  - Log có `image_fft_l1` và `image_light_l1`.
+  - Cell 13 (`tools/training_report.py`) in dòng LOL và báo khi ảnh ra tệ hơn ảnh vào hoặc còn tối.
+  - `tools/delta_report.py --ablate-latent` và các tool tự gọi `decode` giữ đường đi gyro khi bỏ latent.
+- **Chưa đo:** chưa train (không train trên máy này). Số cần xem trên Kaggle:
+  - `theo loai anh` của `nhe` và `mo`: ở p44 hai loại này ra tệ hơn vào;
+  - dòng LOL valid;
+  - `khong IMU` so với có IMU, giờ IMU mang thông tin về mờ nên phải thấy chênh lệch.
+- Bằng chứng (`tests/test_restore.py`):
+  - kernel rộng qua FFT ra đúng giá trị `ndimage`;
+  - IMU mượn làm mờ bằng chuyển động của chính cửa sổ đó, ở đúng tỉ lệ pixel;
+  - cặp ảnh tối thật giữ hạt của nó và là ảnh tối; khung đủ sáng phơi ngắn nhất; vệt dưới 1 px là ảnh nét;
+  - khung đọc ở tỉ lệ rút theo mẫu, ổn định trong một realization, tiêu cự theo đó;
+  - ô LOL có mặt đúng số trong mọi batch, và thiếu khoá thì batch như p46;
+  - `GyroBlurField` cho đúng đường đi mà bước mờ dùng, theo IMU lật, và báo không có IMU;
+  - `restore_rgb` bắt đầu bằng đầu vào và kênh gyro tới được đầu ra;
+  - config phẳng từ chối các tầng của decoder tách và đường đi gyro khi không có mờ gyro; hash p46 ghim nguyên;
+  - hai phase train qua CLI với `restore_rgb`, đường đi gyro, khung nhiều tỉ lệ và cặp LOL, in dòng LOL valid; `infer` chạy.
+
+**p46_nolatent — run đối chứng: p46 y nguyên, decoder ảnh nhận 0 thay cho latent JEPA** (config
+`configs/kaggle_nolatent.yaml` → OUT `outputs/p46_nolatent`). Bằng p46 cộng `phase2.image_latent: none` (thiếu khoá: `zi`, như
+cũ). Chỉ đổi phase 2: hash phase 1 và giai đoạn lóe bằng p46, nên **dùng lại phase 1 và `flare/` của p46**.
+
+- **Vì sao:** chưa có phép đo nào trả lời latent I-JEPA góp bao nhiêu cho làm nét / làm sáng / khử lóe. README chỉ có
+  phép đo ngắn ở máy (p26, 200 update phase 2: 18–21% sai số). `delta_report --ablate-latent` bỏ ZI khỏi một decoder **đã
+  train với ZI**, nên đo độ phụ thuộc của decoder đó chứ không đo giá trị của latent. Run này train decoder từ đầu không có
+  ZI: chênh PSNR với p46 trên cùng validation chính là phần latent góp.
+- **Đọc kết quả:** so dòng validation cuối, `FlareImage valid`, `VisDrone valid` của hai run. Chênh dưới ~0,3 dB thì latent
+  không đáng giữ cho mục tiêu ảnh, và p47 chạy lại phase 2 với `image_latent: none` (cùng phase 1, chỉ phase 2).
+- Bằng chứng: `tests/test_restore.py::test_image_latent_none_hands_the_decoder_zeros_and_the_control_keeps_p46_s_hashes`
+  (decoder nhận 0, hash phase 1 và giai đoạn lóe bằng p46, hash phase 2 khác) và
+  `::test_phase2_trains_without_the_latent_on_the_split_decoder`.
+
 **p46_visdrone — ảnh chụp thật của drone vào cả ba bước train, và một phần mẫu không có IMU** (config
 `configs/kaggle_visdrone.yaml` → OUT `outputs/p46_visdrone`). Bằng p45 cộng `data.scene_pairs_{root,fraction,short_side,
 flare_probability}`, `data.imu_absent_probability`, `flare.kinds.scene`, `flare.background_scene_fraction` và

@@ -103,7 +103,7 @@ def main() -> None:
                                             # Mot ViT (I-JEPA) chi co mot do phan giai: khong co tang min.
                                             with_skips=backbone.encoder_type == "cnn")
             imu_clean = normalize(batch["imu_clean_phys"])
-            restored = system.decode(latent) if system is not None else None
+            restored = system.decode(latent, system.motion_for(batch)) if system is not None else None
         # Decoder that da train, do tren cung mau -> so sanh thang voi probe.
         if restored is not None:
             decoded_imu_error += float((restored.imu_normalized - imu_clean).abs().sum())

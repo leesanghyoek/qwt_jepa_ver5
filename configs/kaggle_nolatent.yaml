@@ -1,0 +1,16 @@
+# p46_nolatent: run DOI CHUNG -- dung p46_visdrone, chi khac la decoder anh nhan so 0 thay cho latent JEPA ZI.
+#
+# Cau hoi: latent JEPA (phase 1) gop bao nhieu vao viec lam net, lam sang, khu loe? README chi co phep do ngan o
+# may (p26, 200 update phase 2: ~18-21% sai so) va delta_report --ablate-latent tren checkpoint da train voi ZI
+# (bo ZI sau khi train thi decoder hong vi no da quen doc ZI, nen phep do do khong tra loi cau hoi nay). Run nay
+# train decoder tu dau KHONG co ZI, cung du lieu, cung so update: chenh PSNR voi p46 chinh la phan latent gop.
+#
+# Chi doi phase 2 (phase2.image_latent): hash phase 1 va hash giai doan loe bang p46, nen dung lai phase 1 VA
+# giai doan loe cua p46. Decoder IMU van doc ZU nhu cu.
+extends: kaggle_visdrone.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p46_nolatent
+
+phase2:
+  image_latent: none

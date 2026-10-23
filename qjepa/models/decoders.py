@@ -11,9 +11,10 @@ import torch.nn.functional as F
 from .blocks import Stage, Upsample, initialize_trainable, resize
 from .color_edge import chroma, chroma_to_rgb, color_base, compose, downsample, illumination, luminance, upsample
 
-IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel", "split_color_edge")
+IMAGE_DECODERS = ("qwt_coefficients", "resnet_pixel", "split_color_edge", "restore_rgb")
 # Decoders that produce pixels; RestorationSystem.decode drives them.
-PIXEL_IMAGE_DECODERS = ("resnet_pixel", "split_color_edge")
+PIXEL_IMAGE_DECODERS = ("resnet_pixel", "split_color_edge", "restore_rgb")
+IMAGE_LATENTS = ("zi", "none")
 
 
 class SkipMerge(nn.Module):
@@ -1077,13 +1078,8 @@ class SplitColorEdgeDecoder(nn.Module):
     ) -> None:
         super().__init__()
         # p41 (phase2.split_flare_layer): the flare layer, subtracted first. Absent: no layers, p40's decoder.
-        if flare and flare.get("model", "unet") == "uformer_flare7kpp":
-            # p44: Flare7K++'s Uformer (fine-tuned by the flare stage, frozen here). Image only, as p42's layer.
-            from .uformer_flare import UformerFlareLayer
-            self.flare = UformerFlareLayer(float(flare["scale"]))
-        else:
-            self.flare = (FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
-                                     uses_latent=bool(flare.get("latent", True))) if flare else None)
+        # p44: Flare7K++'s Uformer (fine-tuned by the flare stage, frozen here). Image only, as p42's layer.
+        self.flare = build_flare_layer(latent_channels, flare)
         if tone_gate and not tone_grid:
             raise ValueError("The tone gate blends the bilateral grid's output with its input: turn the grid on")
         if exposure_standardize and not (exposure_stats or tone_gate):
@@ -1234,6 +1230,85 @@ class SplitColorEdgeDecoder(nn.Module):
         return restored, parts
 
 
+def build_flare_layer(latent_channels: int, flare: dict | None) -> nn.Module | None:
+    """The flare layer of phase2.split_flare_*: p44's Uformer, p41/p42's U-Net, or None."""
+    if not flare:
+        return None
+    if flare.get("model", "unet") == "uformer_flare7kpp":
+        from .uformer_flare import UformerFlareLayer
+        return UformerFlareLayer(float(flare["scale"]))
+    return FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
+                      uses_latent=bool(flare.get("latent", True)))
+
+
+class RestoreRGBDecoder(nn.Module):
+    """p47 (phase2.image_decoder: restore_rgb): the frame restored in three steps, every one scored on the output.
+
+    1. ``flare`` (phase2.split_flare_*, the flare stage's frozen layer): the flare is light added to the frame, so it
+       comes off first, before anything brightens it.
+    2. ``tone`` (GlobalToneColor, reading the standardised exposure statistics of the frame without its flare): one
+       tone curve and colour matrix for the whole frame -- the exposure gain, gamma and white balance the low-light
+       corruption put on it. Zero-initialised.
+    3. ``net`` (NAFNetBranch on RGB at full resolution, ZI at its bottom, phase2.restore_*): everything local -- the
+       uneven light, the grain, the blur. It reads the toned frame, the frame without its flare, and with
+       phase2.motion_field the gyro's path during the exposure (GyroBlurField) as constant channels, and adds its
+       answer to the toned frame. Zero-initialised last conv.
+
+    At update 0 the output is the frame without its flare. It replaces the split decoder's colour branch at 128x128,
+    luminance edges, tone grid, stop map, tone gate, chroma detail and edge refiner: eleven parts, six of them with a
+    loss of their own pulling against the image's, and up to p46 the frames with little wrong ('nhe', 'mo') came out
+    worse than they went in (README p44).
+    """
+
+    tone_gate = None          # Phase2Trainer and the calibration look for the split decoder's gate
+    uses_stages = False
+
+    def __init__(self, latent_channels: int = 128, *, naf: dict, tone_width: int = 32, flare: dict | None = None,
+                 motion: dict | None = None) -> None:
+        super().__init__()
+        self.flare = build_flare_layer(latent_channels, flare)
+        self.exposure_norm = FeatureStandardizer(EXPOSURE_FEATURES)
+        self.tone = GlobalToneColor(latent_channels, int(tone_width), exposure_stats=True)
+        from .motion_field import GyroBlurField
+        self.motion = GyroBlurField(**motion) if motion else None
+        inputs = 6 + (self.motion.channels if self.motion is not None else 0)
+        self.net = NAFNetBranch(inputs, 3, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
+                                int(naf["middle_blocks"]), tuple(naf["dec_blocks"]), (),
+                                tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)))
+
+    def _deflare(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.flare is None:
+            return image, {}
+        deflared, flare = self.flare(latent, image)
+        if not self.flare.uses_latent:
+            # As in the split decoder (p43): the frozen layer can answer out of range on frames unlike its own.
+            deflared = deflared.clamp(0.0, 1.0)
+        return deflared, {"image_flare": flare, "image_deflared": deflared}
+
+    @torch.no_grad()
+    def exposure_rows(self, latent: torch.Tensor, image: torch.Tensor) -> dict[str, torch.Tensor]:
+        """The exposure statistics the tone step reads -- of the frame WITHOUT its flare -- unstandardised."""
+        return {"exposure": exposure_statistics(self._deflare(latent, image)[0].float())}
+
+    @torch.no_grad()
+    def calibrate_exposure(self, rows: dict[str, torch.Tensor]) -> dict[str, list[float]]:
+        self.exposure_norm.calibrate(rows["exposure"])
+        return {"exposure_std": self.exposure_norm.std.tolist()}
+
+    def forward(self, latent: torch.Tensor, image: torch.Tensor,
+                motion: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        image, parts = self._deflare(latent, image)
+        toned = self.tone(latent, image, self.exposure_norm)
+        parts["image_light"] = toned
+        x = torch.cat((toned, image), dim=1)
+        if self.motion is not None:
+            if motion is None:
+                # Driven without the IMU (decode(latent) in the ablation tools): the "no IMU" input, all zero.
+                motion = image.new_zeros(image.shape[0], self.motion.channels)
+            x = torch.cat((x, motion.to(x.dtype)[:, :, None, None].expand(-1, -1, *x.shape[-2:])), dim=1)
+        return self.net(latent, x, base=toned), parts
+
+
 class ImuRefiner(nn.Module):
     """A small 1-D CNN after the IMU decoder that can smooth, in the time domain.
 
@@ -1295,6 +1370,8 @@ class LatentDecoders(nn.Module):
         imu_refiner: dict | None = None,
         predictor_merge: bool = False,
         image_coefficient_channels: int = 48,
+        restore: dict | None = None,
+        image_latent: str = "zi",
     ) -> None:
         super().__init__()
         if image_decoder not in IMAGE_DECODERS:
@@ -1308,6 +1385,8 @@ class LatentDecoders(nn.Module):
             self.image = PixelResNetDecoder(channels[3], resnet_width, resnet_blocks)
         elif image_decoder == "split_color_edge":
             self.image = SplitColorEdgeDecoder(channels[3], **(split or {}))
+        elif image_decoder == "restore_rgb":
+            self.image = RestoreRGBDecoder(channels[3], **(restore or {}))
         else:
             # 48 for an RGB QWT, 16 when it reads luminance (model.image_input).
             self.image = LatentCoefficientDecoder(
@@ -1322,6 +1401,11 @@ class LatentDecoders(nn.Module):
         )
         # None: no parameters, so checkpoints from before the refiner load as they are.
         self.imu_refiner = ImuRefiner(6, **imu_refiner) if imu_refiner else None
+        # p46_nolatent (phase2.image_latent): "none" hands the image decoder zeros in place of ZI -- the control run
+        # that measures what the JEPA latent adds. No parameters either way. "zi": as before.
+        if image_latent not in IMAGE_LATENTS:
+            raise ValueError(f"image_latent must be one of {IMAGE_LATENTS}")
+        self.image_latent = image_latent
         # The frozen JEPA predictor's clean-latent prediction joins ZI here
         # (RestorationSystem.image_latent). Zero-init: the decoder starts as without it.
         self.predictor_merge = None

@@ -1,0 +1,344 @@
+# p47_restore: lam net + lam sang + khu loe cho anh bat ki, kien truc gon lai. FILE PHANG: khong `extends`.
+#
+# Nguoi dung (23/10/2026): "lam ca 1 2 3 va 4, sua lai kien truc ... mien lam sao anh dau vao tot len la duoc".
+# Day la cong thuc day du cua run, doc mot file la biet run train gi. Chuoi extends cu (pipeline_v3 -> ... ->
+# kaggle_visdrone, ~30 tang) giu nguyen cho cac run cu; p47 chi chep nhung khoa con tac dung.
+#
+# So voi p46_visdrone:
+#   (2) IMU co vai tro that: mo do CHINH chuyen dong cua camera trong luc phoi sang (gyro sach) gay ra
+#       (corruption.image.motion_from_imu), va decoder doc duong di do tu gyro NHIEU (phase2.motion_field).
+#   (3) Du lieu nang hon va that hon:
+#       - khung TartanAir doc o 640 roi thu ngau nhien 0,4-1,0 truoc khi cat 256 (data.source_scale_range): cung
+#         canh o nhieu ti le pixel, nen mo bao nhieu pixel va co vat the deu doi nhu anh that o moi do phan giai;
+#       - toi hon: exposure_gain 0,08-1,0 (p46: 0,5-1,0, tuc toi da ~1 stop); phoi sang 8-66 ms, khung toi phoi
+#         lau hon nen mo hon (exposure_tracks_darkness);
+#       - lech net hon: defocus sigma 0,3-2,0 px (p46: 0,3-0,95);
+#       - cap anh TOI THAT (LOL, data.lowlight_pairs_*; dataset dung bang lowlight-pairs-builder.ipynb).
+#   (4) Decoder anh moi `restore_rgb`: Uformer khu loe (dong bang) -> mot duong cong tone + ma tran mau cho ca anh
+#       -> NAFNet RGB o do phan giai day du (doc them duong di gyro). Bo nhanh mau 128^2, nhanh duong net Y, luoi
+#       tone song phuong, ban do stop, cong tone, chi tiet mau, CNN lam net va hai dau phu.
+#   (1) Latent JEPA giu nguyen (image_latent: zi). Run doi chung p46_nolatent (kaggle_nolatent.yaml) do latent
+#       gop bao nhieu; neu gan 0 thi chay lai phase 2 cua p47 voi image_latent: none.
+#
+# Doi data, corruption va decoder: TRAIN LAI phase 1, giai doan loe (tiep tu flare/best.pt cua p46) va phase 2.
+pipeline_version: 3
+run_kind: main
+experiment_name: qwt_jepa_restore_kaggle
+
+runtime:
+  device: cuda
+  gpu_count: 2
+  parallel: ddp
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p47_restore
+  log_every_updates: 10
+  checkpoint_every_updates: 1000
+  validation_batches: 16            # 16 x batch 8 = 128 khung validation, nhu p46 (32 x 4)
+  cudnn_enabled: true
+  cudnn_benchmark: false
+  restart_above_rss_gib: 10
+
+data:
+  root: /kaggle/input/tartanairkhoi/tartanair-v2
+  manifest_dir: /kaggle/working/outputs/manifest
+  split_unit: trajectory
+  images_per_sample: 1
+  image_size: [256, 256]
+  imu_window: 128
+  imu_channels: [ax, ay, az, gx, gy, gz]
+  num_workers: 0
+  pin_memory: false
+  shuffle_paired_samples: true
+  shuffle_imu_rows: false
+  corruption_seed: 73128
+  sampler_seed: 73133
+  minimum_trajectories_per_batch: 2
+  train_realization_per_epoch: true
+  validation_realization: 0
+  # p47: khung doc o 640 x s, s ~ U(0,4; 1,0) theo (mau, realization), roi cat 256. s = 0,4 la ca khung nhu p46.
+  source_size: [640, 640]
+  source_scale_range: [0.4, 1.0]
+  # Moi batch (phase 1: 32, phase 2: 8): 1/4 FlareImage, 1/4 VisDrone, 1/8 anh toi that LOL, con lai TartanAir.
+  flare_pairs_root: /kaggle/input/datasets/buidinhkhoi/flareimage/flare_dataset
+  flare_pairs_fraction: 0.25
+  flare_pairs_short_side: 384
+  flare_pairs_holdout_fraction: 0.1
+  flare_pairs_clear_probability: 1.0
+  flare_pairs_augment: dihedral
+  scene_pairs_root: /kaggle/input/datasets/buidinhkhoi/visdrone-lens-flare-640
+  scene_pairs_fraction: 0.25
+  scene_pairs_short_side: 384
+  scene_pairs_flare_probability: 0.3
+  lowlight_pairs_root: /kaggle/input/lowlight-pairs          # Cell 4 tim lai trong Input (cot kind = lowlight)
+  lowlight_pairs_fraction: 0.125
+  lowlight_pairs_short_side: 384
+  lens_flare_root: /kaggle/input/datasets/khoidb/flare7k     # lop loe Flare7K++ cua giai doan loe
+  imu_absent_probability: 0.25
+
+corruption:
+  image:
+    clean_probability: 0.02
+    segment_seconds: 0.05
+    # Toi: tu ~3,6 stop (0,08) toi khong toi; khung toi hon phoi lau hon (4 -> 66 ms) nen mo chuyen dong hon. Khung
+    # khong qua buoc lam toi (chi hat, moi truong trong, cap anh that) chup du sang: phoi 4 ms (exposure_follows_light).
+    exposure_gain: [0.08, 1.0]
+    exposure_seconds: [0.004, 0.066]
+    exposure_tracks_darkness: true
+    exposure_follows_light: true
+    tone_gamma: [0.7, 1.0]
+    white_balance_gain: [0.82, 1.18]
+    black_level: [-0.01, 0.01]
+    vignette_strength: [0.0, 0.45]
+    defocus_probability: 0.5
+    defocus_sigma_px: [0.3, 2.0]
+    # Mo chuyen dong = quay cua camera (gyro SACH) trong luc phoi sang. f = 320 px cho khung 640 (90 do), nhan s.
+    motion_from_imu: true
+    focal_length_px: 320.0
+    angular_gain: 1.0
+    motion_path_samples: 25
+    motion_max_radius_px: 32.0
+    downsample_probability: 0.1
+    downsample_scale: [0.82, 0.97]
+    photon_count: [2500.0, 15000.0]
+    read_noise_std: [0.0011764706, 0.0047058824]
+    row_noise_std: [0.0, 0.0011764706]
+    hot_pixel_probability: [0.0, 3.0e-05]
+    quantization_bits: [8, 8]
+    jpeg_probability: 0.35
+    jpeg_quality: [50, 85]
+    noise_only_probability: 0.1
+    low_light_only_probability: 0.1
+    illum_probability: 0.8
+    illum_strength: [1.5, 3.5]
+    illum_blobs: [3, 6]
+    illum_blob_size: [0.1, 0.35]
+    illum_gradient: [0.5, 3.0]
+    illum_smudge_probability: 0.7
+    illum_smudge_count: [1, 3]
+    illum_smudge_size: [0.05, 0.2]
+    illum_smudge_elongation: [1.0, 4.0]
+    illum_smudge_depth: [0.5, 0.95]
+    illum_highlight_rolloff: true
+    illum_max_brighten_stops: 0.75
+    env_clear_probability: 0.35
+  imu:
+    clean_probability: 0.05
+    accel_white_noise_std: [0.06, 0.5]
+    gyro_white_noise_std: [0.01, 0.06]
+    accel_bias_bound: 0.12
+    gyro_bias_bound: 0.008
+    accel_bias_random_walk: 0.008
+    gyro_bias_random_walk: 0.0004
+    scale_error_std: 0.006
+    cross_axis_std: 0.003
+    lowpass_sigma_samples: [0.0, 2.5]
+    wander_probability: 0.25
+    accel_wander_std: [0.1, 0.6]
+    gyro_wander_std: [0.006, 0.04]
+    wander_seconds: [0.3, 2.0]
+    noise_gain_drift: [0.35, 4.0]
+    noise_drift_seconds: 1.5
+    quantization_step_accel: [0.0, 0.008]
+    quantization_step_gyro: [0.0, 0.0004]
+    vibration_tones: [0, 3]
+    vibration_frequency_hz: [8.0, 45.0]
+    vibration_modulation_hz: [0.2, 1.5]
+    accel_vibration_amplitude: [0.0, 0.35]
+    gyro_vibration_amplitude: [0.0, 0.02]
+    spike_rate_hz: 0.6
+    accel_spike_amplitude: [0.7, 3.5]
+    gyro_spike_amplitude: [0.06, 0.28]
+    dropout_rate_hz: 0.1
+    dropout_length_samples: [2, 8]
+
+model:
+  image_transform: qwt_dualtree_hilbert
+  imu_transform: haar1d
+  image_input: luminance
+  encoder_type: vit
+  vit_depth: 6
+  vit_heads: 4
+  encoder_channels: [32, 64, 96, 128]
+  embedding_dim: 128
+  fusion_hidden_dim: 256
+  predictor_hidden_dim: 256
+  imu_summary_bins: 4
+  time_metadata_dim: 3
+  groupnorm_groups: 8
+  gate_bias_init: -2.0
+  encoder_norm: group
+  encoder_norm_calibration: false
+
+# Phase 1: I-JEPA nhu p26-p46 (cac so hang VICReg / Jacobian / neo da bo tu p26, khong chep lai o day).
+phase1:
+  name: latent_pretrain
+  objective: ijepa
+  ijepa_context_input: noisy
+  ijepa_targets: 4
+  ijepa_target_scale: [0.15, 0.2]
+  ijepa_target_aspect: [0.75, 1.5]
+  ijepa_context_scale: [0.85, 1.0]
+  ijepa_image_min_keep: 10
+  ijepa_imu_min_keep: 1
+  ijepa_predictor_dim: 64
+  ijepa_predictor_depth: 4
+  ijepa_predictor_heads: 4
+  initialization_seed: 73128
+  decoder_enabled: false
+  reconstruction_loss_weight: 0.0
+  coefficient_reconstruction_loss_weight: 0.0
+  jepa_weight: 1.0
+  online_clean_forward_for_regularization: true
+  predictor_type: spatial
+  predictor_kernel: 3
+  predictor_mixing_layers: 2
+  image_positions_per_update: 64
+  imu_positions_per_update: 8
+  position_seed: 73132
+  minimum_statistics_batch: 8
+  batch_size: 32
+  gradient_accumulation: 1
+  learning_rate: 0.0002
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  max_successful_updates: 8000
+  warmup_updates: 500
+  minimum_lr: 1.0e-06
+  gradient_clip_norm: null
+  teacher_momentum_start: 0.996
+  teacher_momentum_end: 1.0
+  precision: fp32
+  augment_hflip: false
+
+encoder_sensitivity:
+  enabled: false
+
+monitor:
+  validation_bank_size: 64
+  relative_rank_std_warning: 0.1
+  raw_scale_ratio_warning: [0.1, 10.0]
+  consecutive_warning_checks: 3
+
+# Giai doan loe (train-flare): nhu p46, tiep tu flare/best.pt cua p46 (uformer_init: stage).
+flare:
+  model: uformer_flare7kpp
+  uformer_scale: 2.0
+  uformer_init: stage
+  select_best: true
+  select_on: real_composite_scene
+  widths: [32, 64, 96, 128, 192]
+  blocks: 2
+  batch_size: 4
+  max_successful_updates: 3000
+  learning_rate: 2.0e-05
+  minimum_lr: 1.0e-06
+  warmup_updates: 200
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  precision: fp32
+  seed: 42
+  kinds: {composite: 0.5, pair: 0.15, plain: 0.15, scene: 0.2}
+  background_pair_fraction: 0.3
+  background_scene_fraction: 0.3
+  blur_probability: 0.5
+  blur_sigma_px: [0.3, 1.2]
+  grain_probability: 0.7
+  photon_count: [2500.0, 15000.0]
+  validation_every_updates: 500
+  validation_composites: 64
+  checkpoint_every_updates: 500
+  lens:
+    lens_flare_real_fraction: 0.5
+    lens_flare_holdout_fraction: 0.1
+    lens_flare_gain: [0.8, 3.0]
+    lens_flare_gamma: [1.8, 2.2]
+    lens_flare_scale: [0.8, 1.5]
+    lens_flare_shear_deg: 20.0
+    lens_flare_translate: 0.2
+    lens_flare_blur_sigma_px: [0.05, 1.5]
+    lens_flare_dc_offset: 0.02
+    lens_optics_probability: 0.5
+    lens_optics_energy: [0.05, 0.5]
+    lens_ghost_count: [2, 8]
+    lens_ghost_strength: [0.001, 0.006]
+    lens_veil: [0.005, 0.04]
+    lens_bloom: [0.005, 0.04]
+    lens_dirt: [0.0, 0.2]
+    lens_flare_wu_fraction: 0.5
+    lens_flare_wu_captured_fraction: 0.7
+    lens_flare_wu_gain: [3.0, 10.0]
+    lens_wu_ghost_boost: [6.0, 20.0]
+    lens_wu_ghost_radius: [0.04, 0.16]
+    lens_wu_ghost_blades: 6
+    lens_wu_ghost_round: 0.4
+    lens_wu_min_flare: 0.01
+
+phase2:
+  name: latent_decoder_train
+  backbone_checkpoint: null
+  decoder_initialization_seed: 73131
+  freeze_backbone: true
+  backbone_finetune_after_updates: 15000     # LP-FT: backbone train cung tu update 15 000 (lr x 0,1)
+  backbone_finetune_lr_scale: 0.1
+  encoder_skips: false
+  decoder_input: fused_dense_latent_only
+  decoder_predictor_input: false
+  skip_gating: true
+  # Decoder IMU (he so Haar, residual) va so hang IMU: nhu p46.
+  input_coefficient_residual: true
+  output_coefficients: input_residual
+  residual_sees_input: true
+  imu_refiner_blocks: 4
+  imu_refiner_width: 32
+  imu_variation_weight: 2.0
+  imu_jitter_weight: 2.0
+  imu_increment_weight: 0.5
+  imu_increment_windows: [8, 32]
+  smooth_l1_beta: 0.05
+  # Moi update 8 khung trong MOT microbatch (p46: 4 x 2): du cho cho FlareImage 2, VisDrone 2, LOL 1, TartanAir 3.
+  batch_size: 8
+  gradient_accumulation: 1
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  max_successful_updates: 20000
+  warmup_updates: 250
+  minimum_lr: 1.0e-06
+  gradient_clip_norm: 10.0
+  precision: amp_fp16
+  augment_hflip: true
+  kind_balance: true
+  target_brighten: {below: 0.3, target: 0.4, max_gain: 3.0}
+  reconstruction_loss_weight: 1.0
+  jepa_loss_weight: 0.0
+  sensitivity_loss_weight: 0.0
+  # Decoder anh p47 (RestoreRGBDecoder): khu loe -> tone ca anh -> NAFNet RGB. Moi loss deu cham anh ra
+  # (L1, chi tiet QWT, nang luong chi tiet, MSE tan so thap, VGG, FFT), cong mot L1 cho rieng buoc tone o 1/8.
+  image_decoder: restore_rgb
+  image_latent: zi
+  restore_widths: [48, 64, 96, 128, 160]
+  restore_enc_blocks: [3, 2, 4, 4]
+  restore_middle_blocks: 8
+  restore_dec_blocks: [3, 2, 2, 2]
+  restore_fourier_levels: [0, 1]
+  restore_fourier_width: 16
+  restore_tone_width: 32
+  restore_tone_weight: 1.0
+  restore_fft_weight: 1.0
+  # Duong di gyro trong 66 ms quanh luc chup (9 diem), f = 224 px cho khung 256 (giua 128 va 320 cua s = 0,4-1).
+  motion_field: {seconds: 0.066, samples: 9, focal_px: 224.0, scale_px: 8.0, max_px: 32.0}
+  reconstruction_detail_weight: 3.0
+  image_detail_loss: coefficient
+  image_detail_source: restored_image
+  detail_energy_weight: 1.5
+  lowfreq_mse_weight: 10.0
+  perceptual_weight: 0.75
+  perceptual_crop: 128
+  # Nhanh loe = Uformer cua giai doan loe, dong bang.
+  split_flare_layer: true
+  split_flare_model: uformer_flare7kpp
+  split_flare_scale: 2.0
+  split_flare_widths: [32, 64, 96, 128, 192]
+  split_flare_blocks: 2
+  split_flare_weight: 0.0
+  split_flare_latent: false
+  split_flare_pretrained: true
+  split_flare_freeze: true

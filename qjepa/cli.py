@@ -45,11 +45,11 @@ from .data import (
     read_manifest,
     write_manifest,
 )
-from .data.dataset import SCENE_DRAW_BASE, load_rgb
+from .data.dataset import LOWLIGHT_DRAW_BASE, SCENE_DRAW_BASE, load_rgb
 from .corruptions.image import FRAME_KINDS, LOG_KINDS, brightness_stops, degradation_vector, frame_kind
 from .evaluation.flare_pairs import (
-    evaluate_flare_pairs, evaluate_scene_pairs, flare_validation_dataset, flare_validation_text, scene_validation_dataset,
-    scene_validation_text,
+    evaluate_flare_pairs, evaluate_lowlight_pairs, evaluate_scene_pairs, flare_validation_dataset, flare_validation_text,
+    lowlight_validation_dataset, lowlight_validation_text, scene_validation_dataset, scene_validation_text,
 )
 from .corruptions.rng import derive_seed
 from .evaluation import ImuOverlapMerger, image_metrics, latent_diagnostics
@@ -145,6 +145,7 @@ def _dataset(
     target_brighten: bool = True,
     scene_pairs: ScenePairBank | None = None,
     imu_absent_probability: float = 0.0,
+    lowlight_pairs: ScenePairBank | None = None,
 ) -> PairedCameraImuDataset:
     image_corruptor, imu_corruptor = build_corruptors(config)
     if fixed_realization:
@@ -180,7 +181,21 @@ def _dataset(
         scene_pairs_fraction=float(config["data"].get("scene_pairs_fraction", 0.0)) if scene_pairs else 0.0,
         scene_pairs_flare_probability=float(config["data"].get("scene_pairs_flare_probability", 0.0)),
         imu_absent_probability=imu_absent_probability,
+        # p47 data.source_scale_range: every split reads its frames at a drawn scale (absent: at source_size).
+        source_scale_range=(tuple(config["data"]["source_scale_range"]) if config["data"].get("source_scale_range")
+                            else None),
+        lowlight_pairs=lowlight_pairs,
+        lowlight_pairs_fraction=(float(config["data"].get("lowlight_pairs_fraction", 0.0)) if lowlight_pairs
+                                 else 0.0),
     )
+
+
+def lowlight_pair_bank(config: dict[str, Any]) -> ScenePairBank | None:
+    """p47: the real low-light pairs of data.lowlight_pairs_* (None when lowlight_pairs_fraction is absent or 0)."""
+    data = config["data"]
+    if float(data.get("lowlight_pairs_fraction", 0.0)) <= 0:
+        return None
+    return ScenePairBank(data["lowlight_pairs_root"], short_side=int(data["lowlight_pairs_short_side"]))
 
 
 def scene_pair_bank(config: dict[str, Any]) -> ScenePairBank | None:
@@ -224,7 +239,8 @@ def _train_dataset(config: dict[str, Any], manifest: dict[str, Any], phase: str,
                     brightness_target=brightness_target, tone_label=tone_label,
                     flare_pairs=flare_pair_bank(config), flare_layer=flare_layer,
                     target_brighten=phase == "phase2", scene_pairs=scene_pair_bank(config),
-                    imu_absent_probability=float(config["data"].get("imu_absent_probability", 0.0)), **kwargs)
+                    imu_absent_probability=float(config["data"].get("imu_absent_probability", 0.0)),
+                    lowlight_pairs=lowlight_pair_bank(config), **kwargs)
 
 
 def _loader(
@@ -268,10 +284,12 @@ def _training_batch_stream(
     flare_slots = dataset.flare_pairs_per_batch(batch_size) if hasattr(dataset, "flare_pairs_per_batch") else 0
     # p46 data.scene_pairs_*: and that many a scene pair.
     scene_slots = dataset.scene_pairs_per_batch(batch_size) if hasattr(dataset, "scene_pairs_per_batch") else 0
-    if flare_slots + scene_slots >= batch_size:
-        raise ValueError(f"{flare_slots} FlareImage and {scene_slots} scene-pair slots leave no TartanAir sample in a "
-                         f"batch of {batch_size}")
-    trajectory_batch = batch_size - flare_slots - scene_slots
+    # p47 data.lowlight_pairs_*: and that many a real low-light pair.
+    lowlight_slots = dataset.lowlight_pairs_per_batch(batch_size) if hasattr(dataset, "lowlight_pairs_per_batch") else 0
+    if flare_slots + scene_slots + lowlight_slots >= batch_size:
+        raise ValueError(f"{flare_slots} FlareImage, {scene_slots} scene-pair and {lowlight_slots} low-light slots leave "
+                         f"no TartanAir sample in a batch of {batch_size}")
+    trajectory_batch = batch_size - flare_slots - scene_slots - lowlight_slots
     batches_per_epoch = len(dataset) // trajectory_batch
     if batches_per_epoch < 1:
         raise ValueError("Dataset has fewer samples than one full training batch")
@@ -288,9 +306,11 @@ def _training_batch_stream(
             config["data"]["minimum_trajectories_per_batch"],
             epoch_seed,
         )
-        if scene_slots:
+        if scene_slots or lowlight_slots:
+            # Groups with no slot drop out in ExtraSlots: without low-light pairs these are p46's batches.
             batch_sampler = ExtraSlots(batch_sampler, [(len(dataset.samples), flare_slots),
-                                                       (len(dataset.samples) + SCENE_DRAW_BASE, scene_slots)])
+                                                       (len(dataset.samples) + SCENE_DRAW_BASE, scene_slots),
+                                                       (len(dataset.samples) + LOWLIGHT_DRAW_BASE, lowlight_slots)])
         elif flare_slots:
             batch_sampler = FlarePairSlots(batch_sampler, len(dataset.samples), flare_slots)
         sampler = _SkipBatches(batch_sampler, first_batch) if first_batch else batch_sampler
@@ -1537,9 +1557,12 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     if config["phase2"].get("split_flare_pretrained", False) and not args.resume and not init_checkpoint:
         # p42: a fresh run starts from the flare stage's layer; resumed runs carry it in their checkpoint.
         _load_flare_stage(config, system, args.output)
-    if config["phase2"].get("split_exposure_standardize", False) and not args.resume and not init_checkpoint:
+    standardizes = (config["phase2"].get("split_exposure_standardize", False)
+                    or config["phase2"].get("image_decoder") == "restore_rgb")      # p47: its tone step always does
+    if standardizes and not args.resume and not init_checkpoint:
         # Fresh runs only, before the decoders' initialization hash is taken; resumed and decoder-initialized
-        # runs carry the constants in their checkpoint.
+        # runs carry the constants in their checkpoint. After the flare stage's layer loaded: restore_rgb's tone
+        # step reads the frame without its flare.
         measured = _calibrate_decoder_exposure(config, manifest, system, device)
         if lead:
             spread = measured["exposure_std"]
@@ -1605,6 +1628,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
         _dataset(config, manifest, "valid", fixed_realization=True, scene_pairs=scenes_bank, flare_layer=True))
     # p46 data.imu_absent_probability: the same TartanAir validation bank once more with NO IMU (log only), so the
     # image PSNR with and without IMU sit side by side.
+    # p47: the real low-light pairs' valid split (data.lowlight_pairs_*), PSNR in -> out over the whole crop; log only.
+    lowlight_bank = lowlight_pair_bank(config)
+    lowlight_validation = None if lowlight_bank is None else lowlight_validation_dataset(
+        _dataset(config, manifest, "valid", fixed_realization=True, lowlight_pairs=lowlight_bank))
     absent_dataset = absent_loader = None
     if float(config["data"].get("imu_absent_probability", 0.0)) > 0:
         absent_dataset = _dataset(config, manifest, "valid", fixed_realization=True, imu_absent_probability=1.0)
@@ -1746,6 +1773,10 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                 if scene_validation is not None:
                     scene_report = evaluate_scene_pairs(scene_validation, trainer.evaluation_model, device,
                                                         config["phase2"]["batch_size"])
+                lowlight_report = None
+                if lowlight_validation is not None:
+                    lowlight_report = evaluate_lowlight_pairs(lowlight_validation, trainer.evaluation_model, device,
+                                                              config["phase2"]["batch_size"])
                 absent_report = None
                 if absent_loader is not None:
                     absent_report = _evaluate_with_overlap(
@@ -1765,6 +1796,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     record.update({f"flare_pairs_validation_{key}": value for key, value in flare_report.items()})
                 if scene_report is not None:
                     record.update({f"scene_pairs_validation_{key}": value for key, value in scene_report.items()})
+                if lowlight_report is not None:
+                    record.update({f"lowlight_pairs_validation_{key}": value for key, value in lowlight_report.items()})
                 if absent_report is not None:
                     record.update({f"imu_absent_validation_{key}": value for key, value in absent_report.items()
                                    if "image" in key})
@@ -1801,6 +1834,8 @@ def command_train_phase2(args: argparse.Namespace) -> None:
                     print(f"  {flare_validation_text(flare_report)}")
                 if scene_report is not None:
                     print(f"  {scene_validation_text(scene_report)}")
+                if lowlight_report is not None:
+                    print(f"  {lowlight_validation_text(lowlight_report)}")
                 if absent_report is not None:
                     print(f"  khong IMU: PSNR {absent_report['image_psnr_db']:.2f} vs"
                           f" {absent_report['baseline_image_psnr_db']:.2f} | SSIM {absent_report['image_ssim']:.3f}"

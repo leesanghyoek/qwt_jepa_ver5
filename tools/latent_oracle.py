@@ -137,7 +137,7 @@ def oracle(checkpoint: str | Path, manifest_path: str | Path, *, output: str | P
                 noisy = batch["image_noisy"].clamp(0, 1)
                 clean_coefficients, _ = transform.analysis(clean)
                 for arm in arms:
-                    restored = system.decode(variants[arm]).image.clamp(0, 1)
+                    restored = system.decode(variants[arm], system.motion_for(batch)).image.clamp(0, 1)
                     # Bands of the restored image itself, as the blur audit scores them.
                     restored_coefficients, _ = transform.analysis(restored)
                     _record(stats[arm], bands[arm], clean, noisy, restored, clean_coefficients,

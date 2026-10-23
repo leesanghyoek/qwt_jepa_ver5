@@ -75,7 +75,7 @@ def main() -> None:
         with torch.no_grad():
             latent = system.encode(batch["image_noisy"], batch["imu_noisy_phys"],
                                    batch["image_time"], batch["imu_times"])
-            restored = system.decode(latent)
+            restored = system.decode(latent, system.motion_for(batch))
             clean_image, _ = system.backbone.image_transform.analysis(batch["image_clean"])
             clean_imu_signal = system.normalizer.normalize(batch["imu_clean_phys"])
             clean_imu, _ = system.backbone.imu_transform.analysis(clean_imu_signal)
@@ -180,10 +180,11 @@ def _ablate(system, loader, device, batches: int) -> None:
         latent = system.encode(batch["image_noisy"], batch["imu_noisy_phys"],
                                batch["image_time"], batch["imu_times"])
         clean = batch["image_clean"]
-        full += float((system.decode(latent).image - clean).abs().mean())
+        motion = system.motion_for(batch)          # p47: the gyro path stays; only the latent goes
+        full += float((system.decode(latent, motion).image - clean).abs().mean())
         latent.ZI = torch.zeros_like(latent.ZI)
         latent.ZU = torch.zeros_like(latent.ZU)
-        zeroed += float((system.decode(latent).image - clean).abs().mean())
+        zeroed += float((system.decode(latent, motion).image - clean).abs().mean())
         count += 1
 
     full, zeroed = full / count, zeroed / count

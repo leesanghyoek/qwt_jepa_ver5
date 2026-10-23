@@ -224,7 +224,7 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
             with torch.no_grad():
                 latent = system.encode(batch["image_noisy"], batch["imu_noisy_phys"],
                                        batch["image_time"], batch["imu_times"])
-                restored = system.decode(latent)
+                restored = system.decode(latent, system.motion_for(batch))
                 clean_coefficients, _ = system.backbone.image_transform.analysis(batch["image_clean"])
                 clean, noisy, output_image = (
                     batch["image_clean"].clamp(0, 1),
@@ -237,7 +237,7 @@ def audit(checkpoint: str | Path, manifest_path: str | Path, *, output: str | Pa
                 output_coefficients, _ = system.backbone.image_transform.analysis(output_image)
                 zeroed_image = None
                 if scenario == "blur_only":
-                    zeroed = system.decode(replace(latent, ZI=torch.zeros_like(latent.ZI)))
+                    zeroed = system.decode(replace(latent, ZI=torch.zeros_like(latent.ZI)), system.motion_for(batch))
                     zeroed_image = zeroed.image.clamp(0, 1)
                 _record(stats, bands, clean, noisy, output_image,
                         clean_coefficients, latent.image_coefficients,

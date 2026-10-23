@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 from PIL import Image
-from scipy import ndimage
+from scipy import ndimage, signal
 
 from .halo import HALO_EFFECTS, HaloFlareBank, apply_halo, draw_halo_parameters
 from .lens_flare import LensFlareBank, draw_lens_parameters, lens_flare_layers
@@ -61,6 +61,11 @@ class LowLightImageCorruptionConfig:
     # A darker frame means the shutter stayed open longer, so low light and heavy
     # blur arrive together instead of being drawn independently.
     exposure_tracks_darkness: bool = True
+    # p47: a frame the low-light stage leaves alone (noise-only variant, a clear environment, a real pair's photo) was
+    # shot in enough light, so with the shortest exposure: the gyro blurs it least. Measured on 300 local TartanAir
+    # frames with p47's other settings and without this: 4 of 300 frames came out sharp ('nhe'), while photos taken in
+    # good light mostly are. False: every frame keeps the exposure its darkness draw gave, as before.
+    exposure_follows_light: bool = False
     # TartanAir V2 lcam_front: 640 px at 90 deg FOV -> f = 320 px, and load_rgb
     # rescales to 256 px, so f = 128 px. Override if the crop or camera changes.
     focal_length_px: float = 128.0
@@ -333,6 +338,26 @@ class LowLightImageCorruptionConfig:
         self._validate_lens()
 
 
+# p47: a blur kernel wider than this goes through the FFT. ndimage.convolve costs side^2 multiplies per pixel: a
+# 49 x 49 gyro kernel on a 256 x 256 frame took ~0.4 s on one CPU, in a data loader that already waits on the CPU.
+# Every kernel this narrow or narrower -- the drawn 2-4 px motion of every run up to p46 -- keeps ndimage.convolve.
+FFT_KERNEL_SIDE = 9
+
+
+def convolve_reflect(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """Each channel of ``image`` [H,W,C] convolved with ``kernel`` (odd square), edges reflected as
+    ndimage.convolve(mode="reflect") does (d c b a | a b c d). Wide kernels by FFT, the same values to ~1e-12."""
+    if kernel.shape[0] <= FFT_KERNEL_SIDE:
+        return np.stack([ndimage.convolve(image[..., channel], kernel, mode="reflect")
+                         for channel in range(image.shape[-1])], axis=-1)
+    radius = kernel.shape[0] // 2
+    if radius > min(image.shape[:2]):
+        raise ValueError(f"A {kernel.shape[0]}-px kernel is wider than the {image.shape[1]}x{image.shape[0]} frame")
+    padded = np.pad(image, ((radius, radius), (radius, radius), (0, 0)), mode="symmetric")
+    return np.stack([signal.fftconvolve(padded[..., channel], kernel, mode="valid")
+                     for channel in range(image.shape[-1])], axis=-1)
+
+
 def _motion_kernel(length: int, angle_radians: float) -> np.ndarray:
     length = max(1, int(length))
     size = length if length % 2 else length + 1
@@ -404,9 +429,10 @@ def frame_kind(params: dict[str, object]) -> str:
     """"flare": a HALO flare was added; "relit": the light was changed (low-light stage, uneven light, lamps,
     fog); "plain": neither -- only blur, resolution, sensor grain and JPEG, or a clean frame. A plain frame's
     tone needs no fixing: the tone stage should hand it on as it is. A FlareImage pair (data.flare_pairs_*)
-    is "flare" whatever the corruption drew: its input is a real flared photo, even when the draw is clean."""
+    is "flare" whatever the corruption drew: its input is a real flared photo, even when the draw is clean.
+    A real low-light pair (p47, data.lowlight_pairs_*) is "relit": its input is a real dark photo."""
     if params.get("flare_pair"):
-        return "flare"
+        return "relit" if params["flare_pair"].get("lowlight") else "flare"
     if params.get("clean"):
         return "plain"
     if params.get("halo") or params.get("lens_flare"):
@@ -417,6 +443,8 @@ def frame_kind(params: dict[str, object]) -> str:
 # The phase-2 training log's split of each update's frames (cli "theo loai anh" line): finer than FRAME_KINDS, with
 # camera blur on its own, so a mixed batch says which kind of frame the decoder is learning and which it is not.
 LOG_KINDS = ("nhe", "mo", "toi", "toi_mo", "loe")
+# log_kind: a gyro blur path shorter than this many pixels does not make a frame blurred.
+GYRO_BLUR_MIN_PX = 1.0
 
 
 def log_kind(params: dict[str, object]) -> str:
@@ -426,8 +454,14 @@ def log_kind(params: dict[str, object]) -> str:
     kind = frame_kind(params)
     if kind == "flare":
         return "loe"
+    motion = bool(params.get("motion"))
+    if motion and params.get("motion_from_imu"):
+        # p47: a gyro path under a pixel barely moves the frame (a 3x3 kernel, nearly all of it in the middle); such
+        # frames are the sharp ones phase2.kind_balance must keep apart. Up to p46 no run with this label blurred by
+        # the gyro.
+        motion = float(params.get("path_span_px", 0.0)) >= GYRO_BLUR_MIN_PX
     blurred = (not params.get("clean") and active_stages(params)[0]
-               and bool(params.get("defocus") or params.get("motion")))
+               and bool(params.get("defocus") or motion))
     if kind == "relit" or float(params.get("target_gain", 1.0)) > 1.0:
         return "toi_mo" if blurred else "toi"
     return "mo" if blurred else "nhe"
@@ -650,6 +684,9 @@ class LowLightImageCorruptor:
                 for key in ("light", "illumination", "fog"):
                     if key in parameters:
                         parameters[key], parameters[f"{key}_params"] = False, None
+            if flare_pair.get("grain") is False:
+                # p47: a real low-light photo (data.lowlight_pairs_*) already holds its sensor's grain and JPEG.
+                parameters["sensor_noise"] = False
         return parameters
 
     def __call__(
@@ -665,11 +702,13 @@ class LowLightImageCorruptor:
         gyro: np.ndarray | None = None,
         imu_times: np.ndarray | None = None,
         flare_pair: dict[str, object] | None = None,
+        motion_time: float | None = None,
+        focal_scale: float = 1.0,
     ) -> tuple[np.ndarray, dict[str, object]]:
         noisy, _, params = self._render(
             image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
             frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=False,
-            flare_pair=flare_pair,
+            flare_pair=flare_pair, motion_time=motion_time, focal_scale=focal_scale,
         )
         return noisy, params
 
@@ -686,6 +725,8 @@ class LowLightImageCorruptor:
         gyro: np.ndarray | None = None,
         imu_times: np.ndarray | None = None,
         flare_pair: dict[str, object] | None = None,
+        motion_time: float | None = None,
+        focal_scale: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
         """(noisy, the same frame without sensor grain, parameters).
 
@@ -698,7 +739,7 @@ class LowLightImageCorruptor:
         return self._render(
             image_clean, split=split, realization=realization, trajectory=trajectory, timestamp=timestamp,
             frame_index=frame_index, mode=mode, gyro=gyro, imu_times=imu_times, reference=True,
-            flare_pair=flare_pair,
+            flare_pair=flare_pair, motion_time=motion_time, focal_scale=focal_scale,
         )
 
     def _render(
@@ -715,7 +756,14 @@ class LowLightImageCorruptor:
         imu_times: np.ndarray | None,
         reference: bool,
         flare_pair: dict[str, object] | None = None,
+        motion_time: float | None = None,
+        focal_scale: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray | None, dict[str, object]]:
+        """``motion_time`` (p47): the instant the gyro window is centred on, when it is not ``timestamp`` -- a pair
+        that borrows a TartanAir sample's IMU is blurred by that sample's motion around that sample's frame time
+        (``timestamp`` 0 lay outside the window, and np.interp held the gyro at its first sample). ``focal_scale``
+        (p47, data.source_scale_range): the frame was read at this fraction of the size focal_length_px is given
+        for, so the gyro's angles cover that fraction of the pixels."""
         if image_clean.ndim != 3 or image_clean.shape[-1] != 3:
             raise ValueError(f"Expected image [H,W,3], got {image_clean.shape}")
         if not np.isfinite(image_clean).all() or image_clean.min() < 0 or image_clean.max() > 1:
@@ -755,12 +803,14 @@ class LowLightImageCorruptor:
             )
         kernel = None
         if optical and self.config.motion_from_imu:
+            if self.config.exposure_follows_light and not low_light:
+                params["exposure_seconds"] = float(self.config.exposure_seconds[0])
             kernel, report = imu_blur_kernel(
                 np.asarray(gyro, dtype=np.float64),
                 np.asarray(imu_times, dtype=np.float64),
-                float(timestamp),
+                float(timestamp if motion_time is None else motion_time),
                 float(params["exposure_seconds"]),
-                focal_length_px=self.config.focal_length_px,
+                focal_length_px=self.config.focal_length_px * float(focal_scale),
                 angular_gain=self.config.angular_gain,
                 samples=self.config.motion_path_samples,
                 max_radius_px=self.config.motion_max_radius_px,
@@ -774,10 +824,7 @@ class LowLightImageCorruptor:
         elif optical and params["motion"]:
             kernel = _motion_kernel(int(params["motion_length"]), float(params["motion_angle"]))
         if kernel is not None:
-            image = np.stack(
-                [ndimage.convolve(image[..., channel], kernel, mode="reflect") for channel in range(3)],
-                axis=-1,
-            )
+            image = convolve_reflect(image, kernel)
         if optical and params["downsample"]:
             image = (_resize_roundtrip_hdr if hdr else _resize_roundtrip)(image, float(params["downsample_scale"]))
 
