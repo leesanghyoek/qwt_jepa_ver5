@@ -3,11 +3,13 @@
 Pins: every --imu form gives the window it names (zeros, a constant, a CSV with or without timestamps, gravity plus
 noise reproducible per photo) and a wrong one is refused; one value serves every photo or one per photo; both sizes
 run (the 256 crop and the whole frame cut to multiples of 16); each photo gets its panels, the restored image and an
-IMU CSV holding the window given and the one restored.
+IMU CSV holding the window given and the one restored. A folder stands for every photo in it (not its subfolders),
+the checkpoint is found next to the photos, and the results land in <folder>/ket_qua_test.
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +18,7 @@ import torch
 from PIL import Image
 
 from test_flare_pairs import _train_tiny
-from tools.photo_test import imu_window, main
+from tools.photo_test import collect_images, imu_window, main
 
 
 def test_every_imu_form_gives_the_window_it_names(tmp_path):
@@ -58,3 +60,21 @@ def test_photos_with_their_imu_windows_through_a_checkpoint(tmp_path):
         [0, 0, 9.81, 0, 0, 0])).all()
     with pytest.raises(SystemExit):
         main([*photos, "--checkpoint", str(last), "--output", str(output), "--imu", "khong", "khong", "khong"])
+
+
+def test_a_folder_is_every_photo_in_it_with_the_checkpoint_beside_them(tmp_path):
+    torch.set_num_threads(1)
+    last, _ = _train_tiny(tmp_path, "flare", True)
+    folder = tmp_path / "Downloads"
+    (folder / "con").mkdir(parents=True)
+    for name in ("b.png", "a.jpg", "con/c.png"):
+        Image.fromarray(np.full((40, 48, 3), 120, np.uint8)).save(folder / name)
+    (folder / "ghi_chu.txt").write_text("khong phai anh")
+    shutil.copy(last, folder / "best_joint_validation.pt")
+    assert [path.name for path in collect_images([str(folder)])] == ["a.jpg", "b.png"]
+    main([str(folder), "--device", "cpu", "--size", "full"])
+    results = folder / "ket_qua_test"
+    assert sorted(path.name for path in results.glob("*_so_sanh.png")) == ["a_full_so_sanh.png", "b_full_so_sanh.png"]
+    (folder / "trong").mkdir()
+    with pytest.raises(FileNotFoundError, match="khong co anh"):
+        collect_images([str(folder / "trong")])

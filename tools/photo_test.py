@@ -12,10 +12,16 @@ IMU (--imu, mot gia tri cho moi anh, hoac dung so gia tri bang so anh, theo thu 
   * ngau_nhien              dung yen + nhieu (gia toc sigma --noise-accel, con quay sigma --noise-gyro), seed theo anh.
 Don vi nhu IMU TartanAir luc train: gia toc m/s^2 (co trong luc), con quay rad/s.
 
+Duong dan (doi so vi tri): anh, hoac THU MUC -- moi anh trong do (jpg, jpeg, png, avif, webp, bmp, tif; khong vao thu
+muc con), theo ten. Khong --checkpoint: tim best_joint_validation.pt trong cac thu muc da dua, roi ~/Downloads. Khong
+--output: <thu muc dau tien>/ket_qua_test (hoac canh anh). Chay bang python khong co torch (vd /usr/bin/python3) thi
+script tu chay lai bang ~/venv-torch/bin/python neu co.
+
 Moi anh ghi: <anh>_<co>_so_sanh.png (vao | sau lop loe | ra | |ra - vao|), _vao.png, _ra.png; <anh>_imu.csv (IMU vao
 va IMU model khoi phuc, cung timestamp) va <anh>_imu.png (6 kenh vao / ra). In: do sang vao -> ra, |ra - vao| trung
 binh, phan lop loe da doi, cong tone (gan 0 = model cho la khong can doi sang), IMU ra lech IMU vao bao nhieu.
 
+    python3 tools/photo_test.py ~/Downloads                     # moi anh trong Downloads, khong IMU
     python3 tools/photo_test.py --checkpoint ~/Downloads/best_joint_validation.pt --output ~/Downloads/ket_qua_p46 \\
         ~/Downloads/xe.jpg ~/Downloads/images.jpeg --imu 0,0,9.81,0,0,0 ngau_nhien [--size full] [--device cuda]
 """
@@ -23,15 +29,25 @@ binh, phan lop loe da doi, cong tone (gan 0 = model cho la khong can doi sang), 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
+try:
+    import torch
+except ModuleNotFoundError:
+    # Python he thong khong co torch (README: dung venv ~/venv-torch): chay lai bang venv do.
+    # So theo sys.prefix: python cua venv la symlink toi chinh /usr/bin/python3.
+    VENV = Path.home() / "venv-torch/bin/python"
+    if VENV.is_file() and Path(sys.prefix).resolve() != VENV.parent.parent.resolve():
+        print(f"{sys.executable} khong co torch: chay lai bang {VENV}", flush=True)
+        os.execv(str(VENV), [str(VENV), *sys.argv])
+    raise
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -55,6 +71,37 @@ def full_frame(path: Path, short_side: int) -> np.ndarray:
             raise ValueError(f"{path}: anh qua nho")
         left, top = (image.width - width) // 2, (image.height - height) // 2
         return np.asarray(image.crop((left, top, left + width, top + height)), dtype=np.float32) / 255.0
+
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".avif", ".webp", ".bmp", ".tif", ".tiff"}
+CHECKPOINT_NAME = "best_joint_validation.pt"
+
+
+def collect_images(paths: list[str]) -> list[Path]:
+    """Anh tu cac duong dan: file anh giu nguyen, thu muc -> moi anh trong do (khong vao thu muc con), theo ten."""
+    images = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            images += sorted(child for child in path.iterdir()
+                             if child.is_file() and child.suffix.lower() in IMAGE_SUFFIXES)
+        elif path.is_file():
+            images.append(path)
+        else:
+            raise FileNotFoundError(f"khong thay {path}")
+    if not images:
+        raise FileNotFoundError(f"khong co anh nao trong {paths} (duoi {sorted(IMAGE_SUFFIXES)})")
+    return images
+
+
+def find_checkpoint(paths: list[str]) -> Path:
+    """best_joint_validation.pt trong cac thu muc da dua (hoac thu muc cua anh), roi ~/Downloads."""
+    folders = [Path(raw).expanduser() if Path(raw).expanduser().is_dir() else Path(raw).expanduser().parent
+               for raw in paths] + [Path.home() / "Downloads"]
+    for folder in folders:
+        if (folder / CHECKPOINT_NAME).is_file():
+            return folder / CHECKPOINT_NAME
+    raise FileNotFoundError(f"khong thay {CHECKPOINT_NAME} trong {[str(f) for f in folders]}: them --checkpoint")
 
 
 IMU_CHANNELS = ("ax", "ay", "az", "gx", "gy", "gz")
@@ -118,9 +165,9 @@ def panel(path: Path, title: str, frame: np.ndarray, deflared: np.ndarray | None
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("images", nargs="+", help="anh can thu (jpg, png, avif, ...)")
-    parser.add_argument("--checkpoint", required=True, help="checkpoint phase 2 (best_joint_validation.pt)")
-    parser.add_argument("--output", required=True, help="thu muc ket qua")
+    parser.add_argument("paths", nargs="+", help="anh hoac thu muc anh (jpg, png, avif, ...)")
+    parser.add_argument("--checkpoint", help=f"checkpoint phase 2 (mac dinh: tim {CHECKPOINT_NAME})")
+    parser.add_argument("--output", help="thu muc ket qua (mac dinh: <thu muc dau tien>/ket_qua_test)")
     parser.add_argument("--imu", nargs="+", default=["khong"],
                         help="khong | <file.csv> | ax,ay,az,gx,gy,gz | ngau_nhien; 1 gia tri cho moi anh hoac 1 cho tung anh")
     parser.add_argument("--imu-dt", type=float, default=0.01, help="buoc thoi gian IMU khi file khong co timestamp (s)")
@@ -130,19 +177,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--short-side", type=int, default=384, help="canh ngan cua ban ca khung")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args(argv)
-    if len(args.imu) not in (1, len(args.images)):
-        parser.error(f"--imu: 1 gia tri hoac {len(args.images)} (bang so anh), dang co {len(args.imu)}")
+    images = collect_images(args.paths)
+    if len(args.imu) not in (1, len(images)):
+        parser.error(f"--imu: 1 gia tri hoac {len(images)} (bang so anh), dang co {len(args.imu)}")
+    checkpoint = Path(args.checkpoint).expanduser() if args.checkpoint else find_checkpoint(args.paths)
+    first = Path(args.paths[0]).expanduser()
+    output = Path(args.output).expanduser() if args.output else (first if first.is_dir() else first.parent) / "ket_qua_test"
     device = torch.device(args.device)
-    system, config = _system_from_phase2(args.checkpoint, device)
+    system, config = _system_from_phase2(str(checkpoint), device)
     forward = RestorationForward(system)
     forward.amp = device.type == "cuda" and config["phase2"]["precision"] == "amp_fp16"    # fp16 nhu luc train
     length = int(config["data"]["imu_window"])
     size = tuple(int(side) for side in config["data"]["image_size"])
-    output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    print(f"checkpoint {args.checkpoint} | thiết bị {device} | {'fp16' if forward.amp else 'fp32'}"
+    print(f"{len(images)} ảnh | checkpoint {checkpoint} | thiết bị {device} | {'fp16' if forward.amp else 'fp32'}"
           f" | cửa sổ IMU {length} mẫu")
-    for number, path in enumerate(Path(p).expanduser() for p in args.images):
+    for number, path in enumerate(images):
         spec = args.imu[number if len(args.imu) > 1 else 0]
         given, stamps, described = imu_window(spec, path, length, args.imu_dt, (args.noise_accel, args.noise_gyro))
         imu = torch.from_numpy(given.T.copy())[None].to(device)
