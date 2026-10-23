@@ -12,15 +12,17 @@ IMU (--imu, mot gia tri cho moi anh, hoac dung so gia tri bang so anh, theo thu 
   * ngau_nhien              dung yen + nhieu (gia toc sigma --noise-accel, con quay sigma --noise-gyro), seed theo anh.
 Don vi nhu IMU TartanAir luc train: gia toc m/s^2 (co trong luc), con quay rad/s.
 
-Duong dan (doi so vi tri): anh, hoac THU MUC -- moi anh trong do (jpg, jpeg, png, avif, webp, bmp, tif; khong vao thu
+Duong dan (doi so vi tri; khong dua thi dung DUONG_DAN_ANH ngay duoi cac import, sua o do): anh, hoac THU MUC -- moi anh trong do (jpg, jpeg, png, avif, webp, bmp, tif; khong vao thu
 muc con), theo ten. Khong --checkpoint: tim best_joint_validation.pt trong cac thu muc da dua, roi ~/Downloads. Khong
 --output: <thu muc dau tien>/ket_qua_test (hoac canh anh). Chay bang python khong co torch (vd /usr/bin/python3) thi
-script tu chay lai bang ~/venv-torch/bin/python neu co.
+script tu chay lai bang ~/venv-torch/bin/python neu co. Co man hinh (DISPLAY) thi mo cua so hien anh vao | ra, moi
+trang 4 anh (dong cua so -> trang sau); --khong-hien: chi luu file.
 
 Moi anh ghi: <anh>_<co>_so_sanh.png (vao | sau lop loe | ra | |ra - vao|), _vao.png, _ra.png; <anh>_imu.csv (IMU vao
 va IMU model khoi phuc, cung timestamp) va <anh>_imu.png (6 kenh vao / ra). In: do sang vao -> ra, |ra - vao| trung
 binh, phan lop loe da doi, cong tone (gan 0 = model cho la khong can doi sang), IMU ra lech IMU vao bao nhieu.
 
+    python3 tools/photo_test.py                                 # anh trong DUONG_DAN_ANH, khong IMU
     python3 tools/photo_test.py ~/Downloads                     # moi anh trong Downloads, khong IMU
     python3 tools/photo_test.py --checkpoint ~/Downloads/best_joint_validation.pt --output ~/Downloads/ket_qua_p46 \\
         ~/Downloads/xe.jpg ~/Downloads/images.jpeg --imu 0,0,9.81,0,0,0 ngau_nhien [--size full] [--device cuda]
@@ -49,6 +51,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
+
+# Anh dau vao khi chay khong kem duong dan: sua o day (file anh hoac thu muc anh, mot hay nhieu).
+DUONG_DAN_ANH = ["~/Downloads"]
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -145,6 +150,27 @@ def imu_plot(path: Path, title: str, times: np.ndarray, given: np.ndarray, resto
     plt.close(figure)
 
 
+def show_pages(pairs: list[tuple[str, np.ndarray, np.ndarray]], per_page: int = 4) -> None:
+    """Cua so matplotlib (TkAgg): moi dong mot anh, vao | ra; dong cua so de sang trang sau."""
+    try:
+        plt.switch_backend("TkAgg")
+    except Exception as error:                      # khong co tkinter / man hinh: anh van nam trong thu muc ket qua
+        print(f"Không mở được cửa sổ ({error}); xem ảnh trong thư mục kết quả.")
+        return
+    pages = [pairs[start:start + per_page] for start in range(0, len(pairs), per_page)]
+    for number, page in enumerate(pages, 1):
+        figure, axes = plt.subplots(len(page), 2, figsize=(12, 4.6 * len(page)), squeeze=False)
+        for row, (title, frame, restored) in zip(axes, page):
+            for axis, picture, name in zip(row, (frame, restored), ("vào", "ra")):
+                axis.imshow(np.clip(picture, 0, 1))
+                axis.set_title(f"{title} — {name}", fontsize=10)
+                axis.axis("off")
+        figure.suptitle(f"Trang {number}/{len(pages)} — đóng cửa sổ để xem trang sau", fontsize=11)
+        figure.tight_layout()
+        plt.show()
+        plt.close(figure)
+
+
 def panel(path: Path, title: str, frame: np.ndarray, deflared: np.ndarray | None, restored: np.ndarray) -> None:
     change = np.abs(restored - frame).mean(-1)
     pictures = [(frame, "vào"), (deflared if deflared is not None else frame, "sau lớp lóe"), (restored, "ra"),
@@ -165,7 +191,7 @@ def panel(path: Path, title: str, frame: np.ndarray, deflared: np.ndarray | None
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("paths", nargs="+", help="anh hoac thu muc anh (jpg, png, avif, ...)")
+    parser.add_argument("paths", nargs="*", help="anh hoac thu muc anh (jpg, png, avif, ...); mac dinh DUONG_DAN_ANH")
     parser.add_argument("--checkpoint", help=f"checkpoint phase 2 (mac dinh: tim {CHECKPOINT_NAME})")
     parser.add_argument("--output", help="thu muc ket qua (mac dinh: <thu muc dau tien>/ket_qua_test)")
     parser.add_argument("--imu", nargs="+", default=["khong"],
@@ -176,7 +202,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--size", default="ca_hai", choices=tuple(SIZES))
     parser.add_argument("--short-side", type=int, default=384, help="canh ngan cua ban ca khung")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--khong-hien", action="store_true", help="khong mo cua so, chi luu anh")
     args = parser.parse_args(argv)
+    args.paths = args.paths or DUONG_DAN_ANH
     images = collect_images(args.paths)
     if len(args.imu) not in (1, len(images)):
         parser.error(f"--imu: 1 gia tri hoac {len(images)} (bang so anh), dang co {len(args.imu)}")
@@ -192,6 +220,7 @@ def main(argv: list[str] | None = None) -> None:
     output.mkdir(parents=True, exist_ok=True)
     print(f"{len(images)} ảnh | checkpoint {checkpoint} | thiết bị {device} | {'fp16' if forward.amp else 'fp32'}"
           f" | cửa sổ IMU {length} mẫu")
+    shown = []                                       # (tieu de, vao, ra) cho cua so cuoi cung
     for number, path in enumerate(images):
         spec = args.imu[number if len(args.imu) > 1 else 0]
         given, stamps, described = imu_window(spec, path, length, args.imu_dt, (args.noise_accel, args.noise_gyro))
@@ -214,6 +243,8 @@ def main(argv: list[str] | None = None) -> None:
             Image.fromarray(np.uint8(np.round(frame * 255))).save(output / f"{stem}_vao.png")
             flare = float(np.abs(deflared - frame).mean()) if deflared is not None else float("nan")
             label = f"{frame.shape[1]}x{frame.shape[0]}"
+            if name == SIZES[args.size][-1]:
+                shown.append((f"{path.name} ({label})", frame, restored))
             panel(output / f"{stem}_so_sanh.png", f"{path.name} | {name} {label} | cổng tone {gate:.2f}",
                   frame, deflared, restored)
             print(f"  {name:>5s} {label:>9s} {frame.mean():6.3f} → {restored.mean():.3f}"
@@ -230,6 +261,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"GPU tối đa {torch.cuda.max_memory_allocated() / 2**20:.0f} MiB")
     print(f"Đã lưu {output}: <ảnh>_<256|full>_so_sanh.png (vào | sau lớp lóe | ra | |ra − vào|), _vao.png, _ra.png,"
           f" <ảnh>_imu.csv / _imu.png (IMU vào và ra)")
+    if not args.khong_hien and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        show_pages(shown)
 
 
 if __name__ == "__main__":

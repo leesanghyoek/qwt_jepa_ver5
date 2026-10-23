@@ -47,7 +47,7 @@ def test_photos_with_their_imu_windows_through_a_checkpoint(tmp_path):
         Image.fromarray(rng.integers(0, 255, (size[1], size[0], 3), dtype=np.uint8)).save(tmp_path / name)
         photos.append(str(tmp_path / name))
     output = tmp_path / "out"
-    main([*photos, "--checkpoint", str(last), "--output", str(output), "--device", "cpu",
+    main([*photos, "--checkpoint", str(last), "--output", str(output), "--device", "cpu", "--khong-hien",
           "--imu", "0,0,9.81,0,0,0", "ngau_nhien"])
     for stem in ("xe", "b"):
         for size in ("256", "full"):
@@ -59,7 +59,7 @@ def test_photos_with_their_imu_windows_through_a_checkpoint(tmp_path):
     assert (np.loadtxt(output / "xe_imu.csv", delimiter=",", skiprows=1)[:, 1:7] == np.float32(
         [0, 0, 9.81, 0, 0, 0])).all()
     with pytest.raises(SystemExit):
-        main([*photos, "--checkpoint", str(last), "--output", str(output), "--imu", "khong", "khong", "khong"])
+        main([*photos, "--checkpoint", str(last), "--output", str(output), "--imu", "khong", "khong", "khong", "--khong-hien"])
 
 
 def test_a_folder_is_every_photo_in_it_with_the_checkpoint_beside_them(tmp_path):
@@ -72,7 +72,7 @@ def test_a_folder_is_every_photo_in_it_with_the_checkpoint_beside_them(tmp_path)
     (folder / "ghi_chu.txt").write_text("khong phai anh")
     shutil.copy(last, folder / "best_joint_validation.pt")
     assert [path.name for path in collect_images([str(folder)])] == ["a.jpg", "b.png"]
-    main([str(folder), "--device", "cpu", "--size", "full"])
+    main([str(folder), "--device", "cpu", "--khong-hien", "--size", "full"])
     results = folder / "ket_qua_test"
     assert sorted(path.name for path in results.glob("*_so_sanh.png")) == ["a_full_so_sanh.png", "b_full_so_sanh.png"]
     (folder / "trong").mkdir()
