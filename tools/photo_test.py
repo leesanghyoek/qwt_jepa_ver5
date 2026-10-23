@@ -15,7 +15,8 @@ Don vi nhu IMU TartanAir luc train: gia toc m/s^2 (co trong luc), con quay rad/s
 Duong dan (doi so vi tri; khong dua thi dung DUONG_DAN_ANH ngay duoi cac import, sua o do): anh, hoac THU MUC -- moi anh trong do (jpg, jpeg, png, avif, webp, bmp, tif; khong vao thu
 muc con), theo ten. Khong --checkpoint: tim best_joint_validation.pt trong cac thu muc da dua, roi ~/Downloads. Khong
 --output: <thu muc dau tien>/ket_qua_test (hoac canh anh). Chay bang python khong co torch (vd /usr/bin/python3) thi
-script tu chay lai bang ~/venv-torch/bin/python neu co. Co man hinh (DISPLAY) thi mo cua so hien anh vao | ra, moi
+script tu chay lai bang ~/venv-torch/bin/python neu co. Het bo nho GPU o ban ca khung (vd GPU dang chia voi chuong
+trinh khac) thi chay lai voi canh ngan nho dan (moi lan bot 64, toi 256) va in ra canh da dung. Co man hinh (DISPLAY) thi mo cua so hien anh vao | ra, moi
 trang 4 anh (dong cua so -> trang sau); --khong-hien: chi luu file.
 
 Moi anh ghi: <anh>_<co>_so_sanh.png (vao | sau lop loe | ra | |ra - vao|), _vao.png, _ra.png; <anh>_imu.csv (IMU vao
@@ -35,6 +36,8 @@ import os
 import sys
 from pathlib import Path
 
+# Bo nho GPU bi chia manh giua cac anh co khac nhau (may 8 GB: 1 GB "reserved but unallocated" luc het bo nho).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 try:
     import torch
 except ModuleNotFoundError:
@@ -53,7 +56,7 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 # Anh dau vao khi chay khong kem duong dan: sua o day (file anh hoac thu muc anh, mot hay nhieu).
-DUONG_DAN_ANH = ["~/Downloads"]
+DUONG_DAN_ANH = ["/home/buidinhkhoi/Downloads/pexels-tu-nguyen-477344610-18589658.jpg"]
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -229,12 +232,22 @@ def main(argv: list[str] | None = None) -> None:
         image_time = torch.tensor([0.5 * (stamps[0] + stamps[-1])], dtype=torch.float64, device=device)
         print(f"\n{path.name} | IMU: {described}")
         print(f"  {'cỡ':>5s} {'khung':>9s} {'sáng vào→ra':>14s} {'|ra−vào|':>9s} {'lớp lóe đổi':>12s} {'cổng tone':>9s}")
-        frames = {"256": lambda: load_rgb(path, size), "full": lambda: full_frame(path, args.short_side)}
         for name in SIZES[args.size]:
-            frame = frames[name]()
-            x = torch.from_numpy(frame.transpose(2, 0, 1).copy())[None].to(device)
-            with torch.no_grad():
-                out = forward(x, imu, image_time, times)
+            # "full": het bo nho GPU -> canh ngan nho dan 64 px, toi 256 (Uformer chay o 2x co anh).
+            sides = [None] if name == "256" else list(range(args.short_side, 255, -64)) or [args.short_side]
+            for side in sides:
+                frame = load_rgb(path, size) if side is None else full_frame(path, side)
+                x = torch.from_numpy(frame.transpose(2, 0, 1).copy())[None].to(device)
+                try:
+                    with torch.no_grad():
+                        out = forward(x, imu, image_time, times)
+                    break
+                except torch.OutOfMemoryError:
+                    del x
+                    torch.cuda.empty_cache()
+                    if side == sides[-1]:
+                        raise
+                    print(f"  (hết bộ nhớ GPU ở cạnh ngắn {side}: thử {side - 64})", flush=True)
             as_image = lambda key: (out[key][0].clamp(0, 1).permute(1, 2, 0).cpu().numpy() if key in out else None)
             restored, deflared = as_image("image"), as_image("image_deflared")
             gate = float(torch.sigmoid(out["image_tone_logit"]).item()) if "image_tone_logit" in out else float("nan")
@@ -249,8 +262,11 @@ def main(argv: list[str] | None = None) -> None:
                   frame, deflared, restored)
             print(f"  {name:>5s} {label:>9s} {frame.mean():6.3f} → {restored.mean():.3f}"
                   f" {np.abs(restored - frame).mean():9.4f} {flare:12.4f} {gate:9.2f}", flush=True)
+            imu_out = out["imu_physical"][0].transpose(0, 1).cpu().numpy()
+            del out, x
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         # IMU khoi phuc (cua lan chay cuoi; nhanh IMU khong phu thuoc co anh nhieu).
-        imu_out = out["imu_physical"][0].transpose(0, 1).cpu().numpy()
         np.savetxt(output / f"{path.stem[:24]}_imu.csv", np.column_stack((stamps, given, imu_out)), delimiter=",",
                    header="timestamp," + ",".join(f"{c}_vao" for c in IMU_CHANNELS) + ","
                           + ",".join(f"{c}_ra" for c in IMU_CHANNELS), comments="")

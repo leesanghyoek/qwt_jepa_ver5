@@ -78,3 +78,25 @@ def test_a_folder_is_every_photo_in_it_with_the_checkpoint_beside_them(tmp_path)
     (folder / "trong").mkdir()
     with pytest.raises(FileNotFoundError, match="khong co anh"):
         collect_images([str(folder / "trong")])
+
+
+def test_out_of_gpu_memory_on_the_whole_frame_retries_with_a_shorter_side(tmp_path, monkeypatch):
+    torch.set_num_threads(1)
+    last, _ = _train_tiny(tmp_path, "flare", True)
+    Image.fromarray(np.full((500, 600, 3), 90, np.uint8)).save(tmp_path / "to.jpg")
+    import tools.photo_test as photo_test
+    real = photo_test.RestorationForward.forward
+    tried = []
+
+    def small_gpu(self, image, *rest):
+        tried.append(tuple(image.shape[-2:]))
+        if image.shape[-1] > 400:                                      # 448 x 384 does not fit, 384 x 320 does
+            raise torch.OutOfMemoryError("CUDA out of memory (test)")
+        return real(self, image, *rest)
+
+    monkeypatch.setattr(photo_test.RestorationForward, "forward", small_gpu)
+    monkeypatch.setattr(photo_test.torch.cuda, "empty_cache", lambda: None)
+    main([str(tmp_path / "to.jpg"), "--checkpoint", str(last), "--output", str(tmp_path / "out"), "--device", "cpu",
+          "--size", "full", "--khong-hien"])
+    assert tried == [(384, 448), (320, 384)]
+    assert Image.open(tmp_path / "out/to_full_ra.png").size == (384, 320)
