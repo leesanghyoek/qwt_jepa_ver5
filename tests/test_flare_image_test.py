@@ -5,7 +5,7 @@ refused); a full frame keeps the shrunk pair cut to multiples of 16 around its c
 size; the model runs on whole frames of any such size; "chi loe" feeds the photo itself and "nhu luc train" adds the
 training corruption; each pair gets a panel and finite numbers, the flare region is where input and target differ.
 --bank visdrone (p46) reads the "Lens flare on VisDrone" pairs' valid split (it has no test), --count 0 every pair of
-it, --imu khong the same frames without IMU.
+it, --imu khong the same frames without IMU, --panels N draws only N pairs from the worst to the best.
 """
 
 from __future__ import annotations
@@ -94,3 +94,10 @@ def test_visdrone_valid_pairs_all_of_them_with_and_without_imu(tmp_path):
     assert any(a["psnr_out"] != b["psnr_out"] for a, b in zip(with_imu, without))      # the IMU window changed
     with pytest.raises(SystemExit):
         main([*common, "--output", str(tmp_path / "test"), "--split", "test"])        # VisDrone has no test split
+    # --panels 2: every pair scored, only the worst and the best (by PSNR gain) drawn.
+    few = main([*common, "--output", str(tmp_path / "few"), "--panels", "2"])["rows"]
+    assert [row["psnr_out"] for row in few] == [row["psnr_out"] for row in with_imu]
+    gains = [row["psnr_out"] - row["psnr_in"] for row in few]
+    drawn = [k for k, row in enumerate(few) if row["panel"]]
+    assert drawn == sorted({gains.index(min(gains)), gains.index(max(gains))})
+    assert sorted(path.name for path in (tmp_path / "few").glob("pair_*.png")) == [few[k]["panel"] for k in drawn]

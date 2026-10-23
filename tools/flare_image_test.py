@@ -15,7 +15,8 @@ FlareImage khong co IMU: moi cap muon cua so IMU cua mot mau TartanAir test, co 
 Wu/FlareX) thay cho FlareImage. Bo nay chi chia train / val (index.csv); valid = anh VisDrone test-dev + lop loe nhom
 valid, model chua train tren cap nao (giai doan loe co dung valid de chon best.pt). --imu khong: cua so IMU bang 0, nhu
 25% mau p46 khong co IMU (data.imu_absent_probability) -- dung anh khong kem IMU; --imu muon (mac dinh): muon IMU.
---count 0: moi cap cua split.
+--count 0: moi cap cua split. --panels N: chi ve hinh N cap, rai deu tu cap te nhat toi tot nhat (theo PSNR ra - vao),
+sau khi cham het; mac dinh moi cap mot hinh. Cuoi bang in thoi gian moi cap (model / ve hinh / con lai).
 
 In bang tung cap va theo nguon: PSNR va SSIM vao -> ra, va PSNR rieng VUNG LOE -- pixel ma anh co loe lech anh sach
 hon 0,05 (trung binh 3 kenh, tren cap anh truoc khi them nhieu, nhu validation), noi model phai go loe -- va PSNR
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -161,6 +163,8 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument("--flare-pairs-root", help="thu muc FlareImage (mac dinh: data.flare_pairs_root cua checkpoint)")
     parser.add_argument("--scene-pairs-root", help="thu muc VisDrone co index.csv, gt/, input/ "
                                                    "(mac dinh: data.scene_pairs_root cua checkpoint)")
+    parser.add_argument("--panels", type=int, default=-1,
+                        help="so cap ve hinh, rai deu tu te nhat toi tot nhat; -1 (mac dinh) = moi cap")
     parser.add_argument("--imu", default="muon", choices=("muon", "khong"),
                         help="muon: IMU cua mot mau TartanAir test | khong: cua so IMU bang 0 (anh khong kem IMU)")
     args = parser.parse_args(argv)
@@ -199,6 +203,9 @@ def main(argv: list[str] | None = None) -> dict:
     clear_probability = (float(config["data"].get("flare_pairs_clear_probability", 1.0)) if args.bank == "flareimage"
                          else 1.0)
     rows = []
+    pictures = []                  # --panels N: anh uint8 (vao, ra, sach) tung cap, ve sau khi xep hang
+    seconds = {"model": 0.0, "hinh": 0.0}
+    started = time.perf_counter()
     print(f"{label} {args.split}: {len(pairs)} cặp | chế độ {args.mode} | khung {args.frame} | IMU {args.imu}"
           f" | {bank.root}")
     print(f"  {'nguồn':18s} {'cặp':11s} {'cỡ':>9s} {'PSNR vào→ra':>16s} {'SSIM vào→ra':>14s} {'vùng lóe: % | vào→ra':>26s} {'ngoài lóe vào→ra':>17s}")
@@ -215,10 +222,12 @@ def main(argv: list[str] | None = None) -> dict:
                            flare_pair={"name": pair.name, "source": pair.source, "clear": clear},
                            imu_donor=host.sample_id)
         noisy, clean = item["image_noisy"][None], item["image_clean"][None]
+        tick = time.perf_counter()
         with torch.no_grad():
             out = forward(noisy.to(device), item["imu_noisy_phys"].T[None].to(device),
                           item["image_time"][None].to(device), item["imu_times"][None].to(device))
         restored = out["image"].float().clamp(0, 1).cpu()
+        seconds["model"] += time.perf_counter() - tick
         before, after = image_metrics(noisy, clean), image_metrics(restored, clean)
         row = {"name": pair.name, "source": pair.source, "width": int(clean.shape[-1]), "height": int(clean.shape[-2]),
                "imu_donor": host.sample_id, "psnr_in": before["image_psnr_db"], "psnr_out": after["image_psnr_db"],
@@ -227,9 +236,15 @@ def main(argv: list[str] | None = None) -> dict:
                "flare_psnr_out": psnr(restored[0], clean[0], mask),
                # Ngoai vung loe: noi model phai de nguyen (p40 lam hong o day 4-13 dB).
                "rest_psnr_in": psnr(noisy[0], clean[0], ~mask), "rest_psnr_out": psnr(restored[0], clean[0], ~mask),
-               "panel": f"pair_{number:02d}.png"}
+               "panel": f"pair_{number:02d}.png" if args.panels < 0 else None}
         rows.append(row)
-        panel(output / row["panel"], noisy[0], restored[0], clean[0], row)
+        tick = time.perf_counter()
+        if args.panels < 0:
+            panel(output / row["panel"], noisy[0], restored[0], clean[0], row)
+        else:
+            pictures.append(tuple((image[0].clamp(0, 1) * 255).round().to(torch.uint8)
+                                  for image in (noisy, restored, clean)))
+        seconds["hinh"] += time.perf_counter() - tick
         flare = (f"{100 * row['flare_fraction']:5.1f}% | {row['flare_psnr_in']:5.2f} → {row['flare_psnr_out']:5.2f}"
                  if np.isfinite(row["flare_psnr_in"]) else "—")
         rest = (f"{row['rest_psnr_in']:6.2f} → {row['rest_psnr_out']:6.2f}" if np.isfinite(row["rest_psnr_in"])
@@ -237,6 +252,17 @@ def main(argv: list[str] | None = None) -> dict:
         print(f"  {pair.source:18s} {pair.name:11s} {str(row['width']) + 'x' + str(row['height']):>9s}"
               f" {row['psnr_in']:6.2f} → {row['psnr_out']:6.2f} {row['ssim_in']:6.3f} → {row['ssim_out']:.3f}"
               f" {flare:>26s} {rest:>17s}", flush=True)
+    if args.panels > 0 and rows:
+        tick = time.perf_counter()
+        ranked = sorted(range(len(rows)), key=lambda k: rows[k]["psnr_out"] - rows[k]["psnr_in"])
+        for k in sorted({ranked[int(i)] for i in np.linspace(0, len(rows) - 1, min(args.panels, len(rows))).round()}):
+            rows[k]["panel"] = f"pair_{k:02d}.png"
+            panel(output / rows[k]["panel"], *(image.float() / 255 for image in pictures[k]), rows[k])
+        seconds["hinh"] += time.perf_counter() - tick
+    total = time.perf_counter() - started
+    count = max(1, len(rows))
+    print(f"\n  Thời gian: {total:.0f} s, {total / count:.2f} s/cặp (model {seconds['model'] / count:.2f}"
+          f" | vẽ hình {seconds['hinh'] / count:.2f} | đọc ảnh + nhiễu + chấm {(total - sum(seconds.values())) / count:.2f})")
     sources = sorted({row["source"] for row in rows})
     summary = {"tat ca": summarize(rows), **{source: summarize([r for r in rows if r["source"] == source])
                                             for source in sources}}
@@ -250,7 +276,7 @@ def main(argv: list[str] | None = None) -> dict:
               "mode": args.mode, "frame": args.frame,
               "rows": rows, "summary": summary}
     (output / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
-    print(f"\nĐã lưu {output}: {len(rows)} hình pair_XX.png, report.json")
+    print(f"\nĐã lưu {output}: {sum(row['panel'] is not None for row in rows)} hình pair_XX.png, report.json")
     return report
 
 
