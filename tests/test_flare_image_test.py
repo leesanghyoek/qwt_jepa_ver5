@@ -4,6 +4,8 @@ Pins: the pairs come only from the asked split, spread over the sources, or by n
 refused); a full frame keeps the shrunk pair cut to multiples of 16 around its centre and a crop is the training crop
 size; the model runs on whole frames of any such size; "chi loe" feeds the photo itself and "nhu luc train" adds the
 training corruption; each pair gets a panel and finite numbers, the flare region is where input and target differ.
+--bank visdrone (p46) reads the "Lens flare on VisDrone" pairs' valid split (it has no test), --count 0 every pair of
+it, --imu khong the same frames without IMU.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import torch
 
 from qjepa.data.flare_pairs import FlarePairBank
 from test_flare_pairs import SHORT_SIDE, _train_tiny
+from test_scene_pairs import _write_scene_pairs
 from tools.flare_image_test import frame_of, main, pick_pairs
 
 
@@ -67,3 +70,27 @@ def test_a_checkpoint_restores_whole_held_out_frames_pair_by_pair(tmp_path):
     with pytest.raises(ValueError, match="chi cac cap cua split"):
         main(["--checkpoint", str(last), "--manifest", str(manifest), "--output", str(tmp_path / "refused"),
               "--names", train_name, "--device", "cpu"])
+
+
+def test_visdrone_valid_pairs_all_of_them_with_and_without_imu(tmp_path):
+    torch.set_num_threads(1)
+    last, manifest = _train_tiny(tmp_path, "flare", True)          # trained without scene pairs: needs the root
+    root = _write_scene_pairs(tmp_path / "visdrone", train=6, valid=5, size=(48, 64))
+    common = ["--checkpoint", str(last), "--manifest", str(manifest), "--bank", "visdrone",
+              "--scene-pairs-root", str(root), "--count", "0", "--device", "cpu"]
+    reports = {imu: main([*common, "--output", str(tmp_path / imu), "--imu", imu]) for imu in ("muon", "khong")}
+    for imu, report in reports.items():
+        assert report["bank"] == "visdrone" and report["split"] == "valid" and report["imu"] == imu
+        rows = report["rows"]
+        assert [row["name"] for row in rows] == [f"{index:05d}.png" for index in range(6, 11)]   # every valid pair
+        for row in rows:
+            assert (row["width"], row["height"]) == (64, 48)
+            # chi loe: the input is the flared photo, the flare region its 10 x 10 px blob.
+            assert row["flare_fraction"] == pytest.approx(100 / (48 * 64))
+            assert np.isfinite(row["psnr_out"]) and np.isfinite(row["flare_psnr_out"])
+            assert (tmp_path / imu / row["panel"]).stat().st_size > 1000
+    with_imu, without = reports["muon"]["rows"], reports["khong"]["rows"]
+    assert [row["psnr_in"] for row in with_imu] == [row["psnr_in"] for row in without]
+    assert any(a["psnr_out"] != b["psnr_out"] for a, b in zip(with_imu, without))      # the IMU window changed
+    with pytest.raises(SystemExit):
+        main([*common, "--output", str(tmp_path / "test"), "--split", "test"])        # VisDrone has no test split

@@ -89,6 +89,17 @@ và phase 2.
   luồng vào đúng chỗ symlink cũ (`/tmp/tartanair640_all`), rồi manifest dựng lại trên bản chép (Cell 1 `LOCAL_COPY`).
   Ảnh và IMU giống từng byte, mẫu và thứ tự giữ nguyên. Manifest hash đổi vì đường dẫn đổi. Bằng chứng:
   `tests/test_kaggle_dataset_layout.py::test_copy_trajectories_puts_real_files_where_the_links_were_and_the_manifest_reads_them`.
+- **Test trên VisDrone (người dùng: "viết 1 cell để test trên tập này"):** bộ "Lens flare on VisDrone, 640x640" chỉ
+  chia train / val, không có test. Cell 12f chạy `tools/flare_image_test.py --bank visdrone` trên **mọi** cặp valid
+  (199: ảnh VisDrone test-dev, lớp lóe nhóm valid; model chưa train trên cặp nào, nhưng giai đoạn lóe dùng valid để
+  chọn `best.pt`). Cả khung (384×384), ảnh có lóe vào thẳng model. `--imu khong` chạy lại đúng các khung đó với cửa sổ
+  IMU bằng 0, như ảnh không kèm IMU. Vùng lóe lấy theo cặp ảnh trước khi thêm nhiễu (như validation), nên ở chế độ
+  `nhu_luc_train` phần tối/mờ thêm vào không bị tính là lóe. Bằng chứng:
+  `tests/test_flare_image_test.py::test_visdrone_valid_pairs_all_of_them_with_and_without_imu`.
+- **Cell 12e lỗi ở p46:** `uformer_init: stage` làm Cell 4 ghi `data.uformer_checkpoint` là `flare/best.pt` của run
+  trước (checkpoint của repo), và Cell 12e nạp file đó như trọng số gốc Flare7K++ (`Missing key(s) … Unexpected
+  key(s): "metadata", "model", …`). Cell 12e giờ chỉ dùng đường dẫn đó khi nhánh lóe khởi tạo từ bản công bố; còn lại
+  nó tìm `net_g_last.pth` trong Input hoặc tải về.
 
 **p45_sunflare — lóe ban ngày: mặt trời hắt vào ống kính, quầng chói, bóng ma đa giác** (config
 `configs/kaggle_sunflare.yaml` → OUT `outputs/p45_sunflare`). Bằng p44 cộng `flare.uformer_init: stage`,

@@ -11,13 +11,21 @@ Moi cap duoc thu nho nhu luc train (canh ngan data.flare_pairs_short_side, cache
 FlareImage luc train (PairedCameraImuDataset._item, "clear" theo data.flare_pairs_clear_probability).
 FlareImage khong co IMU: moi cap muon cua so IMU cua mot mau TartanAir test, co dinh theo ten cap.
 
-In bang tung cap va theo nguon: PSNR va SSIM vao -> ra, va PSNR rieng VUNG LOE -- pixel ma anh vao lech anh sach hon
-0,05 (trung binh 3 kenh), noi model phai go loe -- va PSNR NGOAI vung loe, noi model phai de nguyen (p40 lam
-hong o day, trung vi -4 dB). Ve moi cap mot hinh: vao | ra | sach | |vao - sach| | |ra - sach|.
+--bank visdrone (p46): cac cap "Lens flare on VisDrone, 640x640" (data.scene_pairs_*, anh drone that cong mot lop loe
+Wu/FlareX) thay cho FlareImage. Bo nay chi chia train / val (index.csv); valid = anh VisDrone test-dev + lop loe nhom
+valid, model chua train tren cap nao (giai doan loe co dung valid de chon best.pt). --imu khong: cua so IMU bang 0, nhu
+25% mau p46 khong co IMU (data.imu_absent_probability) -- dung anh khong kem IMU; --imu muon (mac dinh): muon IMU.
+--count 0: moi cap cua split.
+
+In bang tung cap va theo nguon: PSNR va SSIM vao -> ra, va PSNR rieng VUNG LOE -- pixel ma anh co loe lech anh sach
+hon 0,05 (trung binh 3 kenh, tren cap anh truoc khi them nhieu, nhu validation), noi model phai go loe -- va PSNR
+NGOAI vung loe, noi model phai de nguyen (p40 lam hong o day, trung vi -4 dB). Ve moi cap mot hinh: vao | ra | sach |
+|vao - sach| | |ra - sach|.
 
     python3 tools/flare_image_test.py --checkpoint outputs/p38_expnorm/phase2/best_joint_validation.pt \\
         --manifest manifests/kaggle --output outputs/p38_expnorm/flare_image_test/<gio> [--count 8] \\
         [--split test] [--source flare_removal] [--names 000395.png,000431.png] [--mode chi_loe] [--frame full] [--amp]
+    python3 tools/flare_image_test.py --bank visdrone --split valid --count 0 [--imu khong] ...
 """
 
 from __future__ import annotations
@@ -40,27 +48,33 @@ sys.path.insert(0, str(REPO))
 from qjepa.cli import _dataset, _manifest, _system_from_phase2, flare_pair_bank  # noqa: E402
 from qjepa.corruptions.rng import derive_seed  # noqa: E402
 from qjepa.data.flare_pairs import FLARE_PAIR_SPLITS  # noqa: E402
+from qjepa.data.scene_pairs import SCENE_PAIR_SPLITS, ScenePairBank  # noqa: E402
 from qjepa.evaluation.metrics import image_metrics  # noqa: E402
 from qjepa.execution import RestorationForward  # noqa: E402
 from tools.small_test import with_flare_pairs  # noqa: E402
 
 MODES = {"chi_loe": "clean", "nhu_luc_train": "full"}
 FLARE_THRESHOLD = 0.05
+BANKS = {"flareimage": ("FlareImage", FLARE_PAIR_SPLITS, "test"), "visdrone": ("VisDrone", SCENE_PAIR_SPLITS, "valid")}
+SCENE_SHORT_SIDE = 384      # p46 data.scene_pairs_short_side, cho checkpoint khong train voi cap canh
 
 
 def pick_pairs(bank, split: str, count: int, source: str | None = None, names: list[str] | None = None):
-    """Cac cap se thu: dung ``names`` neu co; khong thi ``count`` cap rai deu qua cac nguon (theo thu tu ten)."""
+    """Cac cap se thu: dung ``names`` neu co; khong thi ``count`` cap rai deu qua cac nguon (theo thu tu ten), hoac
+    moi cap (cua ``source`` neu co) khi ``count`` = 0."""
     pairs = list(bank.pairs(split))
     if names:
         by_name = {pair.name: pair for pair in pairs}
         missing = [name for name in names if name not in by_name]
         if missing:
-            raise ValueError(f"FlareImage {split} khong co cap {missing}: chi cac cap cua split nay (model chua thay)")
+            raise ValueError(f"{split} khong co cap {missing}: chi cac cap cua split nay (model chua thay)")
         return [by_name[name] for name in names]
     if source:
         pairs = [pair for pair in pairs if pair.source == source]
         if not pairs:
-            raise ValueError(f"FlareImage {split} khong co cap nao cua nguon {source!r}")
+            raise ValueError(f"{split} khong co cap nao cua nguon {source!r}")
+    if count == 0:
+        return pairs
     sources = sorted({pair.source for pair in pairs})
     chosen = []
     for position, name in enumerate(sources):
@@ -133,26 +147,47 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument("--checkpoint", required=True, help="checkpoint phase 2")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", required=True, help="thu muc moi: hinh tung cap va report.json")
-    parser.add_argument("--split", default="test", choices=FLARE_PAIR_SPLITS)
-    parser.add_argument("--count", type=int, default=8, help="so cap, rai deu qua cac nguon")
-    parser.add_argument("--source", help="chi mot nguon (flare_removal, halo, flare7k_real, flare7k_synthetic)")
+    parser.add_argument("--bank", default="flareimage", choices=tuple(BANKS))
+    parser.add_argument("--split", choices=sorted(set(FLARE_PAIR_SPLITS) | set(SCENE_PAIR_SPLITS)),
+                        help="mac dinh: test (FlareImage) / valid (VisDrone, khong co test)")
+    parser.add_argument("--count", type=int, default=8, help="so cap, rai deu qua cac nguon; 0 = moi cap cua split")
+    parser.add_argument("--source", help="chi mot nguon (FlareImage: flare_removal, halo, flare7k_real, "
+                                         "flare7k_synthetic; VisDrone: flarex, captured, simulated)")
     parser.add_argument("--names", help="ten cap, cach nhau dau phay (thay cho --count/--source)")
     parser.add_argument("--mode", default="chi_loe", choices=tuple(MODES))
     parser.add_argument("--frame", default="full", choices=("full", "crop"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--amp", action="store_true", help="fp16 autocast tren CUDA, nhu phase 2 da train")
     parser.add_argument("--flare-pairs-root", help="thu muc FlareImage (mac dinh: data.flare_pairs_root cua checkpoint)")
+    parser.add_argument("--scene-pairs-root", help="thu muc VisDrone co index.csv, gt/, input/ "
+                                                   "(mac dinh: data.scene_pairs_root cua checkpoint)")
+    parser.add_argument("--imu", default="muon", choices=("muon", "khong"),
+                        help="muon: IMU cua mot mau TartanAir test | khong: cua so IMU bang 0 (anh khong kem IMU)")
     args = parser.parse_args(argv)
-    if args.count < 1:
-        parser.error("--count >= 1")
+    label, splits, default_split = BANKS[args.bank]
+    args.split = args.split or default_split
+    if args.split not in splits:
+        parser.error(f"{label} chi co split {list(splits)}")
+    if args.count < 0:
+        parser.error("--count >= 0")
     if args.split == "train":
         print("CANH BAO: split train -- model da thay cac cap nay luc train.")
     device = torch.device(args.device)
     system, config = _system_from_phase2(args.checkpoint, device)
-    config = with_flare_pairs(config, args.flare_pairs_root, True)
+    if args.bank == "flareimage":
+        config = with_flare_pairs(config, args.flare_pairs_root, True)
+        bank = flare_pair_bank(config)
+    else:
+        data = config["data"]
+        root = args.scene_pairs_root or data.get("scene_pairs_root")
+        if not root:
+            raise ValueError("checkpoint nay khong train voi VisDrone: can --scene-pairs-root")
+        bank = ScenePairBank(root, short_side=int(data.get("scene_pairs_short_side", SCENE_SHORT_SIDE)))
     manifest, _ = _manifest(config, args.manifest)
-    bank = flare_pair_bank(config)
-    hosts = _dataset(config, manifest, "test", fixed_realization=True, flare_pairs=bank)   # IMU muon tu TartanAir test
+    # IMU muon tu TartanAir test; --imu khong: moi mau khong co IMU (cua so bang 0, nhu luc train p46).
+    hosts = _dataset(config, manifest, "test", fixed_realization=True,
+                     flare_pairs=bank if args.bank == "flareimage" else None,
+                     imu_absent_probability=1.0 if args.imu == "khong" else 0.0)
     names = [name.strip() for name in args.names.split(",") if name.strip()] if args.names else None
     pairs = pick_pairs(bank, args.split, args.count, args.source, names)
     forward = RestorationForward(system)
@@ -160,9 +195,12 @@ def main(argv: list[str] | None = None) -> dict:
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=False)
     size = tuple(int(side) for side in config["data"]["image_size"])
-    clear_probability = float(config["data"].get("flare_pairs_clear_probability", 1.0))
+    # Cap VisDrone luon "clear" (bo cac buoc moi truong), nhu validation p46 (dataset._scene_item).
+    clear_probability = (float(config["data"].get("flare_pairs_clear_probability", 1.0)) if args.bank == "flareimage"
+                         else 1.0)
     rows = []
-    print(f"FlareImage {args.split}: {len(pairs)} cặp | chế độ {args.mode} | khung {args.frame} | {bank.root}")
+    print(f"{label} {args.split}: {len(pairs)} cặp | chế độ {args.mode} | khung {args.frame} | IMU {args.imu}"
+          f" | {bank.root}")
     print(f"  {'nguồn':18s} {'cặp':11s} {'cỡ':>9s} {'PSNR vào→ra':>16s} {'SSIM vào→ra':>14s} {'vùng lóe: % | vào→ra':>26s} {'ngoài lóe vào→ra':>17s}")
     for number, pair in enumerate(pairs):
         gt, flared = bank.load(pair)
@@ -170,8 +208,9 @@ def main(argv: list[str] | None = None) -> dict:
         rng = np.random.default_rng(derive_seed(config["data"]["corruption_seed"], "flare_image_test", pair.name))
         host = hosts.samples[int(rng.integers(len(hosts.samples)))]
         clear = bool(rng.random() < clear_probability)
-        sample_id = f"flareimage/{pair.name}"
-        item = hosts._item(host, sample_id, f"flareimage/{pair.source}", gt, flared, MODES[args.mode], "full",
+        mask = torch.from_numpy(np.abs(flared - gt).mean(-1) > FLARE_THRESHOLD)   # loe: anh co loe lech anh sach
+        sample_id = f"{args.bank}/{pair.name}"
+        item = hosts._item(host, sample_id, f"{args.bank}/{pair.source}", gt, flared, MODES[args.mode], "full",
                            trajectory=sample_id, timestamp=0.0, frame_index=0,
                            flare_pair={"name": pair.name, "source": pair.source, "clear": clear},
                            imu_donor=host.sample_id)
@@ -180,7 +219,6 @@ def main(argv: list[str] | None = None) -> dict:
             out = forward(noisy.to(device), item["imu_noisy_phys"].T[None].to(device),
                           item["image_time"][None].to(device), item["imu_times"][None].to(device))
         restored = out["image"].float().clamp(0, 1).cpu()
-        mask = (noisy[0] - clean[0]).abs().mean(0) > FLARE_THRESHOLD           # noi anh vao lech anh sach: loe
         before, after = image_metrics(noisy, clean), image_metrics(restored, clean)
         row = {"name": pair.name, "source": pair.source, "width": int(clean.shape[-1]), "height": int(clean.shape[-2]),
                "imu_donor": host.sample_id, "psnr_in": before["image_psnr_db"], "psnr_out": after["image_psnr_db"],
@@ -208,7 +246,8 @@ def main(argv: list[str] | None = None) -> dict:
         print(f"  {name:18s} {values['count']:>4d} {values['psnr_in']:6.2f} → {values['psnr_out']:6.2f}"
               f" {100 * values['better_fraction']:8.0f}% {values['flare_psnr_in']:7.2f} → {values['flare_psnr_out']:6.2f}"
               f" {values['rest_psnr_in']:8.2f} → {values['rest_psnr_out']:6.2f}")
-    report = {"checkpoint": str(args.checkpoint), "split": args.split, "mode": args.mode, "frame": args.frame,
+    report = {"checkpoint": str(args.checkpoint), "bank": args.bank, "split": args.split, "imu": args.imu,
+              "mode": args.mode, "frame": args.frame,
               "rows": rows, "summary": summary}
     (output / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     print(f"\nĐã lưu {output}: {len(rows)} hình pair_XX.png, report.json")
