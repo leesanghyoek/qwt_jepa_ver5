@@ -12,6 +12,7 @@ import os
 import torch
 from torch import nn
 
+from .models.ijepa import reconstruction_error
 from .models.masking import block_mask, span_mask
 from .models.pipeline import LatentPretrainingModel, RestorationSystem
 
@@ -137,7 +138,8 @@ class IJEPAForward(nn.Module):
     """One I-JEPA forward (phase1.objective: ijepa). Masks arrive as batch-first index
     tensors, so DataParallel and the DDP ranks split them with the batch.
 
-    With the masks: the predictions and their LayerNorm'd targets, [B, M, Kt, D].
+    With the masks: the predictions and their LayerNorm'd targets, [B, M, Kt, D]; p48 also the
+    per-sample error [B] of the clean frame drawn from the whole context-input latent.
     ``dense``: also the whole-view features the latent gate measures (validation only;
     training runs the context encoder on the context tokens alone).
     """
@@ -161,6 +163,12 @@ class IJEPAForward(nn.Module):
             result.update(prediction_i=prediction_i, prediction_u=prediction_u,
                           target_i=model.target_tokens(teacher_image, image_targets),
                           target_u=model.target_tokens(teacher_imu, imu_targets))
+            if model.reconstruction is not None:
+                # p48: the whole context-input pair, dense, and the clean frame drawn from its ZI alone.
+                drawn = model.reconstruct(image_noisy if noisy else image_clean,
+                                          imu_noisy_phys if noisy else imu_clean_phys, image_time, imu_times)
+                result["reconstruction_error"] = reconstruction_error(
+                    drawn, model.reconstruction_target(image_clean), model.reconstruction_detail_weight)
         if dense:
             for prefix, latent in (("", model.encode_online(image_noisy, imu_noisy_phys, image_time, imu_times)),
                                    ("_clean", model.encode_online(image_clean, imu_clean_phys, image_time,

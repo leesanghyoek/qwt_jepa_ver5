@@ -19,6 +19,15 @@ aspect 0.75-1.5) and one context size (scale 0.85-1.0, square); per sample four
 target blocks (they may overlap each other) and one context block with the
 targets removed; every mask cut to the shortest in the batch so they stack. On a
 1-D IMU grid a block is a span and the aspect ratio has no meaning.
+
+p48 (``phase1.ijepa_reconstruction_weight`` > 0) adds one term to I-JEPA's loss: a small decoder
+(ReconstructionHead) reads the dense latent ZI of the WHOLE context-input frame -- the noisy one under
+``context_input: noisy`` -- and must draw the CLEAN frame, as the encoder sees it (its luminance in
+``image_input: luminance``). It is a denoising autoencoder bolted onto the JEPA: I-JEPA alone lets the
+latent drop whatever the predictor need not know (README p26: effective rank ~2.6), this term makes it
+keep what it takes to redraw the clean frame. The decoder sees ZI only (no skip, no input): it can
+satisfy the term only through the latent. It lives in phase 1 and is dropped after, as the anchor
+decoder of the CNN JEPA was. Absent key: no decoder, I-JEPA as before.
 """
 
 from __future__ import annotations
@@ -157,15 +166,49 @@ class IJEPAPredictor(nn.Module):
         return predictions[0], predictions[1]
 
 
+class ReconstructionHead(nn.Module):
+    """p48: dense latent [B, D, h, w] -> frame [B, C, h * stride, w * stride], from the latent alone.
+
+    A 1x1 projection to ``width``, then one (3x3 conv to 4 * width, pixel shuffle x2, GELU) stage per
+    factor of two of ``stride``, then a 3x3 conv to ``channels``. The output is the frame itself
+    (absolute, not a correction of anything): a residual target would be met with a zero correction.
+    """
+
+    def __init__(self, dim: int, width: int, channels: int, stride: int = TOKEN_STRIDE) -> None:
+        super().__init__()
+        stages = int(math.log2(stride))
+        if 2 ** stages != stride:
+            raise ValueError(f"ReconstructionHead needs a power-of-two stride, got {stride}")
+        layers: list[nn.Module] = [nn.Conv2d(dim, width, 1)]
+        for _ in range(stages):
+            layers += [nn.Conv2d(width, 4 * width, 3, padding=1), nn.PixelShuffle(2), nn.GELU()]
+        layers.append(nn.Conv2d(width, channels, 3, padding=1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.net(latent)
+
+
+def reconstruction_error(drawn: torch.Tensor, clean: torch.Tensor, detail_weight: float) -> torch.Tensor:
+    """[B]: per-sample L1 to the clean frame plus ``detail_weight`` x L1 of its horizontal and vertical
+    differences (the edges, which an L1 on values alone lets blur). Per sample so that DDP ranks gather
+    it and the batch mean is that of one process."""
+    error = (drawn - clean).abs().flatten(1).mean(1)
+    if detail_weight > 0:
+        for axis in (-1, -2):
+            error = error + detail_weight * (drawn.diff(dim=axis) - clean.diff(dim=axis)).abs().flatten(1).mean(1)
+    return error
+
+
 class IJEPAPretrainingModel(nn.Module):
     """Phase 1 as I-JEPA: joint ViT backbone (online = context encoder), one predictor, EMA teacher."""
 
     objective = "ijepa"
-    reconstructs = False
 
     def __init__(self, backbone: MultimodalBackbone, normalizer: ImuNormalizer | None = None, *,
                  predictor_dim: int, predictor_depth: int, predictor_heads: int,
-                 masking: dict[str, Any], context_input: str) -> None:
+                 masking: dict[str, Any], context_input: str, reconstruction_width: int | None = None,
+                 reconstruction_detail_weight: float = 0.0) -> None:
         super().__init__()
         if backbone.encoder_type != "vit":
             raise ValueError("I-JEPA needs the ViT backbone (model.encoder_type: vit)")
@@ -179,6 +222,13 @@ class IJEPAPretrainingModel(nn.Module):
         # targets, target_scale, target_aspect, context_scale, image_min_keep, imu_min_keep
         self.masking = dict(masking)
         self.context_input = context_input
+        # p48: the clean-frame decoder; None (no parameters, no state-dict keys) without the key.
+        self.reconstruction = None
+        self.reconstruction_detail_weight = float(reconstruction_detail_weight)
+        if reconstruction_width is not None:
+            channels = 1 if backbone.image_transform.image_input == "luminance" else 3
+            self.reconstruction = ReconstructionHead(backbone.joint_encoder.out_channels, int(reconstruction_width),
+                                                     channels)
         # What the CLI and phase 2 ask of every phase-1 model; I-JEPA has none of them.
         self.decoders = None
         self.degradation_head = None
@@ -200,8 +250,22 @@ class IJEPAPretrainingModel(nn.Module):
         self.teachers.joint_encoder.load_state_dict(backbone.joint_encoder.state_dict())
         return measured
 
+    @property
+    def reconstructs(self) -> bool:
+        return self.reconstruction is not None
+
     def online_parameters(self):
-        return [*self.backbone.parameters(), *self.predictor.parameters()]
+        head = [] if self.reconstruction is None else list(self.reconstruction.parameters())
+        return [*self.backbone.parameters(), *self.predictor.parameters(), *head]
+
+    def reconstruct(self, image: torch.Tensor, imu_phys: torch.Tensor, image_time: torch.Tensor,
+                    imu_times: torch.Tensor) -> torch.Tensor:
+        """p48: the clean frame as the decoder draws it from the dense ZI of this whole pair."""
+        return self.reconstruction(self.encode_online(image, imu_phys, image_time, imu_times).ZI)
+
+    def reconstruction_target(self, image_clean: torch.Tensor) -> torch.Tensor:
+        """What the decoder must draw: the clean frame as the encoder's transform reads it (Y in luminance)."""
+        return self.backbone.image_transform.prepare(image_clean)
 
     def token_grids(self, image_shape: tuple[int, ...], imu_length: int) -> tuple[tuple[int, ...], tuple[int]]:
         """Token grids of a [B, C, H, W] frame and an IMU window: 16 px / 16 samples per token."""

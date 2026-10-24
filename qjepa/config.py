@@ -514,6 +514,30 @@ IJEPA_ABSENT_TERMS = ("coefficient_reconstruction_loss_weight", "variance_weight
                       "image_mask_ratio", "imu_mask_ratio")
 
 
+# p48: the clean-frame decoder on I-JEPA's latent (models/ijepa.py ReconstructionHead).
+IJEPA_RECONSTRUCTION_KEYS = ("ijepa_reconstruction_weight", "ijepa_reconstruction_width",
+                             "ijepa_reconstruction_detail_weight")
+
+
+def _validate_ijepa_reconstruction(phase1: dict[str, Any]) -> None:
+    """Absent weight (or 0): no decoder, and no width or detail weight that would say otherwise. A positive
+    weight needs both spelled out, so the hash records the decoder that was trained."""
+    weight = phase1.get("ijepa_reconstruction_weight", 0.0)
+    if not _nonnegative_number(weight):
+        raise ValueError("phase1.ijepa_reconstruction_weight must be a nonnegative number")
+    if weight == 0:
+        extra = [key for key in IJEPA_RECONSTRUCTION_KEYS[1:] if key in phase1]
+        if extra:
+            raise ValueError(f"phase1.{extra[0]} needs a positive phase1.ijepa_reconstruction_weight")
+        return
+    if not _positive_int(phase1.get("ijepa_reconstruction_width")):
+        raise ValueError("phase1.ijepa_reconstruction_weight > 0 needs a positive integer "
+                         "phase1.ijepa_reconstruction_width")
+    if not _nonnegative_number(phase1.get("ijepa_reconstruction_detail_weight")):
+        raise ValueError("phase1.ijepa_reconstruction_weight > 0 needs a nonnegative "
+                         "phase1.ijepa_reconstruction_detail_weight")
+
+
 def _validate_ijepa(config: dict[str, Any]) -> None:
     """model.encoder_type vit and phase1.objective ijepa come together. Every I-JEPA
     setting is explicit, so the hash records the recipe that was trained."""
@@ -533,7 +557,11 @@ def _validate_ijepa(config: dict[str, Any]) -> None:
     if standardize is not None and encoder_type != "vit":
         raise ValueError("model.vit_input_standardize scales the ViT's input coefficients; set model.encoder_type: vit")
     if encoder_type != "vit":
+        present = [key for key in IJEPA_RECONSTRUCTION_KEYS if key in phase1]
+        if present:
+            raise ValueError(f"phase1.{present[0]} belongs to phase1.objective: ijepa")
         return
+    _validate_ijepa_reconstruction(phase1)
     for key in ("vit_depth", "vit_heads"):
         if not _positive_int(model.get(key)):
             raise ValueError(f"model.encoder_type vit needs a positive integer model.{key}")
@@ -1351,6 +1379,10 @@ def build_phase1_model(
                      "image_min_keep": int(phase1["ijepa_image_min_keep"]),
                      "imu_min_keep": int(phase1["ijepa_imu_min_keep"])},
             context_input=phase1["ijepa_context_input"],
+            # p48: the clean-frame decoder, only with a positive weight (absent: I-JEPA alone).
+            reconstruction_width=(int(phase1["ijepa_reconstruction_width"])
+                                  if phase1.get("ijepa_reconstruction_weight", 0.0) > 0 else None),
+            reconstruction_detail_weight=float(phase1.get("ijepa_reconstruction_detail_weight", 0.0)),
         )
     return LatentPretrainingModel(
         backbone=build_backbone(config),

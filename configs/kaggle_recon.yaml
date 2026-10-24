@@ -1,0 +1,22 @@
+# p48_recon: p47_restore + mot so hang DUNG LAI ANH SACH tu latent JEPA o phase 1 (phase1.ijepa_reconstruction_*).
+#
+# Nguoi dung (24/10/2026) chon "cach B": giu I-JEPA, them rang buoc dung lai. I-JEPA mot minh cho latent bo moi chi
+# tiet ma predictor khong can (README p26: effective rank ZI ~2,6, token anh it khac nhau giua cac anh), nen
+# decoder phase 2 gan nhu chi doc duoc anh vao. Day mot decoder nho (ReconstructionHead, ~0,6 M tham so) doc ZI cua
+# CA khung NHIEU (encoder chay them mot luot day du) va phai ve lai khung SACH (kenh Y): mot denoising autoencoder
+# gan vao JEPA. Decoder chi doc ZI (khong skip, khong anh vao) va bi bo sau phase 1; phase 2 khong doi.
+#
+# Loss phase 1 = I-JEPA + weight * (L1(Y) + detail_weight * L1 hieu ngang/doc cua Y). weight 1,0 la diem dau:
+# log phase 1 in rieng "jepa" va "reconstruction" de xem ben nao lan at; neu jepa khong giam thi thu 0,3.
+#
+# Chi doi phase1: hash phase 2 va hash giai doan loe bang p47, nen dung lai flare/ cua p47_restore; TRAIN LAI
+# phase 1 (hash phase 1 khac) va phase 2 (backbone moi). So voi p47 (cung phase 2) va p46_nolatent (khong latent).
+extends: kaggle_restore.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p48_recon
+
+phase1:
+  ijepa_reconstruction_weight: 1.0
+  ijepa_reconstruction_width: 64
+  ijepa_reconstruction_detail_weight: 1.0

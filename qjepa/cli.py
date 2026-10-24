@@ -711,7 +711,10 @@ def _ijepa_validation_batch(model, runner, batch: dict[str, Any], index: int, de
                      batch["image_time"], batch["imu_times"], **{key: value.to(device) for key, value in masks.items()},
                      dense=True)
     total, image, imu = ijepa_loss(outputs)
-    return outputs, {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu)}
+    values = {"jepa": float(total), "jepa_image": float(image), "jepa_imu": float(imu)}
+    if "reconstruction_error" in outputs:  # p48: the clean frame drawn from the noisy frame's latent
+        values["reconstruction"] = float(outputs["reconstruction_error"].mean())
+    return outputs, values
 
 
 @torch.no_grad()
@@ -1096,6 +1099,7 @@ def command_train_phase1(args: argparse.Namespace) -> None:
         model.load_state_dict(resume_payload["model"], strict=True)
         trainer.optimizer.load_state_dict(resume_payload["optimizer"])
         trainer.successful_updates = int(resume_payload["successful_updates"])
+        trainer.decoder_forward_calls = int(resume_payload["metadata"]["phase1_decoder_forward_calls"])
         if resume_payload["metadata"].get("data_microbatches_consumed") != trainer.successful_updates:
             raise ValueError("Phase-1 resume checkpoint has inconsistent data progress")
         trainer.initialization_hash = resume_payload["metadata"]["initialization_hash"]

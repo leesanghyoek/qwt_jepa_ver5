@@ -10,6 +10,10 @@ rising linearly from ``teacher_momentum_start`` to ``teacher_momentum_end``.
 
 Image and IMU each contribute half the loss. ``gradient_clip_norm: null`` leaves
 the gradients alone as I-JEPA does; the norm is still logged.
+
+p48: with ``ijepa_reconstruction_weight`` > 0 the loss adds that weight times the batch mean of the
+clean-frame error (models/ijepa.py ReconstructionHead), logged as ``reconstruction``; ``jepa`` stays
+I-JEPA's term alone and ``loss`` is the sum.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ def ijepa_parameter_groups(model: IJEPAPretrainingModel) -> list[dict[str, Any]]
 
 
 class IJEPATrainer:
-    LOSS_KEYS = {"loss", "jepa", "jepa_image", "jepa_imu"}
+    LOSS_KEYS = {"loss", "jepa", "jepa_image", "jepa_imu", "reconstruction"}
 
     def __init__(self, model: IJEPAPretrainingModel, config: dict[str, Any], device: torch.device,
                  manifest_hash: str = "unknown") -> None:
@@ -66,6 +70,10 @@ class IJEPATrainer:
                 self.forward_model, device_ids=[torch.cuda.current_device()] if self.device.type == "cuda" else None,
                 broadcast_buffers=False)
         self.manifest_hash = manifest_hash
+        self.reconstruction_weight = float(self.phase.get("ijepa_reconstruction_weight", 0.0))
+        if (self.reconstruction_weight > 0) != model.reconstructs:
+            raise ValueError("phase1.ijepa_reconstruction_weight and the model's reconstruction decoder come together")
+        # Updates whose loss ran the p48 decoder; a resumed run carries on from its checkpoint's count.
         self.decoder_forward_calls = 0
         self.successful_updates = 0
         self.parameters = list(model.online_parameters())
@@ -113,9 +121,13 @@ class IJEPATrainer:
             batch["image_noisy"], batch["imu_noisy_phys"], batch["image_clean"], batch["imu_clean_phys"],
             batch["image_time"], batch["imu_times"], **masks)
         if self.world > 1:
-            features = {key: gather_shares(value, keep_graph=key.startswith("prediction"))
+            features = {key: gather_shares(value, keep_graph=key.startswith(("prediction", "reconstruction")))
                         for key, value in features.items()}
-        total, image, imu = ijepa_loss(features)
+        jepa, image, imu = ijepa_loss(features)
+        total = jepa
+        if self.reconstruction_weight > 0:
+            reconstruction = features["reconstruction_error"].mean()
+            total = jepa + self.reconstruction_weight * reconstruction
         if not torch.isfinite(total):
             self.optimizer.zero_grad(set_to_none=True)
             return {"skipped": True, "reason": "non_finite_loss", "loss": float(total.detach())}
@@ -131,12 +143,17 @@ class IJEPATrainer:
                                    self.phase["teacher_momentum_start"], self.phase["teacher_momentum_end"])
         self.model.teachers.update(self.model.backbone, momentum)
         self.successful_updates += 1
+        logged = {}
+        if self.reconstruction_weight > 0:
+            self.decoder_forward_calls += 1
+            logged["reconstruction"] = float(reconstruction.detach())
         return {
             "skipped": False,
             "loss": float(total.detach()),
-            "jepa": float(total.detach()),
+            "jepa": float(jepa.detach()),
             "jepa_image": float(image.detach()),
             "jepa_imu": float(imu.detach()),
+            **logged,
             **sizes,
             "gradient_norm": float(gradient_norm),
             "teacher_momentum": momentum,
@@ -152,8 +169,8 @@ class IJEPATrainer:
                 "pipeline_version": 3,
                 "phase": "latent_pretrain",
                 "phase1_objective": "ijepa",
-                "trained_with_reconstruction": False,
-                "phase1_decoder_forward_calls": 0,
+                "trained_with_reconstruction": bool(self.decoder_forward_calls),
+                "phase1_decoder_forward_calls": self.decoder_forward_calls,
                 "successful_updates": self.successful_updates,
                 "data_microbatches_consumed": self.successful_updates,
                 "manifest_hash": self.manifest_hash,

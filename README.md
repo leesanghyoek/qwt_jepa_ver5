@@ -12,6 +12,48 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p48_recon — p47_restore + phase 1 phải dựng lại ảnh sạch từ latent** (config `configs/kaggle_recon.yaml` → OUT
+`outputs/p48_recon`). Bằng p47 cộng ba khoá `phase1.ijepa_reconstruction_weight` (1,0), `_width` (64),
+`_detail_weight` (1,0). Thiếu khoá thì như cũ: hash của cả 42 config cũ giữ nguyên (đối chiếu với code ở 131b165).
+Hash giai đoạn lóe và hash phase 2 bằng p47, nên **dùng lại `flare/` của p47**; train lại phase 1 và phase 2.
+
+- **Yêu cầu** (người dùng, 24/10/2026): giữ I-JEPA, thêm ràng buộc dựng lại ("cách B"), vì latent I-JEPA không bắt
+  buộc giữ chi tiết pixel: dựng ảnh chỉ từ nó thì mờ.
+- **Vì sao:** I-JEPA chỉ so dự đoán của predictor với teacher, không có loss nào trên pixel. Cách rẻ nhất để latent
+  ảnh nhiễu giống latent ảnh sạch là bỏ mọi thứ nhiễu và mờ làm đổi, trong đó có chi tiết mịn. Phép đo ở máy (mục
+  p26 bên dưới) khớp với điều đó: effective rank ZI khoảng 2,6, token ảnh ít khác nhau giữa các ảnh (0,22), loss JEPA
+  ảnh 0,028.
+- **Cách làm** (`models/ijepa.py`: `ReconstructionHead`, `reconstruction_error`; `execution.IJEPAForward`;
+  `training/ijepa.py`):
+  - mỗi update encoder chạy thêm một lượt **đầy đủ** trên cặp mà encoder ngữ cảnh đọc (`context_input: noisy`: cặp
+    nhiễu), vì lượt I-JEPA chỉ thấy khoảng 42% token;
+  - một decoder nhỏ (chiếu 1×1 → 4 tầng conv 3×3 + pixel shuffle ×2 + GELU → conv 3×3; 599 681 tham số ở p48) chỉ
+    đọc ZI và vẽ khung **sạch** như transform của encoder thấy (kênh Y với `image_input: luminance`). Đầu ra là ảnh
+    tuyệt đối, không phải hiệu chỉnh: đích residual sẽ được thoả bằng hiệu chỉnh 0, như decoder neo cũ;
+  - lỗi mỗi mẫu = L1 + `detail_weight` × L1 của hiệu ngang và dọc (cạnh). Loss = I-JEPA + `weight` × trung bình lỗi.
+    Log: `jepa` là riêng số hạng I-JEPA, `reconstruction` là lỗi, `loss` là tổng; validation có
+    `validation_reconstruction`;
+  - decoder chỉ có trong phase 1; metadata `trained_with_reconstruction: true` và `phase1_decoder_forward_calls` đếm
+    số update đã chạy nó (resume giữ tiếp số đếm). Phase 2 nạp backbone như cũ, không mang decoder theo.
+- **Chi phí:** model dùng thật không đổi (decoder bị bỏ). Phase 1 tính toán GPU khoảng gấp đôi mỗi update (thêm một
+  lượt encoder xuôi + ngược và decoder); phase 1 trên Kaggle đang chờ CPU nạp dữ liệu nên thời gian thật chắc tăng
+  ít. Chưa đo.
+- **Chưa biết:** trọng số 1,0 là điểm đầu, không dò. Nếu `jepa` đứng yên trong log thì số hạng dựng lại lấn át (thử
+  0,3); nếu `recon` không giảm thì nó quá yếu. Ràng buộc không tạo lại được chi tiết đã mất hẳn (mờ nặng, lóe che
+  kín): chỗ đó vẫn ra trung bình.
+- **Đọc kết quả:** bảng latent ở Cell 8 (effective rank, probe tuyến tính) so với p47; PSNR phase 2 so với p47 (chỉ
+  khác latent) và p46_nolatent (không latent).
+- Bằng chứng: `tests/test_ijepa_reconstruction.py`:
+  - `test_without_the_key_there_is_no_decoder_and_p47_keeps_its_hash` (hash phase 1 của p47 ghim);
+  - `test_the_decoder_draws_the_clean_frame_from_the_noisy_latent_alone` (RGB và Y; decoder chỉ nhận ZI);
+  - `test_the_error_is_l1_plus_the_detail_weight_times_l1_of_the_differences`;
+  - `test_one_update_adds_the_term_trains_the_encoder_through_it_and_never_the_teacher`;
+  - `test_the_config_refuses_half_spelled_keys`, `test_the_keys_belong_to_ijepa`;
+  - `test_p48_is_p47_with_only_the_phase1_keys_changed`;
+  - `test_the_cli_trains_restarts_resumes_and_phase2_loads_it`;
+  - `test_two_processes_train_what_one_does` (DDP; `gradient_norm` update đầu lệch 1,8·10⁻⁵ do thứ tự cộng trong
+    conv, ngưỡng 10⁻⁴).
+
 **p47_restore — làm nét + làm sáng + khử lóe với kiến trúc gọn lại; IMU có vai trò thật** (config
 `configs/kaggle_restore.yaml` → OUT `outputs/p47_restore`). Config **phẳng**, không `extends`: chuỗi p46 sâu khoảng 30 tầng
 với 358 khoá, nhiều khoá của các tầng đã tắt; file này chỉ chép những khoá còn tác dụng. Đổi `data`, `corruption` và decoder
