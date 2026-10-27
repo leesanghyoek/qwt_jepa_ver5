@@ -8,7 +8,8 @@ without the keys draws exactly as before; every Wu layer gets a big ghost chain,
 as bright per pixel at any size), other layers keep their optics; a faint Wu layer is drawn again with its source, and
 without lens_wu_min_flare draw_lens_flare is one draw as before; the flare stage's composites draw Wu layers of their own split; select_on
 real_and_composite scores the mean PSNR gain of pairs and composites; train-flare with uformer_init stage starts from a
-previous run's flare/best.pt (its sha256 recorded) and find_stage_checkpoint finds that file in Input or in a zip;
+previous run's flare/best.pt (its sha256 recorded) and find_stage_checkpoint finds that file in Input or in a zip,
+also behind a symlinked directory (a link loop ends);
 p45 is p44 plus its keys with p44's phase-1 hash, p44's hashes unchanged, the Wu folder out of every hash.
 """
 
@@ -246,6 +247,21 @@ def test_select_on_real_and_composite_scores_the_mean_gain():
     assert selection_score(report) == 22.0                                         # p44: the pairs' PSNR
     assert selection_score(report, "real_and_composite") == pytest.approx(4.0)     # (2 + 6) / 2
     assert selection_score({**report, "real_pairs": 0}, "real_and_composite") == pytest.approx(6.0)
+
+
+def test_a_best_pt_behind_a_symlinked_directory_is_found_and_a_link_loop_ends(tmp_path):
+    """p49 (27/10/2026): Kaggle mounts an attached notebook Output through a symlinked directory; os.walk without
+    followlinks listed it and never went in, so Cell 4 missed p46's flare/best.pt."""
+    real = tmp_path / "mounted/qwt_jepa_version3/outputs/p46_visdrone/flare"
+    real.mkdir(parents=True)
+    torch.save({"metadata": {"phase": "flare_stage"}, "model": {"net.input_proj.proj.0.weight": torch.zeros(1)}},
+               real / "best.pt")
+    owner = tmp_path / "input/notebooks/me"
+    owner.mkdir(parents=True)
+    (owner / "notebookdd153a647c").symlink_to(tmp_path / "mounted", target_is_directory=True)
+    (tmp_path / "mounted/back_up").symlink_to(tmp_path / "input", target_is_directory=True)   # a loop
+    found = find_stage_checkpoint(tmp_path / "input", tmp_path / "cache", prefer="p46_visdrone")
+    assert found == owner / "notebookdd153a647c/qwt_jepa_version3/outputs/p46_visdrone/flare/best.pt"
 
 
 def test_train_flare_starts_from_a_previous_best_and_it_is_found_in_input(tmp_path):

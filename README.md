@@ -36,6 +36,13 @@ lớp lóe là `glint` (1–6 tia sao nhỏ trên xe; ảnh đích chỉ giữ c
     rồi valid, mỗi bên ≥ 5%. Mọi cặp train của `index.csv` ở lại train; phần val còn thừa về train, trừ cặp dùng chung
     lớp lóe với một cặp held-out (bỏ hẳn). `tools/flare_image_test.py --bank visdrone` mặc định chấm `test`;
   - lớp lóe Flare7K++ của giai đoạn lóe: `flare.lens.lens_flare_holdout_fraction` 0,1 → 0,05.
+- **Lần chạy đầu trên Kaggle (27/10/2026), Cell 4 không thấy `flare/best.pt` của p46** dù đã gắn Output của notebook
+  p46; file đó tải về vẫn đúng là nhánh Uformer của giai đoạn lóe. `find_stage_checkpoint` và `find_flare7kpp` duyệt
+  Input bằng `os.walk`, mà `os.walk` không đi vào thư mục symlink (`tools/imu_blur_preview.py` ghi Kaggle có gắn Input
+  kiểu đó). Giờ chúng dùng `walk_input` (`os.walk(followlinks=True)`, mỗi thư mục thật một lần, nên link vòng cũng
+  dừng); Cell 4 của notebook cũng vậy, có thêm `FLARE_INIT` ở Cell 1 để trỏ tay tới file. Bằng chứng:
+  `tests/test_wu_flares.py::test_a_best_pt_behind_a_symlinked_directory_is_found_and_a_link_loop_ends` (hỏng với code
+  cũ). Chưa xác minh trên Kaggle rằng Output của notebook là symlink.
 - **Bằng chứng** (`tests/test_glint_run.py`): `test_p49_is_p48_without_lol_with_more_drone_pairs_and_a_90_5_5_split`,
   `test_p49_validates_needs_no_lol_and_keeps_tartanair_in_every_batch`, `test_p49_hashes_differ_from_p48`,
   `test_split_ratios_give_tartanair_90_5_5_and_the_default_is_as_before`,

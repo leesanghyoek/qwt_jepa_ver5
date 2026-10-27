@@ -404,6 +404,21 @@ SCAN_PRUNE = ("image_", "depth_", "seg_", "flow_", "imu", "Flare7K", "Flare-R", 
               "__pycache__", ".git")
 
 
+def walk_input(root):
+    """os.walk(root, followlinks=True), each real directory once. Kaggle mounts some Input (a notebook's Output, a
+    dataset of symlinked trajectories) through symlinked directories, which a plain os.walk lists but never enters: p49's
+    Cell 4 missed p46's flare/best.pt in an attached notebook Output (27/10/2026). A directory already walked (a link
+    back up, two links to one place) is skipped with its subtree. The caller may prune ``children`` as with os.walk."""
+    seen: set[str] = set()
+    for directory, children, names in os.walk(root, followlinks=True):
+        real = os.path.realpath(directory)
+        if real in seen:
+            children[:] = []
+            continue
+        seen.add(real)
+        yield directory, children, names
+
+
 def _pick_member(bundle: zipfile.ZipFile) -> str | None:
     members = [m for m in bundle.namelist() if m.endswith(".pth")]
     ranked = sorted(members, key=lambda m: ("flare7kpp" not in m.lower(), not m.endswith(CHECKPOINT_NAME)))
@@ -428,7 +443,7 @@ def find_flare7kpp(input_root, cache_dir, skip=(), max_depth: int = 12) -> Path 
     root = Path(input_root)
     skip = {str(path) for path in skip}
     top = len(root.parts)
-    for directory, children, names in os.walk(root):
+    for directory, children, names in walk_input(root):
         here = Path(directory)
         if len(here.parts) - top >= max_depth:
             children[:] = []
@@ -509,7 +524,7 @@ def find_stage_checkpoint(input_root, cache_dir, prefer: str = "", skip=(), max_
     root, skip = Path(input_root), {str(path) for path in skip}
     files, archives = [], []
     top = len(root.parts)
-    for directory, children, names in os.walk(root):
+    for directory, children, names in walk_input(root):
         here = Path(directory)
         if len(here.parts) - top >= max_depth:
             children[:] = []
