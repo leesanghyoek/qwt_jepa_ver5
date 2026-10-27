@@ -12,6 +12,20 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p49_glint — p48_recon cho ảnh drone, khử tia lóe do nắng phản chiếu trên xe, không dùng LOL** (config
+`configs/kaggle_glint.yaml` → OUT `outputs/p49_glint`). Bằng p48 với `data.lowlight_pairs_fraction` 0, phần batch của
+LOL chuyển sang cặp drone (`data.scene_pairs_fraction` 0,25 → 0,375: phase 1 12/32, phase 2 3/8) và giai đoạn lóe đọc
+cặp drone nhiều hơn (`flare.kinds` composite 0,5 → 0,35, scene 0,2 → 0,35). Cặp drone là dataset
+`drone-glint-flare-640` (`wu-visdrone-composite.ipynb`, 5 000 cặp 640×640): 60% trên ảnh VisDrone ban ngày, một nửa
+lớp lóe là `glint` (1–6 tia sao nhỏ trên xe; ảnh đích chỉ giữ chấm phản chiếu 1–2 px).
+
+- **Yêu cầu** (người dùng, 27/10/2026): train bằng `drone-glint-flare-640` và các dữ liệu trước, không cần
+  `lowlight-pairs`. Ảnh của người dùng là ảnh drone ban ngày, tia sao do nắng phản chiếu trên xe.
+- Mọi hash khác p48 (đổi data và giai đoạn lóe): train lại phase 1, giai đoạn lóe (tiếp từ `flare/best.pt` của p46)
+  và phase 2. Không khoá mới nào: chỉ đổi giá trị các khoá đã có.
+- **Bằng chứng** (`tests/test_glint_run.py`): `test_p49_is_p48_without_lol_and_with_more_drone_pairs`,
+  `test_p49_validates_needs_no_lol_and_keeps_tartanair_in_every_batch`, `test_p49_hashes_differ_from_p48`.
+
 **p48_recon — p47_restore + phase 1 phải dựng lại ảnh sạch từ latent** (config `configs/kaggle_recon.yaml` → OUT
 `outputs/p48_recon`). Bằng p47 cộng ba khoá `phase1.ijepa_reconstruction_weight` (1,0), `_width` (64),
 `_detail_weight` (1,0). Thiếu khoá thì như cũ: hash của cả 42 config cũ giữ nguyên (đối chiếu với code ở 131b165).

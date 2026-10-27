@@ -1,0 +1,26 @@
+# p49_glint: p48_recon cho anh drone cua nguoi dung -- khu tia loe do nang phan chieu tren xe, KHONG dung LOL.
+#
+# Nguoi dung (27/10/2026): "chi dung data nay (drone-glint-flare-640) va cac data truoc, k can dung lowlight-pairs".
+# drone-glint-flare-640 (wu-visdrone-composite.ipynb, 5 000 cap 640x640): 60% tren anh VisDrone ban ngay, 50% lop
+# loe la 'glint' (1-6 tia sao nho tren xe, anh dich chi giu cham phan chieu 1-2 px), con lai Wu simulated/captured
+# va FlareX.
+#
+# So voi p48_recon:
+#   - bo cap anh toi that LOL (lowlight_pairs_fraction 0); phan batch cua no (1/8) chuyen sang cap drone:
+#     scene_pairs_fraction 0,25 -> 0,375 (phase 1: 12/32, phase 2: 3/8; TartanAir con 12/32 va 3/8);
+#   - giai doan loe (nhanh Uformer khu loe, dong bang o phase 2) doc cap drone nhieu hon: kinds.scene 0,2 -> 0,35,
+#     bot tu composite (loe Flare7K++ ghep len TartanAir) 0,5 -> 0,35.
+# Phase 1 giu nguyen cach B (I-JEPA + dung lai anh sach). Doi data nen TRAIN LAI phase 1, giai doan loe (tiep tu
+# flare/best.pt cua p46) va phase 2.
+extends: kaggle_recon.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p49_glint
+
+data:
+  scene_pairs_root: /kaggle/input/drone-glint-flare-640    # Cell 4 tim lai trong Input (ngoai hash)
+  scene_pairs_fraction: 0.375
+  lowlight_pairs_fraction: 0.0
+
+flare:
+  kinds: {composite: 0.35, pair: 0.15, plain: 0.15, scene: 0.35}
