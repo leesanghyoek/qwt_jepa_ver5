@@ -39,6 +39,8 @@ class PairedSample:
 
 FIELDS = tuple(PairedSample.__dataclass_fields__)
 SPLIT_RULES = ("hash", "per_environment")
+# train / valid / test share of the motion groups; data.split_ratios (p49) changes it, absent = this.
+DEFAULT_SPLIT_RATIOS = (0.8, 0.1, 0.1)
 # TartanAir V2 renders two environments twice, by day and by night, along the very
 # same camera paths: same difficulty, same Pxxx, identical poses. A scan of all 1122
 # V2 trajectories finds no other pair. "per_environment" keeps each such Pxxx in one
@@ -83,7 +85,7 @@ def _per_environment_splits(
 
 def assign_splits(
     trajectories: list[Trajectory],
-    ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
+    ratios: tuple[float, float, float] = DEFAULT_SPLIT_RATIOS,
     seed: int = 73128,
     rule: str = "hash",
 ) -> dict[str, str]:
@@ -278,7 +280,7 @@ def manifest_hash(samples: dict[str, list[PairedSample]], normalization: dict | 
 def build_manifest(
     root: str | Path,
     window: int = 128,
-    ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
+    ratios: tuple[float, float, float] = DEFAULT_SPLIT_RATIOS,
     seed: int = 73128,
     split_rule: str = "hash",
     workers: int = 16,
@@ -318,6 +320,7 @@ def build_manifest(
         "seed": seed,
         "split_unit": "environment/trajectory_id",
         "split_rule": split_rule,
+        "split_ratios": [float(value) for value in ratios],
         "samples_per_split": {key: len(value) for key, value in samples.items()},
         "trajectories_per_split": {
             split: sorted(item.key for item in trajectories if assignments[item.key] == split)

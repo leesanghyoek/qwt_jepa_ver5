@@ -347,6 +347,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Data split unit must be trajectory")
     if data.get("split_rule", "hash") not in ("hash", "per_environment"):
         raise ValueError("data.split_rule must be hash (a draw over all trajectories) or per_environment")
+    # p49: train / valid / test share of the TartanAir motion groups. Absent: 0.8 / 0.1 / 0.1 as before.
+    if "split_ratios" in data:
+        ratios = data["split_ratios"]
+        if (not isinstance(ratios, (list, tuple)) or len(ratios) != 3 or not all(_nonnegative_number(v) for v in ratios)
+                or not np.isclose(sum(ratios), 1.0) or ratios[0] <= 0 or ratios[1] <= 0 or ratios[2] <= 0):
+            raise ValueError("data.split_ratios must be [train, valid, test], each > 0, summing to 1")
     if data.get("minimum_trajectories_per_batch", 0) < 1:
         raise ValueError("minimum_trajectories_per_batch must be positive")
 
@@ -734,6 +740,8 @@ def _validate_flare_pairs(config: dict[str, Any]) -> None:
 
 SCENE_PAIR_KEYS = ("scene_pairs_root", "scene_pairs_fraction", "scene_pairs_short_side",
                    "scene_pairs_flare_probability")
+# p49, optional: absent = the index.csv split as before (train / valid, no test).
+SCENE_PAIR_OPTIONAL_KEYS = ("scene_pairs_holdout_fraction",)
 
 
 def _validate_scene_pairs(config: dict[str, Any]) -> None:
@@ -744,9 +752,14 @@ def _validate_scene_pairs(config: dict[str, Any]) -> None:
     a path, out of the hash like flare_pairs_root. FlareImage, scene pairs and minimum_trajectories_per_batch
     TartanAir samples must all fit each batch."""
     data = config["data"]
-    unknown = sorted(key for key in data if key.startswith("scene_pairs_") and key not in SCENE_PAIR_KEYS)
+    known = SCENE_PAIR_KEYS + SCENE_PAIR_OPTIONAL_KEYS
+    unknown = sorted(key for key in data if key.startswith("scene_pairs_") and key not in known)
     if unknown:
-        raise ValueError(f"data: unknown keys {unknown}; scene-pair keys are {list(SCENE_PAIR_KEYS)}")
+        raise ValueError(f"data: unknown keys {unknown}; scene-pair keys are {list(known)}")
+    if "scene_pairs_holdout_fraction" in data:
+        holdout = data["scene_pairs_holdout_fraction"]
+        if not _nonnegative_number(holdout) or not 0 < holdout <= 0.25:
+            raise ValueError("data.scene_pairs_holdout_fraction must be in (0, 0.25]: test and valid each keep that much")
     fraction = data.get("scene_pairs_fraction", 0.0)
     if not _nonnegative_number(fraction) or fraction > 0.5:
         raise ValueError("data.scene_pairs_fraction must be a number in [0, 0.5]")

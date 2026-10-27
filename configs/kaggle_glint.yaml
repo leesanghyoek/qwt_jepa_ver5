@@ -10,6 +10,13 @@
 #     scene_pairs_fraction 0,25 -> 0,375 (phase 1: 12/32, phase 2: 3/8; TartanAir con 12/32 va 3/8);
 #   - giai doan loe (nhanh Uformer khu loe, dong bang o phase 2) doc cap drone nhieu hon: kinds.scene 0,2 -> 0,35,
 #     bot tu composite (loe Flare7K++ ghep len TartanAir) 0,5 -> 0,35.
+#   - chia du lieu 90 / 5 / 5 (train / valid / test) o MOI nguon, nguoi dung (27/10/2026): "phan lon dung de train
+#     va chi 10% dung de kiem tra chat luong model". valid chon best.pt va in log validation; test chi cham diem cuoi.
+#       TartanAir: data.split_ratios (khoa moi; p48: 0,8 / 0,1 / 0,1, theo nhom chuyen dong) -> manifest moi;
+#       FlareImage: flare_pairs_holdout_fraction 0,1 -> 0,05 (valid va test moi ben 5%, theo nhom anh);
+#       cap drone: data.scene_pairs_holdout_fraction 0,05 (khoa moi; p48: train/val cua index.csv, ~16% val, khong
+#         co test): held-out chi lay tu phan val cua dataset, theo nhom anh nen, moi nguon (drone, Flickr) 5% + 5%;
+#       lop loe Flare7K++ cua giai doan loe: flare.lens.lens_flare_holdout_fraction 0,1 -> 0,05.
 # Phase 1 giu nguyen cach B (I-JEPA + dung lai anh sach). Doi data nen TRAIN LAI phase 1, giai doan loe (tiep tu
 # flare/best.pt cua p46) va phase 2.
 extends: kaggle_recon.yaml
@@ -18,9 +25,14 @@ runtime:
   output_dir: /kaggle/working/qwt_jepa_version3/outputs/p49_glint
 
 data:
+  split_ratios: [0.9, 0.05, 0.05]
+  flare_pairs_holdout_fraction: 0.05
   scene_pairs_root: /kaggle/input/drone-glint-flare-640    # Cell 4 tim lai trong Input (ngoai hash)
   scene_pairs_fraction: 0.375
+  scene_pairs_holdout_fraction: 0.05
   lowlight_pairs_fraction: 0.0
 
 flare:
   kinds: {composite: 0.35, pair: 0.15, plain: 0.15, scene: 0.35}
+  lens:
+    lens_flare_holdout_fraction: 0.05

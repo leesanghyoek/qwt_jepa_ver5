@@ -46,6 +46,7 @@ from .data import (
     write_manifest,
 )
 from .data.dataset import LOWLIGHT_DRAW_BASE, SCENE_DRAW_BASE, load_rgb
+from .data.manifest import DEFAULT_SPLIT_RATIOS
 from .corruptions.image import FRAME_KINDS, LOG_KINDS, brightness_stops, degradation_vector, frame_kind
 from .evaluation.flare_pairs import (
     evaluate_flare_pairs, evaluate_lowlight_pairs, evaluate_scene_pairs, flare_validation_dataset, flare_validation_text,
@@ -119,11 +120,22 @@ def _ddp_world(config: dict[str, Any], args: argparse.Namespace, device: torch.d
     return int(count)
 
 
+def split_ratios(config: dict[str, Any]) -> tuple[float, float, float]:
+    """p49 data.split_ratios: train / valid / test share of the TartanAir motion groups (absent: 0.8 / 0.1 / 0.1)."""
+    return tuple(float(value) for value in config["data"].get("split_ratios", DEFAULT_SPLIT_RATIOS))
+
+
 def _manifest(config: dict[str, Any], override: str | None):
     location = override or config["data"].get("manifest_dir")
     if not location:
         raise ValueError("Set data.manifest_dir in YAML or pass --manifest")
-    return read_manifest(location), str(Path(location).resolve())
+    manifest = read_manifest(location)
+    # A manifest written before data.split_ratios existed was split 0.8 / 0.1 / 0.1.
+    built = tuple(float(value) for value in manifest["meta"].get("split_ratios", DEFAULT_SPLIT_RATIOS))
+    if not np.allclose(built, split_ratios(config)):
+        raise ValueError(f"Manifest {location} was split {list(built)} but data.split_ratios is "
+                         f"{list(split_ratios(config))}: build a new manifest (build-manifest) for this config")
+    return manifest, str(Path(location).resolve())
 
 
 def _dataset(
@@ -203,7 +215,8 @@ def scene_pair_bank(config: dict[str, Any]) -> ScenePairBank | None:
     data = config["data"]
     if float(data.get("scene_pairs_fraction", 0.0)) <= 0:
         return None
-    return ScenePairBank(data["scene_pairs_root"], short_side=int(data["scene_pairs_short_side"]))
+    return ScenePairBank(data["scene_pairs_root"], short_side=int(data["scene_pairs_short_side"]),
+                         holdout_fraction=data.get("scene_pairs_holdout_fraction"))
 
 
 def flare_pair_bank(config: dict[str, Any]) -> FlarePairBank | None:
@@ -1035,7 +1048,7 @@ def command_build_manifest(args: argparse.Namespace) -> None:
     if not root:
         raise ValueError("Pass --data-root or set data.root")
     manifest = build_manifest(root, window=config["data"]["imu_window"], seed=config["data"]["corruption_seed"],
-                              split_rule=config["data"].get("split_rule", "hash"))
+                              split_rule=config["data"].get("split_rule", "hash"), ratios=split_ratios(config))
     write_manifest(manifest, args.output)
     print(json.dumps(manifest["meta"]["samples_per_split"], indent=2))
 

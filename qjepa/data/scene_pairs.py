@@ -9,7 +9,15 @@ loe Wu et al. (bong ma da lam sang) hoac FlareX tren anh sang tuyen tinh. Bo cuc
     <root>/input/<file>  cung khung, co loe
 
 Khac FlareImage, split da chia san trong index.csv (valid = anh VisDrone test-dev, khong chung chuoi voi train, ghep voi
-lop loe nhom valid), nen bank giu nguyen: ``train`` va ``valid``, khong co ``test``. Moi cap duoc thu nho MOT lan ve
+lop loe nhom valid), nen bank giu nguyen: ``train`` va ``valid``, khong co ``test``.
+
+p49 (``data.scene_pairs_holdout_fraction`` f): bank chia lai ``train`` / ``valid`` / ``test``, moi nguon anh nen (drone,
+Flickr) ~f cap cho test va ~f cho valid, con lai train. Held-out chi lay tu cap ``val`` cua index.csv (da tach anh nen
+va lop loe khoi train luc dung dataset), theo NHOM anh nen (cung chuoi VisDrone / cung anh Flickr di cung nhau). Nhom
+co cap ``train`` trong index.csv, hay co cap dung mot lop loe (cot flare) ma cap ``train`` cua index.csv cung dung,
+khong bao gio vao held-out. Test lay truoc, roi valid, cho toi khi moi ben du f cap cua nguon do. Cap ``val`` con thua
+ve train, tru cap dung CUNG lop loe voi mot cap held-out: bo han. Vay train khong thay anh nen hay lop loe nao cua
+valid/test, va moi cap ``train`` cua index.csv deu o lai train (wu-visdrone-composite da tach lop loe train/val). Thieu khoa: nhu cu. Moi cap duoc thu nho MOT lan ve
 canh ngan ``short_side`` (BOX tren anh sang tuyen tinh, chung ham voi FlareImage), cache tren dia.
 
 PairedCameraImuDataset doc moi cap theo hai cach (``data.scene_pairs_flare_probability``): anh SACH lam nguon (qua
@@ -32,6 +40,7 @@ from PIL import Image
 from .flare_pairs import shrink_pair
 
 SCENE_PAIR_SPLITS = ("train", "valid")
+HELDOUT_SPLITS = ("test", "valid")          # p49: thu tu lay nhom khi chia lai
 REQUIRED_COLUMNS = ("file", "split")
 # index.csv ghi "val"; trong repo split la "valid".
 _INDEX_SPLIT = {"train": "train", "val": "valid", "valid": "valid"}
@@ -47,7 +56,8 @@ class ScenePair:
 class ScenePairBank:
     """Cac cap cua mot thu muc dang index.csv + gt/ + input/, split doc tu index.csv, doc qua cache da thu nho."""
 
-    def __init__(self, root: str | Path, *, short_side: int, cache_dir: str | Path | None = None):
+    def __init__(self, root: str | Path, *, short_side: int, cache_dir: str | Path | None = None,
+                 holdout_fraction: float | None = None):
         self.root = Path(root)
         index = self.root / "index.csv"
         if not index.is_file() or not (self.root / "gt").is_dir() or not (self.root / "input").is_dir():
@@ -69,12 +79,24 @@ class ScenePairBank:
         absent = [name for name in names if name not in on_disk]
         if absent:
             raise FileNotFoundError(f"{len(absent)} cap trong index.csv thieu anh gt/ hoac input/: {absent[:3]}")
-        pairs = {split: [] for split in SCENE_PAIR_SPLITS}
+        assignment = {row["file"]: _INDEX_SPLIT[row["split"]] for row in rows}
+        self.holdout_fraction = None if holdout_fraction is None else float(holdout_fraction)
+        self.dropped = 0
+        if self.holdout_fraction is not None:
+            assignment = resplit(rows, self.holdout_fraction)
+            self.dropped = sum(split is None for split in assignment.values())
+        names_by_split = (*SCENE_PAIR_SPLITS, "test") if self.holdout_fraction is not None else SCENE_PAIR_SPLITS
+        pairs = {split: [] for split in names_by_split}
         for row in rows:
             source = (row.get("flare") or "").split("/")[0]
-            pairs[_INDEX_SPLIT[row["split"]]].append(ScenePair(row["file"], source, row.get("scene") or ""))
+            split = assignment[row["file"]]
+            if split is not None:
+                pairs[split].append(ScenePair(row["file"], source, row.get("scene") or ""))
         self.splits = {split: tuple(sorted(items, key=lambda pair: pair.name)) for split, items in pairs.items()}
-        empty = [split for split in SCENE_PAIR_SPLITS if not self.splits[split]]
+        empty = [split for split in names_by_split if not self.splits[split]]
+        if empty and self.holdout_fraction is not None:
+            raise ValueError(f"Cap canh o {self.root}: chia lai (scene_pairs_holdout_fraction) khong co cap nao cho {empty}: "
+                             "held-out chi lay nhom anh nen chi co cap val, khong dung lop loe nao cua cap train")
         if empty:
             raise ValueError(f"Cap canh o {self.root}: khong co cap nao cho {empty} ({len(rows)} cap)")
         self.short_side = int(short_side)
@@ -85,7 +107,7 @@ class ScenePairBank:
 
     def pairs(self, split: str) -> tuple[ScenePair, ...]:
         if split not in self.splits:
-            raise ValueError(f"Cap canh khong co split {split!r} (chi {list(SCENE_PAIR_SPLITS)})")
+            raise ValueError(f"Cap canh khong co split {split!r} (chi {list(self.splits)})")
         return self.splits[split]
 
     def load(self, pair: ScenePair) -> tuple[np.ndarray, np.ndarray]:
@@ -113,11 +135,58 @@ class ScenePairBank:
         return loaded[0], loaded[1]
 
     def describe(self) -> dict[str, object]:
-        return {"root": str(self.root), "index_sha256": self.digest, "short_side": self.short_side,
+        extra = ({"holdout_fraction": self.holdout_fraction, "dropped": self.dropped}
+                 if self.holdout_fraction is not None else {})
+        return {"root": str(self.root), "index_sha256": self.digest, "short_side": self.short_side, **extra,
                 "pairs": {split: len(pairs) for split, pairs in self.splits.items()},
                 "sources": {split: {source or "?": sum(pair.source == source for pair in pairs)
                                     for source in sorted({pair.source for pair in pairs})}
                             for split, pairs in self.splits.items()}}
+
+
+def scene_origin(row: dict[str, str]) -> str:
+    """Nguon anh nen cua mot cap: "flickr" (scene_split flickr24k cua wu-visdrone-composite) hay "drone"."""
+    return "flickr" if (row.get("scene_split") or "").lower().startswith("flickr") else "drone"
+
+
+def scene_group(row: dict[str, str]) -> str:
+    """Nhom anh nen: cung chuoi VisDrone (phan truoc dau _ cua ten khung, vd 0000011) hoac cung anh Flickr."""
+    origin, scene = scene_origin(row), row.get("scene") or row["file"]
+    return f"{origin}:{scene if origin == 'flickr' else scene.split('_')[0]}"
+
+
+def resplit(rows: list[dict[str, str]], fraction: float) -> dict[str, str | None]:
+    """{file: train / valid / test, hoac None = bo}: p49 data.scene_pairs_holdout_fraction (xem docstring cua module)."""
+    if not 0 < fraction <= 0.25:
+        raise ValueError("scene_pairs_holdout_fraction must be in (0, 0.25]")
+    split_of = {row["file"]: _INDEX_SPLIT[row["split"]] for row in rows}
+    groups: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        groups.setdefault(scene_group(row), []).append(row)
+    # Nhom nao co cap train trong index.csv, hay dung lop loe cua mot cap train, thi o train: model da thay no.
+    train_flares = {row.get("flare") for row in rows if split_of[row["file"]] == "train" and row.get("flare")}
+    candidates = {key: members for key, members in groups.items()
+                  if all(split_of[row["file"]] == "valid" and row.get("flare") not in train_flares for row in members)}
+    totals: dict[str, int] = {}
+    for row in rows:
+        totals[scene_origin(row)] = totals.get(scene_origin(row), 0) + 1
+    filled = {(origin, split): 0 for origin in totals for split in HELDOUT_SPLITS}
+    assignment: dict[str, str | None] = {row["file"]: "train" for row in rows}
+    order = sorted(candidates, key=lambda key: (hashlib.sha256(key.encode()).hexdigest(), key))
+    for key in order:
+        members = candidates[key]
+        origin = scene_origin(members[0])
+        target = next((split for split in HELDOUT_SPLITS if filled[(origin, split)] < fraction * totals[origin]),
+                      "train")
+        for row in members:
+            assignment[row["file"]] = target
+        if target != "train":
+            filled[(origin, target)] += len(members)
+    held_flares = {row.get("flare") for row in rows if assignment[row["file"]] != "train" and row.get("flare")}
+    for row in rows:
+        if split_of[row["file"]] == "valid" and assignment[row["file"]] == "train" and row.get("flare") in held_flares:
+            assignment[row["file"]] = None
+    return assignment
 
 
 def is_scene_pairs_root(path: Path, kind: str = "") -> bool:

@@ -22,9 +22,26 @@ lớp lóe là `glint` (1–6 tia sao nhỏ trên xe; ảnh đích chỉ giữ c
 - **Yêu cầu** (người dùng, 27/10/2026): train bằng `drone-glint-flare-640` và các dữ liệu trước, không cần
   `lowlight-pairs`. Ảnh của người dùng là ảnh drone ban ngày, tia sao do nắng phản chiếu trên xe.
 - Mọi hash khác p48 (đổi data và giai đoạn lóe): train lại phase 1, giai đoạn lóe (tiếp từ `flare/best.pt` của p46)
-  và phase 2. Không khoá mới nào: chỉ đổi giá trị các khoá đã có.
-- **Bằng chứng** (`tests/test_glint_run.py`): `test_p49_is_p48_without_lol_and_with_more_drone_pairs`,
-  `test_p49_validates_needs_no_lol_and_keeps_tartanair_in_every_batch`, `test_p49_hashes_differ_from_p48`.
+  và phase 2.
+- **Chia 90 / 5 / 5 ở mọi nguồn** (người dùng, 27/10/2026: "phần lớn dùng để train và chỉ 10% dùng để kiểm tra chất
+  lượng model"). valid chọn `best.pt` và in log validation; test chỉ chấm điểm cuối.
+  - TartanAir: khoá mới `data.split_ratios` [0,9; 0,05; 0,05] theo nhóm chuyển động (thiếu khoá: 0,8 / 0,1 / 0,1 như
+    cũ). Manifest ghi `split_ratios`; CLI từ chối manifest chia khác config (manifest cũ không có khoá đọc là
+    0,8 / 0,1 / 0,1), nên Cell 5 không dùng lại manifest 80/10/10 của run trước;
+  - FlareImage: `flare_pairs_holdout_fraction` 0,1 → 0,05;
+  - cặp drone: khoá mới `data.scene_pairs_holdout_fraction` 0,05 (`data/scene_pairs.py`: `resplit`). Thiếu khoá thì
+    như cũ: train/val của `index.csv`, khoảng 16% val, không có test. Có khoá: held-out chỉ lấy từ phần val của
+    dataset (đã tách ảnh nền và lớp lóe khỏi train lúc dựng), theo cả nhóm ảnh nền (cùng chuỗi VisDrone / cùng ảnh
+    Flickr); nhóm dùng lớp lóe của một cặp train không bao giờ vào held-out. Mỗi nguồn (drone, Flickr) lấy test trước
+    rồi valid, mỗi bên ≥ 5%. Mọi cặp train của `index.csv` ở lại train; phần val còn thừa về train, trừ cặp dùng chung
+    lớp lóe với một cặp held-out (bỏ hẳn). `tools/flare_image_test.py --bank visdrone` mặc định chấm `test`;
+  - lớp lóe Flare7K++ của giai đoạn lóe: `flare.lens.lens_flare_holdout_fraction` 0,1 → 0,05.
+- **Bằng chứng** (`tests/test_glint_run.py`): `test_p49_is_p48_without_lol_with_more_drone_pairs_and_a_90_5_5_split`,
+  `test_p49_validates_needs_no_lol_and_keeps_tartanair_in_every_batch`, `test_p49_hashes_differ_from_p48`,
+  `test_split_ratios_give_tartanair_90_5_5_and_the_default_is_as_before`,
+  `test_the_cli_refuses_a_manifest_split_otherwise`, `test_scene_pairs_holdout_splits_by_group_from_val_only`,
+  `test_held_out_groups_never_use_a_train_flare_layer`,
+  `test_scene_pair_bank_reads_the_key_and_bad_values_are_refused`.
 
 **p48_recon — p47_restore + phase 1 phải dựng lại ảnh sạch từ latent** (config `configs/kaggle_recon.yaml` → OUT
 `outputs/p48_recon`). Bằng p47 cộng ba khoá `phase1.ijepa_reconstruction_weight` (1,0), `_width` (64),

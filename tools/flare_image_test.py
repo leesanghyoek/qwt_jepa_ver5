@@ -57,7 +57,9 @@ from tools.small_test import with_flare_pairs  # noqa: E402
 
 MODES = {"chi_loe": "clean", "nhu_luc_train": "full"}
 FLARE_THRESHOLD = 0.05
-BANKS = {"flareimage": ("FlareImage", FLARE_PAIR_SPLITS, "test"), "visdrone": ("VisDrone", SCENE_PAIR_SPLITS, "valid")}
+# VisDrone: mac dinh test neu bank co (p49 data.scene_pairs_holdout_fraction), khong thi valid (xem duoi).
+BANKS = {"flareimage": ("FlareImage", FLARE_PAIR_SPLITS, "test"),
+         "visdrone": ("VisDrone", (*SCENE_PAIR_SPLITS, "test"), None)}
 SCENE_SHORT_SIDE = 384      # p46 data.scene_pairs_short_side, cho checkpoint khong train voi cap canh
 
 
@@ -151,10 +153,10 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument("--output", required=True, help="thu muc moi: hinh tung cap va report.json")
     parser.add_argument("--bank", default="flareimage", choices=tuple(BANKS))
     parser.add_argument("--split", choices=sorted(set(FLARE_PAIR_SPLITS) | set(SCENE_PAIR_SPLITS)),
-                        help="mac dinh: test (FlareImage) / valid (VisDrone, khong co test)")
+                        help="mac dinh: test (FlareImage; VisDrone khi checkpoint chia lai test, p49) / valid (VisDrone cu)")
     parser.add_argument("--count", type=int, default=8, help="so cap, rai deu qua cac nguon; 0 = moi cap cua split")
     parser.add_argument("--source", help="chi mot nguon (FlareImage: flare_removal, halo, flare7k_real, "
-                                         "flare7k_synthetic; VisDrone: flarex, captured, simulated)")
+                                         "flare7k_synthetic; VisDrone: glint, flarex, captured, simulated)")
     parser.add_argument("--names", help="ten cap, cach nhau dau phay (thay cho --count/--source)")
     parser.add_argument("--mode", default="chi_loe", choices=tuple(MODES))
     parser.add_argument("--frame", default="full", choices=("full", "crop"))
@@ -170,7 +172,7 @@ def main(argv: list[str] | None = None) -> dict:
     args = parser.parse_args(argv)
     label, splits, default_split = BANKS[args.bank]
     args.split = args.split or default_split
-    if args.split not in splits:
+    if args.split is not None and args.split not in splits:
         parser.error(f"{label} chi co split {list(splits)}")
     if args.count < 0:
         parser.error("--count >= 0")
@@ -186,7 +188,11 @@ def main(argv: list[str] | None = None) -> dict:
         root = args.scene_pairs_root or data.get("scene_pairs_root")
         if not root:
             raise ValueError("checkpoint nay khong train voi VisDrone: can --scene-pairs-root")
-        bank = ScenePairBank(root, short_side=int(data.get("scene_pairs_short_side", SCENE_SHORT_SIDE)))
+        bank = ScenePairBank(root, short_side=int(data.get("scene_pairs_short_side", SCENE_SHORT_SIDE)),
+                             holdout_fraction=data.get("scene_pairs_holdout_fraction"))
+        args.split = args.split or ("test" if "test" in bank.splits else "valid")
+        if args.split not in bank.splits:
+            parser.error(f"VisDrone cua checkpoint nay chi co split {list(bank.splits)}")
     manifest, _ = _manifest(config, args.manifest)
     # IMU muon tu TartanAir test; --imu khong: moi mau khong co IMU (cua so bang 0, nhu luc train p46).
     hosts = _dataset(config, manifest, "test", fixed_realization=True,
