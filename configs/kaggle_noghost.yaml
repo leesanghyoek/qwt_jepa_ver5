@@ -1,0 +1,22 @@
+# p50_noghost: p49_glint KHONG co bong ma do code ve trong anh ghep loe cua giai doan loe.
+#
+# Nguoi dung (29/10/2026, xem anh batch giai doan loe o Cell 5b): "anh loe trong ghost, luc giac trong giong nhu duoc
+# tao boi code va k tu nhien". Bong ma do la bo ve quang hoc cua repo (lens_flare._draw_optics), khong phai cua anh:
+#   - lens_wu_ghost_boost 6-20 (p45): MOI lop Wu co chuoi bong ma lon 6 canh (luc giac) / 40% tron, ban kinh 4-16%
+#     khung, kem vanh halo -> (0, 0): lop Wu khong co chuoi do;
+#   - lens_optics_probability 0,5: nua so lop loe (Flare7K++, Wu) them 2-8 bong ma nho theo khau, vanh halo, veil,
+#     bloom, bui -> 0: khong lop nao co.
+# Lop loe con lai deu tu anh: Flare7K Scattering_Flare/Compound_Flare (tia, quang; repo khong doc Reflective_Flare),
+# Flare-R (chup that), Wu captured/simulated (anh chup / mo phong song quang hoc, bong ma that cua ong kinh mo).
+#
+# `flare` khong vao hash phase 1: DUNG LAI phase 1 cua p49_glint (Cell 4: PHASE1_FROM). Train lai giai doan loe (tiep
+# tu flare/best.pt cua p49, khong co thi p46) va phase 2 (hash phase 2 chua `flare` vi split_flare_pretrained).
+extends: kaggle_glint.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p50_noghost
+
+flare:
+  lens:
+    lens_optics_probability: 0.0
+    lens_wu_ghost_boost: [0.0, 0.0]

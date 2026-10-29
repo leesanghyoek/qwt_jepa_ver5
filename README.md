@@ -12,6 +12,18 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p50_noghost — p49_glint không có bóng ma do code vẽ** (config `configs/kaggle_noghost.yaml` → OUT
+`outputs/p50_noghost`). Người dùng xem batch giai đoạn lóe ở Cell 5b (29/10/2026): bóng ma lục giác "trông giống như được
+tạo bởi code và không tự nhiên". Chúng đến từ bộ vẽ quang học của repo (`lens_flare._draw_optics`), không phải từ ảnh
+lóe: từ p45 mỗi lớp Wu có một chuỗi bóng ma lớn 6 cánh hoặc tròn kèm vành halo (`lens_wu_ghost_boost` 6–20), và một
+nửa số lớp lóe thêm 2–8 bóng ma nhỏ, halo, veil, bloom, bụi (`lens_optics_probability` 0,5). p50 đặt hai khoá về 0:
+lớp lóe chỉ còn ảnh (Flare7K `Scattering_Flare`, repo không đọc `Reflective_Flare`; Flare-R chụp thật; Wu). `flare`
+không vào hash phase 1, nên Cell 4 dùng lại phase 1 của p49 (`PHASE1_FROM`); giai đoạn lóe tiếp từ `flare/best.pt` của
+p49 (không có thì p46), phase 2 train lại. Output notebook gắn làm Input mà `/kaggle/input` không hiện file thì Cell 4
+tải `outputs/<run>/phase1/` và `flare/best.pt` qua Kaggle API (Secret `KAGGLE_API_TOKEN`). Bằng chứng:
+`tests/test_noghost_run.py` (p50 = p49 trừ hai khoá, cùng hash phase 1; không lớp nào của bốn nguồn có quang học, còn
+p49 vẽ chuỗi 6 cánh cho mọi lớp Wu).
+
 **p49_glint — p48_recon cho ảnh drone, khử tia lóe do nắng phản chiếu trên xe, không dùng LOL** (config
 `configs/kaggle_glint.yaml` → OUT `outputs/p49_glint`). Bằng p48 với `data.lowlight_pairs_fraction` 0, phần batch của
 LOL chuyển sang cặp drone (`data.scene_pairs_fraction` 0,25 → 0,375: phase 1 12/32, phase 2 3/8) và giai đoạn lóe đọc
