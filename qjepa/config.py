@@ -54,11 +54,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("Top-level YAML config must be a mapping")
     parent = raw.pop("extends", None)
-    if parent:
-        parent_path = (path.parent / parent).resolve()
-        config = _merge(load_config(parent_path), raw)
-    else:
-        config = raw
+    # p54: `section_sources: {section: other.yaml}` takes that whole section from another config, in place of the
+    # parent's (a merge would keep keys only the parent's recipe uses); this file's own keys still go on top.
+    sources = raw.pop("section_sources", None) or {}
+    if not isinstance(sources, dict) or not all(isinstance(value, str) for value in sources.values()):
+        raise ValueError("section_sources must map a section name to a config file")
+    config = load_config((path.parent / parent).resolve()) if parent else {}
+    for section, source in sources.items():
+        config[section] = copy.deepcopy(load_config((path.parent / source).resolve())[section])
+    config = _merge(config, raw)
     config["_config_path"] = str(path)
     validate_config(config)
     return config

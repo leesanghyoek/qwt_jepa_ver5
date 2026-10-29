@@ -12,33 +12,55 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
-**p54_mild — mức mờ và tối của p44 trên nhánh hiện tại** (config `configs/kaggle_mild.yaml` → OUT `outputs/p54_mild`;
-kế thừa p53_veil). Người dùng (30/10/2026): bản p44 làm nét và ổn hơn nhưng khử lóe không hơn; đồng ý giữ nhánh hiện
-tại (dữ liệu drone, giai đoạn lóe Uformer + lưới màn sáng, Restormer chỉ thêm chi tiết) và đưa mức nhiễu ảnh về như p44
-(ảnh drone chủ yếu chụp ban ngày, mờ nhẹ). Đo:
-- báo cáo train, trên valid của mỗi run, cạnh 4–16 px so với ảnh sạch, vào → ra: p44 0,50 → 0,90; p49 0,33 → 0,55. Vùng
-  lóe trên tập test (Cell 12d) hai bản ngang nhau (p44 21,24, p49 21,83 dB): cùng một Uformer;
+**p54_mild — mức mờ, tối và decoder phase 2 của p44 trên nhánh hiện tại** (config `configs/kaggle_mild.yaml` → OUT
+`outputs/p54_mild`; kế thừa p53_veil, mục `phase2` lấy nguyên của p46). Người dùng (30/10/2026): bản p44 làm nét và ổn
+hơn nhưng khử lóe không hơn; đồng ý giữ nhánh hiện tại (dữ liệu drone, phase 1 I-JEPA + tái tạo, giai đoạn lóe Uformer +
+lưới màn sáng) và đưa mức nhiễu ảnh về như p44, rồi "thay luôn decoder p54 bằng decoder p44". Đo:
+- báo cáo train, trên valid của mỗi run, cạnh 4–16 px so với ảnh sạch, vào → ra: p44 0,50 → 0,90; **p46** (nhiễu và
+  decoder của p44, thêm ảnh drone và 25% mẫu không IMU) 0,50 → 0,91; p49 0,33 → 0,55. Đường nét đúng chỗ: p46
+  0,65 → 0,90, p49 0,42 → 0,55. Gồ ghề thừa: p46 0,40 → 0,37, p49 0,34 → 0,56 (decoder p49 làm ảnh sần hơn đầu vào).
+  Độ nét tụt từ p47, run đổi **cùng lúc** mức nhiễu (mờ theo gyro, tối hơn) và decoder (`restore_rgb`, từ p51 là
+  Restormer). Vùng lóe trên tập test (Cell 12d) p44 21,24, p49 21,83 dB: cùng một Uformer;
 - ở máy, cùng 11 ảnh VisDrone/TartanAir × 60 lần rút (gyro giả định 0,3–2,5 rad/s): đường nét ảnh vào còn lại (trung vị)
   0,32 với nhiễu p53 → 0,66 với nhiễu p54; ảnh vừa tối vừa mờ 63% → 36% số mẫu, nét còn 0,19 → 0,45; ảnh nhẹ 0% → 14%.
-  Từ p47, mờ theo gyro tới 32 px và tối tới ×0,08 (khoảng 3,6 stop) làm mất phần đường nét không mạng nào lấy lại được.
 
-Chỉ đổi năm khoá `corruption.image`, mỗi khoá về giá trị của p44:
-- `motion_from_imu: false`: mờ không theo đường đi gyro nữa, quay về bất biến thiết kế (ảnh và IMU độc lập);
-  `motion_probability: 0.15`, `motion_length_px: [2, 4]`: mờ chuyển động thẳng ở 15% ảnh (không ghi thì mặc định 55%,
-  3–9 px). `exposure_seconds`, `exposure_follows_light`, `focal_length_px`, `motion_max_radius_px` chỉ dùng cho mờ gyro;
-- `defocus_sigma_px: [0.3, 0.95]` (p53 tới 2,0);
-- `exposure_gain: [0.5, 1.0]` (p53 tới 0,08). Các bước môi trường (sáng không đều, đèn, sương) giữ nguyên.
+Thay đổi:
+1. Năm khoá `corruption.image` về giá trị của p44:
+   - `motion_from_imu: false`: mờ không theo đường đi gyro nữa, quay về bất biến thiết kế (ảnh và IMU độc lập);
+     `motion_probability: 0.15`, `motion_length_px: [2, 4]`: mờ chuyển động thẳng ở 15% ảnh (không ghi thì mặc định
+     55%, 3–9 px). `exposure_seconds`, `exposure_follows_light`, `focal_length_px`, `motion_max_radius_px` chỉ dùng cho
+     mờ gyro;
+   - `defocus_sigma_px: [0.3, 0.95]` (p53 tới 2,0);
+   - `exposure_gain: [0.5, 1.0]` (p53 tới 0,08). Các bước môi trường (sáng không đều, đèn, sương) giữ nguyên.
+2. Phase 2 là **cả mục `phase2` của p46** (bằng của p44): `split_color_edge` với tầng tone (bản đồ stop, làm sáng lại,
+   lưới song phương, cổng tone), nhánh màu 128² cộng chi tiết màu 256², nhánh đường nét NAFNet trên kênh Y ở 256², CNN
+   làm nét và các loss nét. Khâu lóe của nó vẫn là Uformer đóng băng, nay có thêm lưới màn sáng của giai đoạn lóe
+   (p53). Khoá nạp config mới `section_sources: {phase2: kaggle_visdrone.yaml}` lấy nguyên một mục từ file khác thay
+   cho mục của cha (trộn thì các khoá `restore_*` của p51–p53 còn lại); không có khoá này thì nạp như cũ. Riêng batch
+   8 × 1 thay 4 × 2, vẫn 8 ảnh mỗi update: ở batch 4, ảnh drone 3/8 và FlareImage 1/4 chỉ còn 1 mẫu TartanAir, dưới
+   `minimum_trajectories_per_batch` 2. Mỗi GPU vì vậy giữ 4 ảnh thay vì 2. Ước lượng trên meta device (chỉ kích
+   thước, không cấp phát): tensor decoder giữ cho backward 4,4 GB ở 2 ảnh/GPU, 8,8 GB ở 4 ảnh/GPU (cận trên, fp32;
+   T4 khoảng 15 GB). Cell 4 đo tốc độ đúng 4 ảnh/GPU trước khi train.
 
-Đổi nhiễu nên train lại phase 1 (p49: 33 phút), giai đoạn lóe (chỉ lưới màn sáng, Uformer lấy từ run trước) và phase 2.
-PSNR không so thẳng được với p49–p53: đề bài dễ hơn. Bằng chứng: `tests/test_mild_run.py`:
-- p54 = p53 cộng năm khoá trên, mỗi khoá bằng giá trị p44; mọi hash đều đổi;
+Đổi nhiễu nên train lại phase 1 (p49: 33 phút), giai đoạn lóe (chỉ lưới màn sáng, Uformer lấy từ run trước) và phase 2
+(p46: 2,4 giờ cho 4 000 update). PSNR không so thẳng được với p49–p53: đề bài dễ hơn. Lỗi cũ của decoder p44 vẫn còn:
+ảnh gần sạch ra tệ hơn vào (500 update cuối, sai số L1 ảnh "nhẹ": p46 +122%, p49 +71%). Bằng chứng:
+`tests/test_mild_run.py`:
+- p54 = p53 cộng năm khoá trên (mỗi khoá bằng giá trị p44) và cả mục `phase2` của p44 với batch 8 × 1; không còn khoá
+  `restore_*`; mọi hash đều đổi;
+- phase 2 dựng đúng decoder của p44 (cùng mọi tham số dựng), lớp lóe Uformer cộng lưới màn sáng 16;
+- `section_sources` sai dạng bị từ chối;
 - camera của p54 là của p44: không mờ gyro, mờ thẳng ở khoảng 15% ảnh, 2–4 px, σ lệch tiêu cự ≤ 0,95 px, độ sáng ≥ ×0,5;
 - cùng ảnh và cùng lần rút, ảnh vào giữ nhiều đường nét hơn hẳn so với nhiễu p53 (ảnh tổng hợp: 0,40 → 0,72).
+
+`tests/test_veil_run.py` (p53) đã chạy train-flare với lưới rồi phase 2 bằng chính decoder `split_color_edge` (công
+thức smoke): phase 2 nạp lớp lóe, cả lưới, và không đổi nó.
 
 ![Kiến trúc p54_mild](docs/kien_truc_ijepa.svg)
 
 Hình vẽ lại cho p54 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_mild.yaml`): ô ảnh vào ghi "mờ
-nhẹ" thay cho "mờ (gyro)". Hình p52, p53 vẫn vẽ như trước.
+nhẹ" thay cho "mờ (gyro)"; phase 2 là decoder của p44 (tầng tone, nhánh màu, nhánh đường nét); ô ③ là Uformer + lưới.
+Hình p52, p53 vẫn vẽ như trước.
 
 **p53_veil — lưới màn sáng sau Uformer trong giai đoạn lóe** (config `configs/kaggle_veil.yaml` → OUT `outputs/p53_veil`;
 kế thừa p52_detail). Người dùng sau báo cáo p49 (30/10/2026): ảnh vẫn còn lỗi, lóe chưa khử tốt. Đo ở máy: giai đoạn

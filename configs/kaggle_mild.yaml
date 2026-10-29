@@ -1,24 +1,35 @@
-# p54_mild: p53_veil voi muc MO va TOI cua p44 (anh vao giu nhieu duong net hon); du lieu drone, giai doan loe
-# (Uformer + luoi man sang) va Restormer chi them chi tiet giu nguyen.
+# p54_mild: p53_veil voi muc MO va TOI cua p44 va DECODER PHASE 2 cua p44 (nhanh mau + nhanh duong net); du lieu
+# drone, phase 1 I-JEPA + tai tao va giai doan loe (Uformer + luoi man sang) giu nguyen.
 #
 # Nguoi dung (30/10/2026): ban p44 "co kha nang lam net, on hon" nhung khu loe khong hon; dong y giu nhanh hien tai va
-# dua muc nhieu ve nhu p44 (anh drone chu yeu chup ban ngay, mo nhe).
+# dua muc nhieu ve nhu p44 (anh drone chu yeu chup ban ngay, mo nhe); roi "thay luon decoder p54 bang decoder p44".
 # Do:
-#   - bao cao train, valid cua moi run: canh 4-16 px so voi anh sach, vao -> ra: p44 0,50 -> 0,90; p49 0,33 -> 0,55;
-#     vung loe test (Cell 12d) hai ban ngang nhau (p44 21,24, p49 21,83 dB): cung mot Uformer;
+#   - bao cao train, valid cua moi run: canh 4-16 px so voi anh sach, vao -> ra: p44 0,50 -> 0,90; p46 (nhieu va
+#     decoder cua p44, them anh drone) 0,50 -> 0,91; p49 0,33 -> 0,55. Do net tut tu p47, run doi CUNG LUC nhieu anh
+#     (mo gyro, toi hon) va decoder (restore_rgb, roi Restormer tu p51); p49 con lam anh san hon dau vao (go ghe thua
+#     0,34 -> 0,56; p46 0,40 -> 0,37). Vung loe test (Cell 12d): p44 21,24, p49 21,83 dB (cung mot Uformer);
 #   - o may (30/10/2026, 11 anh VisDrone/TartanAir x 60 lan rut, gyro gia dinh 0,3-2,5 rad/s): duong net anh vao con
 #     lai (trung vi) 0,32 voi nhieu p53 -> 0,66 voi nhieu nay; anh vua toi vua mo 63% -> 36% mau, net con 0,19 -> 0,45;
-#     anh nhe 0% -> 14%. Tu p47 mo gyro toi 32 px va toi toi x0,08: phan duong net da mat, khong mang nao lay lai duoc.
-# Thay doi (chi corruption.image, tro ve gia tri cua p44):
-#   - motion_from_imu false: mo khong theo gyro nua (anh va IMU doc lap, nhu bat bien thiet ke va loi nguoi dung);
-#     mo chuyen dong thang 15% anh, 2-4 px (khong ghi thi mac dinh 55%, 3-9 px);
-#   - defocus_sigma_px [0,3, 0,95] (p53 toi 2,0);
-#   - exposure_gain [0,5, 1,0] (p53 toi 0,08, ~3,6 stop); buoc moi truong (sang khong deu, den, suong) giu nguyen.
-#   exposure_seconds / exposure_follows_light / focal_length_px / motion_max_radius_px chi dung cho mo gyro: khong con
-#   tac dung.
+#     anh nhe 0% -> 14%.
+# Thay doi:
+#   (1) corruption.image ve gia tri cua p44:
+#       - motion_from_imu false: mo khong theo gyro nua (anh va IMU doc lap, nhu bat bien thiet ke va loi nguoi dung);
+#         mo chuyen dong thang 15% anh, 2-4 px (khong ghi thi mac dinh 55%, 3-9 px);
+#       - defocus_sigma_px [0,3, 0,95] (p53 toi 2,0);
+#       - exposure_gain [0,5, 1,0] (p53 toi 0,08, ~3,6 stop); buoc moi truong (sang khong deu, den, suong) giu nguyen.
+#       exposure_seconds / exposure_follows_light / focal_length_px / motion_max_radius_px chi dung cho mo gyro.
+#   (2) phase2: CA MUC cua p46 (= cua p44, section_sources: thay muc cua cha, khong tron, nen khong con khoa
+#       restore_*): split_color_edge, nhanh duong net NAFNet tren kenh Y 256^2, tang tone, loss net. Khau loe cua no la
+#       Uformer va them luoi man sang cua giai doan loe (p53). Rieng batch 8 x 1 thay 4 x 2 (van 8 anh moi update): o
+#       batch 4, ti le anh drone 3/8 va FlareImage 1/4 chi con 1 mau TartanAir (< minimum_trajectories_per_batch 2).
+#       Moi GPU giu 4 anh thay 2: uoc tren meta device (chi kich thuoc, khong cap phat), tensor decoder giu cho
+#       backward 4,4 GB o 2 anh/GPU (p46 chay duoc), 8,8 GB o 4 anh/GPU (can tren, fp32; T4 ~15 GB). Cell 4 do toc
+#       do dung 4 anh/GPU truoc khi train.
 # Doi nhieu nen TRAIN LAI phase 1 (p49: 33 phut), giai doan loe (chi luoi man sang, tiep tu Uformer cua run truoc) va
-# phase 2. PSNR khong so thang voi p49-p53: de bai de hon.
+# phase 2 (p46: 2,4 gio cho 4 000 update). PSNR khong so thang voi p49-p53: de bai de hon.
 extends: kaggle_veil.yaml
+section_sources:
+  phase2: kaggle_visdrone.yaml
 
 runtime:
   output_dir: /kaggle/working/qwt_jepa_version3/outputs/p54_mild
@@ -30,3 +41,8 @@ corruption:
     motion_length_px: [2, 4]
     defocus_sigma_px: [0.3, 0.95]
     exposure_gain: [0.5, 1.0]
+
+# phase 2 cua p44 (p46 giu nguyen), mot batch 8 thay 4 x 2 (xem (2) o tren)
+phase2:
+  batch_size: 8
+  gradient_accumulation: 1
