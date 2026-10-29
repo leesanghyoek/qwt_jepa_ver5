@@ -23,11 +23,17 @@ NONFINITE_LIMIT = 50            # so batch NaN/inf lien tiep thi train-flare dun
 
 def build_flare_layer(stage: dict[str, Any]) -> nn.Module:
     """The flare section's layer: p42's U-Net (flare.model absent or "unet"), or p44's Uformer of Flare7K++
-    (flare.model: uformer_flare7kpp; train-flare loads its released weights before the first update)."""
+    (flare.model: uformer_flare7kpp; train-flare loads its released weights before the first update).
+
+    p53: flare.veil_grid adds the veil grid after the Uformer; with flare.veil_only only the grid trains -- the Uformer
+    keeps the weights it starts from, needs no gradient and so no activations kept (no checkpointing either)."""
     if stage.get("model", "unet") == "uformer_flare7kpp":
         from ..models.uformer_flare import UformerFlareLayer
-        layer = UformerFlareLayer(float(stage["uformer_scale"]))
-        layer.net.set_checkpointing(True)          # fine-tuning at 512x512 on a 16 GB T4
+        layer = UformerFlareLayer(float(stage["uformer_scale"]), veil_grid=stage.get("veil_grid"))
+        if stage.get("veil_only", False):
+            layer.net.requires_grad_(False)
+        else:
+            layer.net.set_checkpointing(True)      # fine-tuning at 512x512 on a 16 GB T4
         return layer
     return FlareLayer(widths=tuple(int(w) for w in stage["widths"]), blocks=int(stage["blocks"]), uses_latent=False)
 
@@ -63,8 +69,9 @@ class FlareStageTrainer:
         self.stage = stage
         self.device = device
         self.amp = stage["precision"] == "amp_fp16" and device.type == "cuda"
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=float(stage["learning_rate"]),
-                                           weight_decay=float(stage["weight_decay"]))
+        # p53 flare.veil_only: the frozen Uformer's weights are not the optimizer's.
+        self.optimizer = torch.optim.AdamW([p for p in self.model.parameters() if p.requires_grad],
+                                           lr=float(stage["learning_rate"]), weight_decay=float(stage["weight_decay"]))
         self.scaler = _grad_scaler(self.amp)
         self.successful_updates = 0
         # Training forward; distribute() swaps in DDP. Validation always runs the bare model (rank 0 alone).

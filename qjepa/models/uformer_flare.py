@@ -352,14 +352,25 @@ class UformerFlareLayer(nn.Module):
     upsampled frame minus the Uformer's flare-free frame (light source kept) -- is brought back down (bilinear,
     antialiased) and taken off the input, so the frame keeps its own detail outside the flare. Always fp32, as the
     p42 layer: phase 2 runs it frozen under fp16 autocast.
+
+    p53 (``veil_grid``, flare.veil_grid): a bilateral grid of colour affines (decoders.BilateralGridTone, no latent)
+    then reads the frame the Uformer left -- at 4 x veil_grid px, with a global context of the whole frame, which the
+    Uformer's 8 x 8 windows never see -- and takes off the veil: the smooth glow and haze spread over a large part of the
+    frame (on p49's stage, 64% of the error left inside the flare of the FlareImage valid pairs is smoother than a
+    Gaussian of 8 px; 90% on HALO, where the Uformer takes off 29% of it). What the grid takes off is added to the
+    flare, so the contract is unchanged. Zero-initialised: the layer gives exactly the Uformer's answer until trained.
     """
 
     uses_latent = False
 
-    def __init__(self, scale: float = 2.0) -> None:
+    def __init__(self, scale: float = 2.0, veil_grid: int | None = None) -> None:
         super().__init__()
         self.scale = float(scale)
         self.net = Uformer()
+        self.veil = None
+        if veil_grid:
+            from .decoders import BilateralGridTone
+            self.veil = BilateralGridTone(0, size=int(veil_grid))
 
     def _deflare(self, tile: torch.Tensor) -> torch.Tensor:
         return self.net(tile)[:, :3]
@@ -378,6 +389,9 @@ class UformerFlareLayer(nn.Module):
             if (bh, bw) != (h, w):
                 flare = F.interpolate(flare, size=(h, w), mode="bilinear", align_corners=False,
                                       antialias=self.scale > 1)
+            if self.veil is not None:
+                deflared = (frame - flare).clamp(0.0, 1.0)
+                flare = flare + (deflared - self.veil(None, deflared))
         return image - flare.to(image.dtype), flare
 
 

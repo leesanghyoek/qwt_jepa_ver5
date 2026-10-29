@@ -1,0 +1,41 @@
+# p53_veil: p52_detail + LUOI MAN SANG sau Uformer o giai doan loe: Uformer xoa vet/tia nhung de lai man sang min.
+#
+# Nguoi dung (30/10/2026, sau bao cao p49): "anh van con bi loi, chua khu loe tot".
+# Do (30/10/2026, may local, giai doan loe cua p49 = flare/best.pt, 69 cap FlareImage valid, moi cap 2 o 256 (giua va
+# o nhieu loe nhat) tren anh canh ngan 384 nhu luc train, chi loe):
+#   - vung loe 13,48 -> 19,03 dB; ngoai loe 32,54 -> 30,83 (flare_removal 29,24 -> 25,85: lam hong ngoai loe);
+#   - 64% sai so con lai trong vung loe la phan MIN (muot hon Gauss 8 px); HALO 90%: Uformer chi bo 29% phan min cua
+#     loe HALO (anh render, khong lech); sua hoan hao phan min: 19,03 -> 25,50 dB (HALO 13,99 -> 24,19);
+#   - mot affine mau cho moi o 32 px (khop voi gt, tran tren): 19,03 -> 23,70 dB, ngoai loe 30,83 -> 31,11;
+#     mot affine cho ca o 256: chi 20,29 -> khong phai lech phoi sang toan anh, ma man sang THEO VUNG;
+#   - log p49: tren cap anh that luc train, loe con ~0,6-0,7 suot 3000 update (anh ghep 0,38 -> 0,25): Uformer khong
+#     hoc them duoc tu anh that; cua so 8x8 cua no khong thay ca khung anh.
+#   - thu luoi that o may (Uformer p49 dong bang, luoi hoc tren 44 cap valid, cham 25 cap con lai): HALO vung loe
+#     14,90 -> 16,60 dB, nguon khac gan nhu khong doi, ngoai loe -1,2 dB, ca anh gan hoa (-0,2); o day co ~20 lan du
+#     lieu va 15% anh khong loe. Khong hon buoc 0 thi best.pt giu Uformer cu (= p52).
+# Thay doi (chi giai doan loe; phase 2 = p52):
+#   - veil_grid 16: BilateralGridTone (HDRNet, khong latent) sau Uformer, doc ca khung o 64x64 + boi canh toan anh, 16x16
+#     o x 8 muc sang, moi o mot affine mau 3x4; khoi tao 0 = dung cau tra loi cua Uformer;
+#   - veil_only: chi train luoi (53 nghin tham so); Uformer giu trong so cua giai doan loe truoc (p52 = p51 = p50), khong
+#     can gradient -> nhanh hon train ca Uformer (p49: 108 phut);
+#   - nhieu cap anh that hon (pair 0,15 -> 0,30): man sang that nam o day (HALO, flare_removal);
+#   - lr 5e-4 cho luoi moi; 2000 update x 8 anh; chon best.pt theo valid, ke ca update 0 (= khong doi gi).
+# Phase 1 nhu p49 (cung hash); giai doan loe va phase 2 train lai.
+extends: kaggle_detail.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p53_veil
+
+flare:
+  veil_grid: 16
+  veil_only: true
+  batch_size: 8
+  max_successful_updates: 2000
+  learning_rate: 5.0e-4
+  minimum_lr: 1.0e-5
+  warmup_updates: 100
+  kinds:
+    composite: 0.3
+    pair: 0.3
+    plain: 0.15
+    scene: 0.25

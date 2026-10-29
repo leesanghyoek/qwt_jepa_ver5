@@ -12,6 +12,44 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p53_veil — lưới màn sáng sau Uformer trong giai đoạn lóe** (config `configs/kaggle_veil.yaml` → OUT `outputs/p53_veil`;
+kế thừa p52_detail). Người dùng sau báo cáo p49 (30/10/2026): ảnh vẫn còn lỗi, lóe chưa khử tốt. Đo ở máy: giai đoạn
+lóe của p49 (`flare/best.pt`, chỉ lóe), 69 cặp FlareImage valid, mỗi cặp 2 ô 256 (giữa ảnh và ô nhiều lóe nhất) trên
+ảnh cạnh ngắn 384 như lúc train:
+- vùng lóe 13,48 → 19,03 dB; ngoài lóe 32,54 → 30,83 (flare_removal 29,24 → 25,85: hỏng cả chỗ không có lóe);
+- 64% sai số còn lại trong vùng lóe là phần **mịn** (mượt hơn Gauss 8 px): màn sáng, quầng rộng quanh đèn. HALO (ảnh
+  render, không lệch): 90%, và Uformer chỉ bỏ được 29% phần mịn của lóe;
+- sửa hoàn hảo phần mịn: 19,03 → 25,50 dB (HALO 13,99 → 24,19); một affine màu cho mỗi ô 32 px (khớp với gt, mức trần):
+  23,70; một affine cho cả ô 256 chỉ 20,29, nên đây là màn sáng **theo vùng**, không phải lệch phơi sáng;
+- log p49: trên cặp ảnh thật lúc train, lóe còn khoảng 0,6–0,7 suốt 3 000 update (lóe ghép 0,38 → 0,25). Uformer không
+  học thêm được từ ảnh thật; cửa sổ 8×8 của nó không nhìn thấy cả khung.
+- thử ở máy với lưới thật (Uformer p49 đóng băng, lưới học trên 44 cặp valid, chấm trên 25 cặp còn lại): HALO vùng lóe
+  14,90 → 16,60 dB (79% ô tốt hơn), nhưng các nguồn khác gần như không đổi và ngoài vùng lóe tệ đi 1,2 dB, cả ảnh gần hoà
+  (−0,2 dB); thêm ảnh không lóe vào batch thì với chừng ấy cặp lưới học thành phép đồng nhất. Trên Kaggle lưới có khoảng
+  20 lần dữ liệu (915 cặp thật, lóe ghép, cặp drone, 15% ảnh không lóe); chưa đo được ở máy. Không hơn bước 0 thì
+  `best.pt` giữ đúng Uformer cũ.
+
+Thay đổi chỉ ở giai đoạn lóe, đều là khoá mới của mục `flare` (thiếu = như cũ):
+- `veil_grid: 16`: sau Uformer, `UformerFlareLayer` có thêm một lưới song phương (`BilateralGridTone`, không latent)
+  16×16 ô × 8 mức sáng. Lưới đọc ảnh Uformer để lại ở 64² cùng bối cảnh toàn khung, mỗi ô một affine màu 3×4; phần nó bỏ
+  đi cộng vào lớp lóe, nên hợp đồng của lớp không đổi. Khởi tạo 0: lớp cho đúng câu trả lời của Uformer.
+- `veil_only: true`: chỉ train lưới (53 nghìn tham số). Uformer giữ trọng số của giai đoạn lóe trước (`uformer_init:
+  stage`), không cần gradient. Lưới bắt đầu từ 0 khi `best.pt` cũ chưa có nó.
+- Lịch: 2 000 bước × 8 ảnh, lr 5e-4; cặp FlareImage thật 15% → 30% mẫu (lóe ghép 30%, cặp drone 25%, ảnh không lóe 15%).
+  `best.pt` vẫn chọn theo valid, kể cả bước 0, nên lưới không giúp thì giữ đúng Uformer cũ.
+
+Phase 2 như p52 (train lại vì hash giai đoạn lóe đổi); hash phase 1 bằng p49. Bằng chứng: `tests/test_veil_run.py`:
+- p53 = p52 cộng các khoá trên, với các hash như trên; phase 2 dựng lớp có lưới, p52 không; khoá sai bị từ chối;
+- lưới khởi tạo là phép đồng nhất: lớp cho đúng đầu ra của Uformer;
+- lưới học được cách bỏ một quầng sáng rộng ở vị trí bất kỳ (ảnh mới: còn dưới 40% sai số);
+- `train-flare` với `veil_only` khởi tạo lưới từ một giai đoạn chưa có nó, chỉ train lưới (trọng số Uformer giữ nguyên
+  từng bit), và phase 2 nạp cả lưới rồi không bao giờ đổi nó.
+
+![Kiến trúc p53_veil](docs/kien_truc_ijepa.svg)
+
+Hình vẽ lại cho p53 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_veil.yaml`): ô ③ là "Uformer +
+lưới", dải ④ vẽ Uformer đóng băng và lưới màn sáng, loss ghi "chỉ lưới". Hình p52 vẫn vẽ như trước.
+
 **p52_detail — Restormer chỉ thêm chi tiết, ánh sáng do khâu tone lo, train trên ô cắt 128²** (config
 `configs/kaggle_detail.yaml` → OUT `outputs/p52_detail`; kế thừa p51_restormer). Người dùng sau log p51 (29/10/2026):
 train 5 tiếng quá lâu, cần ảnh tốt hơn; IMU và ảnh không liên quan nên không khử mờ theo IMU; muốn cách hiệu quả mà
@@ -45,9 +83,7 @@ phase 2. Bằng chứng: `tests/test_detail_run.py`:
 
 `tools/decoder_speed_probe.py` đo Restormer và VGG trên ô cắt.
 
-![Kiến trúc p52_detail](docs/kien_truc_ijepa.svg)
-
-Hình vẽ lại cho p52 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_detail.yaml`):
+Hình của p52 (`tools/draw_architecture_ijepa.py <svg> configs/kaggle_detail.yaml`):
 - ô "Lưới ánh sáng" nằm sau tone;
 - ảnh ra = sáng + Δ, trong đó Δ chỉ là chi tiết (Δ − Gauss σ 4);
 - Restormer ghi "train ô 128²";

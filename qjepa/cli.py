@@ -1330,7 +1330,13 @@ def command_train_flare(args: argparse.Namespace) -> None:
             previous = load_checkpoint(checkpoint_path, "cpu")
             if previous.get("metadata", {}).get("phase") != "flare_stage":
                 raise ValueError(f"{checkpoint_path} is not a flare-stage checkpoint (flare.uformer_init: stage)")
-            trainer.model.load_state_dict(previous["model"], strict=True)
+            # p53 (flare.veil_grid): a stage without the grid starts it at zero (the identity), and only it.
+            missing, unexpected = trainer.model.load_state_dict(previous["model"], strict=False)
+            if unexpected or any(not key.startswith("veil.") for key in missing):
+                raise ValueError(f"{checkpoint_path} does not fit this flare layer: missing "
+                                 f"{[k for k in missing if not k.startswith('veil.')][:5]}, unexpected {unexpected[:5]}")
+            if missing:
+                print(f"Lưới màn sáng (flare.veil_grid) khởi tạo 0: {checkpoint_path} chưa có nó", flush=True)
             pretrained_sha256 = file_sha256(checkpoint_path)
             del previous
         else:
@@ -1396,7 +1402,9 @@ def command_train_flare(args: argparse.Namespace) -> None:
              for index in range(first_index + rank * share, first_index + (rank + 1) * share)]
     loader = DataLoader(train_set, batch_size=share, drop_last=True, sampler=order, **common)
     valid_loader = DataLoader(valid_set, batch_size=batch_size, **common)
-    print(f"flare stage | layer {sum(p.numel() for p in trainer.model.parameters()) / 1e6:.2f} M params | "
+    trained = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+    print(f"flare stage | layer {sum(p.numel() for p in trainer.model.parameters()) / 1e6:.2f} M params"
+          f" ({trained / 1e6:.2f} M train) | "
           f"Flare7K++ {lens_bank.describe()['samples']} | FlareImage valid {len(real)}"
           + (f" | VisDrone valid {len(scene_valid)}" if scene_valid is not None else "") + f" | device {device}"
           f" | {'fp16' if trainer.amp else 'fp32'} | {world} GPU, {share} ảnh mỗi GPU mỗi bước", flush=True)

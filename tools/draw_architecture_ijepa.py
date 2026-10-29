@@ -28,7 +28,8 @@ phase2.restore_net restormer (p51) that net is the released Restormer drawn leve
 layers (extra_embed, latent_in) marked. With phase1.ijepa_reconstruction_weight (p48) phase 1 gains the reconstruction
 head that redraws the clean frame from ZI. Band 4 counts drone pairs (flare.kinds scene, p46) when the config has them.
 p52 (phase2.restore_light_grid / restore_highpass_sigma / restore_train_crop): the light grid after the tone curve, the
-Restormer's answer cut to detail only, and the window it trains on.
+Restormer's answer cut to detail only, and the window it trains on. p53 (flare.veil_grid / veil_only): the veil grid
+after the Uformer, in the flare layer (3) and in band 4, where only the grid trains.
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
@@ -42,7 +43,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_detail.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_veil.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -63,6 +64,8 @@ FIELD = P2.get("motion_field") if RESTORE else None
 LIGHT_GRID = P2.get("restore_light_grid") if RESTORMER else None    # p52
 HIGHPASS = P2.get("restore_highpass_sigma") if RESTORMER else None
 CROP = P2.get("restore_train_crop") if RESTORMER else None
+VEIL = STAGE.get("veil_grid") if STAGE and UFORMER else None        # p53
+VEIL_ONLY = bool(STAGE.get("veil_only", False)) if VEIL else False
 SCENES = float(CONFIG["data"].get("scene_pairs_fraction", 0.0))
 NO_IMU = float(CONFIG["data"].get("imu_absent_probability", 0.0))
 RECON = float(P1.get("ijepa_reconstruction_weight", 0.0)) > 0    # p48
@@ -157,7 +160,7 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 # ---------------- header
 if RESTORE:
     text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA{" + tái tạo ảnh sạch" if RECON else ""} (ViT trên hệ số'
-         f' wavelet) · phase 2: {"khử lóe → " if FLARE else ""}'
+         f' wavelet) · phase 2: {"khử lóe + màn sáng → " if VEIL else "khử lóe → " if FLARE else ""}'
          f'{"tone + lưới ánh sáng → " if LIGHT_GRID else "tone cả ảnh → "}'
          f'{"Restormer train sẵn chỉ thêm chi tiết" if HIGHPASS else "Restormer train sẵn, fine-tune" if RESTORMER else "NAFNet RGB"}'
          f'{" · ④ giai đoạn lóe" if STAGE else ""}',
@@ -263,10 +266,18 @@ if FLARE:
     widths = '·'.join(str(w) for w in P2['split_flare_widths'])
     if UFORMER:
         scale = f'{float(P2["split_flare_scale"]):g}'.replace('.', ',')
-        fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE: Uformer', ['Flare7K++ · 20,5 M tham số',
-                                                                         f'ảnh ×{scale} → ô vuông 512² · fp32',
-                                                                         'ra: vào − lớp lóe · không đọc ZI'], title_size=14)
-        badge(566, 122, 'fine-tune ở ④ · best.pt · đóng băng', color='#C62828')
+        if VEIL:
+            fl = node(560, 32, 270, 84, 'flare', '③ KHỬ LÓE: Uformer + lưới', [f'Uformer Flare7K++ · ×{scale} → 512²',
+                                                                               f'lưới màn sáng {VEIL}×{VEIL} ô (mới)',
+                                                                               'ra: vào − lớp lóe · không đọc ZI'],
+                      title_size=14)
+            badge(566, 122, 'lưới train ở ④ · best.pt · đóng băng', color='#C62828')
+        else:
+            fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE: Uformer', ['Flare7K++ · 20,5 M tham số',
+                                                                             f'ảnh ×{scale} → ô vuông 512² · fp32',
+                                                                             'ra: vào − lớp lóe · không đọc ZI'],
+                      title_size=14)
+            badge(566, 122, 'fine-tune ở ④ · best.pt · đóng băng', color='#C62828')
     else:
         fl = node(560, 32, 270, 84, 'flare', '③ NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}] · {P2["split_flare_blocks"]} khối',
                                                                 'ra: vào − lớp lóe (RGB)',
@@ -575,7 +586,13 @@ if STAGE:
     widths = '·'.join(str(w) for w in STAGE['widths'])
     precision = 'fp16' if STAGE['precision'] == 'amp_fp16' else 'fp32'
     every = f'{STAGE["validation_every_updates"]:,}'.replace(',', ' ')
-    if UFORMER:
+    if VEIL:
+        s4 = node(615, BY + 40, 250, 96, 'flare', 'UFORMER → LƯỚI MÀN SÁNG', [
+            'Uformer: best.pt run trước' + (', đóng băng' if VEIL_ONLY else ''),
+            f'lưới song phương {VEIL}×{VEIL} ô × 8 mức (mới)',
+            'cả khung 64² + bối cảnh toàn ảnh',
+            'khởi tạo 0 → lớp lóe đoán'], title_size=15)
+    elif UFORMER:
         s4 = node(615, BY + 40, 250, 96, 'flare', 'UFORMER FLARE7K++', [
                                                                        'tiếp từ flare/best.pt run trước'
                                                                        if STAGE.get('uformer_init') == 'stage'
@@ -585,7 +602,8 @@ if STAGE:
     else:
         s4 = node(615, BY + 40, 250, 96, 'flare', 'NHÁNH KHỬ LÓE', [f'U-Net 256² [{widths}]', f'{STAGE["blocks"]} khối · không đọc ZI',
                                                                   '→ lớp lóe đoán'], title_size=15)
-    s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe' + (' (fine-tune)' if UFORMER else ''),
+    s5 = node(910, BY + 40, 250, 96, 'loss', 'Loss L1 lớp lóe' + (' (chỉ lưới)' if VEIL_ONLY else
+                                                                  ' (fine-tune)' if UFORMER else ''),
               ['đích: vào (trước hạt) − đích', f'{STAGE["max_successful_updates"]:,} bước × {STAGE["batch_size"]}'.replace(',', ' '),
                f'AdamW {STAGE["learning_rate"]:.0e} · {precision} · DDP 2 GPU'.replace('e-0', 'e-')], title_size=15)
     if STAGE.get('select_best', False):

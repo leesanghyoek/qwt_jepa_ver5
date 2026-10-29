@@ -1258,8 +1258,10 @@ def _validate_target_brighten(config: dict[str, Any]) -> None:
 # p46: kinds may add "scene" (a scene pair of data.scene_pairs_*, e.g. VisDrone: its flared photo -> its clean one);
 # background_scene_fraction: of the composites' backgrounds, the share that is a scene pair's clean photo (absent: 0,
 # drawn as before); select_on "real_composite_scene" adds the valid scene pairs' PSNR gain to real_and_composite's.
+# p53: veil_grid: a bilateral grid (that many cells a side) after the Uformer takes off the smooth veil it leaves
+# (UformerFlareLayer); veil_only: train only that grid, the Uformer kept as uformer_init gives it. Absent: no grid.
 FLARE_STAGE_OPTIONAL_KEYS = ("model", "uformer_scale", "select_best", "uformer_init", "select_on",
-                             "background_scene_fraction")
+                             "background_scene_fraction", "veil_grid", "veil_only")
 FLARE_SELECT_ON = ("real", "real_and_composite", "real_composite_scene")
 FLARE_MODELS = ("unet", "uformer_flare7kpp")
 
@@ -1317,6 +1319,19 @@ def _validate_flare_stage(config: dict[str, Any]) -> None:
         raise ValueError(f"flare.select_on must be one of {', '.join(FLARE_SELECT_ON)}")
     if "select_on" in stage and not stage.get("select_best", False):
         raise ValueError("flare.select_on chooses flare/best.pt: set flare.select_best: true")
+    veil = stage.get("veil_grid")
+    if veil is not None:
+        if isinstance(veil, bool) or not isinstance(veil, int) or veil < 2:
+            raise ValueError("flare.veil_grid must be an integer >= 2")
+        if stage.get("model", "unet") != "uformer_flare7kpp":
+            raise ValueError("flare.veil_grid follows the Uformer: set flare.model: uformer_flare7kpp")
+    if "veil_only" in stage:
+        if not isinstance(stage["veil_only"], bool):
+            raise ValueError("flare.veil_only must be true or false")
+        if stage["veil_only"] and veil is None:
+            raise ValueError("flare.veil_only trains only the veil grid: set flare.veil_grid")
+        if stage["veil_only"] and stage.get("uformer_init", "release") != "stage":
+            raise ValueError("flare.veil_only keeps the Uformer as a previous stage left it: set flare.uformer_init: stage")
     if not config["data"].get("lens_flare_root"):
         raise ValueError("flare needs data.lens_flare_root: the folder holding Flare7K/ and Flare-R/ (Kaggle "
                          "khoidb/flare7k)")
@@ -1635,6 +1650,7 @@ def build_decoders(
                 # Absent before p44: p42's U-Net layer.
                 "model": config["phase2"].get("split_flare_model", "unet"),
                 "scale": float(config["phase2"].get("split_flare_scale") or 1.0),
+                **_veil_settings(config),
             } if config["phase2"].get("split_flare_layer", False) else None,
             "refiner": {
                 "width": int(config["phase2"].get("split_edge_refiner_width", 32)),
@@ -1645,8 +1661,17 @@ def build_decoders(
     )
 
 
-def _flare_settings(phase2: dict[str, Any]) -> dict[str, Any] | None:
+def _veil_settings(config: dict[str, Any]) -> dict[str, Any]:
+    """p53: the flare stage's veil grid, when phase 2 loads that stage (absent otherwise: the layer as before)."""
+    veil = config.get("flare", {}).get("veil_grid")
+    if veil is None or not config["phase2"].get("split_flare_pretrained", False):
+        return {}
+    return {"veil_grid": int(veil)}
+
+
+def _flare_settings(config: dict[str, Any]) -> dict[str, Any] | None:
     """The flare layer of phase2.split_flare_* (None when split_flare_layer is off)."""
+    phase2 = config["phase2"]
     if not phase2.get("split_flare_layer", False):
         return None
     return {
@@ -1655,6 +1680,7 @@ def _flare_settings(phase2: dict[str, Any]) -> dict[str, Any] | None:
         "latent": bool(phase2.get("split_flare_latent", True)),
         "model": phase2.get("split_flare_model", "unet"),
         "scale": float(phase2.get("split_flare_scale") or 1.0),
+        **_veil_settings(config),
     }
 
 
@@ -1676,7 +1702,7 @@ def _restore_settings(config: dict[str, Any]) -> dict[str, Any]:
         "highpass_sigma": phase2.get("restore_highpass_sigma"),
         "light_grid": phase2.get("restore_light_grid"),
         "tone_width": int(phase2["restore_tone_width"]),
-        "flare": _flare_settings(phase2),
+        "flare": _flare_settings(config),
         "motion": None if field is None else {
             "seconds": float(field["seconds"]), "samples": int(field["samples"]), "focal_px": float(field["focal_px"]),
             "scale_px": float(field["scale_px"]), "max_px": float(field["max_px"]),

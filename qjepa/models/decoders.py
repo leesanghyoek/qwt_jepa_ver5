@@ -491,7 +491,8 @@ class BilateralGridTone(nn.Module):
         self.size, self.bins, self.exposure_stats = int(size), int(bins), bool(exposure_stats)
         self.splat = nn.Sequential(nn.Conv2d(6, width, 3, stride=2, padding=1), nn.ReLU(),
                                    nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU())
-        self.latent = nn.Conv2d(latent_channels, width, 1)
+        # p53 (flare.veil_grid): latent_channels 0 -> no latent (the flare stage has none).
+        self.latent = nn.Conv2d(latent_channels, width, 1) if latent_channels else None
         self.local = nn.Sequential(nn.Conv2d(width, width, 3, padding=1), nn.ReLU(),
                                    nn.Conv2d(width, width, 3, padding=1))
         self.global_features = nn.Sequential(nn.Conv2d(width, width, 3, stride=2, padding=1), nn.ReLU(),
@@ -510,7 +511,8 @@ class BilateralGridTone(nn.Module):
         """The grid [B, 12, bins, size, size] of (affine - identity)."""
         small = F.adaptive_avg_pool2d(image, 4 * self.size)
         x = self.splat(torch.cat((small, srgb_to_linear(small)), dim=1))
-        x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
+        if self.latent is not None:
+            x = x + F.interpolate(self.latent(latent), size=x.shape[-2:], mode="bilinear", align_corners=False)
         context = self.global_features(x).mean(dim=(2, 3))
         if self.exposure_stats:
             context = torch.cat((context, _exposure(image, standardize).to(context.dtype)), dim=1)
@@ -523,7 +525,8 @@ class BilateralGridTone(nn.Module):
 
     def forward(self, latent: torch.Tensor, image: torch.Tensor, standardize: nn.Module | None = None) -> torch.Tensor:
         with torch.autocast(device_type=image.device.type, enabled=False):
-            image, latent = image.float(), latent.float()
+            image = image.float()
+            latent = latent.float() if latent is not None else None
             grid = (self.coefficients(latent, image) if standardize is None
                     else self.coefficients(latent, image, standardize))
             sliced = slice_grid(grid, self.guide_map(image))
@@ -1236,7 +1239,7 @@ def build_flare_layer(latent_channels: int, flare: dict | None) -> nn.Module | N
         return None
     if flare.get("model", "unet") == "uformer_flare7kpp":
         from .uformer_flare import UformerFlareLayer
-        return UformerFlareLayer(float(flare["scale"]))
+        return UformerFlareLayer(float(flare["scale"]), veil_grid=flare.get("veil_grid"))
     return FlareLayer(latent_channels, tuple(flare["widths"]), int(flare["blocks"]),
                       uses_latent=bool(flare.get("latent", True)))
 
