@@ -33,6 +33,12 @@ cặp FlareImage tách khỏi cặp drone có lóe (p49 dừng với "3 mau Flar
 cộng khoá restormer với hash phase 1 của p49, phase 2 smoke nạp trọng số rồi fine-tune ở nhóm lr 0,25),
 `tests/test_small_test.py::test_only_flareimage_pairs_count_as_flareimage`.
 
+![Kiến trúc p51_restormer](docs/kien_truc_ijepa.svg)
+
+Hình vẽ lại cho p51 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_restormer.yaml`): phase 1 thêm đầu
+tái tạo ảnh sạch (p48); phase 2 vẽ theo `restore_rgb` (khử lóe → tone cả ảnh → Restormer từng cấp, đánh dấu
+`extra_embed` và `latent_in` khởi tạo 0, đường đi gyro); ④ đếm cả cặp drone. Config cũ (p45, p49) vẫn vẽ được.
+
 **p50_noghost — p49_glint không có bóng ma do code vẽ** (config `configs/kaggle_noghost.yaml` → OUT
 `outputs/p50_noghost`). Người dùng xem batch giai đoạn lóe ở Cell 5b (29/10/2026): bóng ma lục giác "trông giống như được
 tạo bởi code và không tự nhiên". Chúng đến từ bộ vẽ quang học của repo (`lens_flare._draw_optics`), không phải từ ảnh
@@ -316,8 +322,6 @@ và phase 2.
 `flare.select_on: real_and_composite`, `flare.lens.lens_flare_wu_{fraction,captured_fraction,gain}` và
 `flare.lens.lens_wu_{ghost_boost,ghost_radius,ghost_blades,ghost_round,min_flare}` (thiếu khoá: như cũ, hash p44 không đổi). Dùng lại phase 1 của p40 (cùng hash phase 1); train lại giai đoạn lóe, **fine-tune tiếp từ
 `flare/best.pt` của p44**, rồi phase 2.
-
-![Kiến trúc p45_sunflare](docs/kien_truc_ijepa.svg)
 
 - **Yêu cầu** (người dùng, 20/10/2026): "nếu ban ngày bạn chụp 1 tấm ảnh, ảnh có thể bị lóe sáng do mặt trời, cũng có thể
   bị ánh sáng hất vào ống kính, nó sẽ có các quầng và lục giác nên tôi cần xử lý nó"; với bài Wu et al.: "ảnh trong bài
