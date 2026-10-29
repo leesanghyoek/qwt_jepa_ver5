@@ -1574,6 +1574,18 @@ def command_train_phase2(args: argparse.Namespace) -> None:
     if config["phase2"].get("split_flare_pretrained", False) and not args.resume and not init_checkpoint:
         # p42: a fresh run starts from the flare stage's layer; resumed runs carry it in their checkpoint.
         _load_flare_stage(config, system, args.output)
+    if config["phase2"].get("restore_net") == "restormer" and not args.resume and not init_checkpoint:
+        # p51: a fresh run starts from the released Restormer (data.restormer_checkpoint, a path out of the hash; the
+        # file must carry the release's sha256); resumed runs carry the weights in their checkpoint.
+        from .models.restormer import load_restormer_into
+        weights = config["phase2"]["restore_restormer_weights"]
+        path = config["data"].get("restormer_checkpoint")
+        if not path or not Path(path).is_file():
+            raise ValueError(f"phase2.restore_net restormer starts from the released {weights}.pth: set "
+                             "data.restormer_checkpoint (the notebook's Cell 4 finds or downloads it)")
+        digest = load_restormer_into(system.decoders.image.net, path, weights)
+        if lead:
+            print(f"Restormer {weights} | sha256 {digest[:12]} | {path}", flush=True)
     standardizes = (config["phase2"].get("split_exposure_standardize", False)
                     or config["phase2"].get("image_decoder") == "restore_rgb")      # p47: its tone step always does
     if standardizes and not args.resume and not init_checkpoint:

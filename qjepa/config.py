@@ -849,6 +849,12 @@ def _validate_lowlight_pairs(config: dict[str, Any]) -> None:
 RESTORE_KEYS = ("restore_widths", "restore_enc_blocks", "restore_middle_blocks", "restore_dec_blocks",
                 "restore_fourier_levels", "restore_fourier_width", "restore_tone_width", "restore_tone_weight",
                 "restore_fft_weight")
+# p51 phase2.restore_net: nafnet (absent: as before) or restormer (the released Restormer, qjepa/models/restormer.py).
+# With restormer the NAFNet's shape keys must be null (the YAML merge cannot drop them) and these are written out.
+RESTORE_NETS = ("nafnet", "restormer")
+RESTORE_NAF_KEYS = ("restore_widths", "restore_enc_blocks", "restore_middle_blocks", "restore_dec_blocks",
+                    "restore_fourier_levels", "restore_fourier_width")
+RESTORE_RESTORMER_KEYS = ("restore_restormer_weights", "restore_pretrained_lr_scale")
 MOTION_FIELD_KEYS = ("seconds", "samples", "focal_px", "scale_px", "max_px")
 # The split decoder's stages: restore_rgb has none of them, so they must be off (or absent) beside it.
 SPLIT_ONLY_SWITCHES = ("split_light_branch", "split_tone_grid", "split_relight", "split_chroma_detail",
@@ -870,13 +876,22 @@ def _validate_restore(config: dict[str, Any]) -> None:
         raise ValueError("phase2.image_latent none is for the pixel decoders split_color_edge and restore_rgb")
     field = phase2.get("motion_field")
     restore = phase2.get("image_decoder") == "restore_rgb"
-    unknown = sorted(key for key in phase2 if key.startswith("restore_") and key not in RESTORE_KEYS)
+    known = (*RESTORE_KEYS, "restore_net", *RESTORE_RESTORMER_KEYS)
+    unknown = sorted(key for key in phase2 if key.startswith("restore_") and key not in known)
     if unknown:
-        raise ValueError(f"phase2: unknown keys {unknown}; restore_rgb's keys are {list(RESTORE_KEYS)}")
+        raise ValueError(f"phase2: unknown keys {unknown}; restore_rgb's keys are {list(known)}")
     if not restore:
-        if field is not None or any(key in phase2 for key in RESTORE_KEYS):
+        if field is not None or any(key in phase2 for key in known):
             raise ValueError("phase2.motion_field and phase2.restore_* belong to phase2.image_decoder restore_rgb")
         return
+    net = phase2.get("restore_net", "nafnet")
+    if net not in RESTORE_NETS:
+        raise ValueError(f"phase2.restore_net must be one of {RESTORE_NETS}")
+    if net == "restormer":
+        _validate_restormer(config)
+        return
+    if any(key in phase2 for key in RESTORE_RESTORMER_KEYS):
+        raise ValueError(f"phase2.{'/'.join(RESTORE_RESTORMER_KEYS)} belong to phase2.restore_net: restormer")
     missing = [key for key in RESTORE_KEYS if key not in phase2]
     if missing:
         raise ValueError(f"phase2.image_decoder restore_rgb needs every restore_* key written out; missing: "
@@ -901,6 +916,38 @@ def _validate_restore(config: dict[str, Any]) -> None:
             or any(isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= len(widths) - 2
                    for level in levels)):
         raise ValueError(f"phase2.restore_fourier_levels must list distinct levels in 0..{len(widths) - 2}")
+    _validate_restore_common(config)
+
+
+def _validate_restormer(config: dict[str, Any]) -> None:
+    """p51 phase2.restore_net restormer: the tone and loss keys and both Restormer keys written out, the NAFNet's shape
+    keys null or absent (they would describe a network that is not there)."""
+    from .models.restormer import RESTORMER_WEIGHTS
+    phase2 = config["phase2"]
+    missing = [key for key in ("restore_tone_width", "restore_tone_weight", "restore_fft_weight",
+                               *RESTORE_RESTORMER_KEYS) if key not in phase2]
+    if missing:
+        raise ValueError(f"phase2.restore_net restormer needs {', '.join(missing)} written out")
+    stale = [key for key in RESTORE_NAF_KEYS if phase2.get(key) is not None]
+    if stale:
+        raise ValueError(f"phase2.restore_net restormer has no NAFNet: set {', '.join(stale)} to null")
+    switched = [key for key in SPLIT_ONLY_SWITCHES if phase2.get(key, False)]
+    if switched:
+        raise ValueError(f"phase2.image_decoder restore_rgb has none of the split decoder's stages: turn off {switched}")
+    if phase2["restore_restormer_weights"] not in RESTORMER_WEIGHTS:
+        raise ValueError(f"phase2.restore_restormer_weights must be one of {sorted(RESTORMER_WEIGHTS)}")
+    scale = phase2["restore_pretrained_lr_scale"]
+    if not _nonnegative_number(scale) or not 0 < scale <= 1:
+        raise ValueError("phase2.restore_pretrained_lr_scale must be in (0, 1]")
+    if not _positive_int(phase2["restore_tone_width"]):
+        raise ValueError("phase2.restore_tone_width must be a positive integer")
+    _validate_restore_common(config)
+
+
+def _validate_restore_common(config: dict[str, Any]) -> None:
+    """restore_rgb's loss weights and phase2.motion_field, whichever network restores."""
+    phase2 = config["phase2"]
+    field = phase2.get("motion_field")
     for key in ("restore_tone_weight", "restore_fft_weight"):
         if not _nonnegative_number(phase2[key]):
             raise ValueError(f"phase2.{key} must be a nonnegative number")
@@ -1587,11 +1634,14 @@ def _restore_settings(config: dict[str, Any]) -> dict[str, Any]:
     """RestoreRGBDecoder's arguments from phase2.restore_*, split_flare_* and motion_field (p47)."""
     phase2 = config["phase2"]
     field = phase2.get("motion_field")
+    restormer = phase2.get("restore_net", "nafnet") == "restormer"
     return {
-        "naf": {"widths": tuple(phase2["restore_widths"]), "enc_blocks": tuple(phase2["restore_enc_blocks"]),
-                "middle_blocks": int(phase2["restore_middle_blocks"]), "dec_blocks": tuple(phase2["restore_dec_blocks"]),
-                "fourier_levels": tuple(phase2["restore_fourier_levels"]),
-                "fourier_width": int(phase2["restore_fourier_width"])},
+        "naf": None if restormer else {
+            "widths": tuple(phase2["restore_widths"]), "enc_blocks": tuple(phase2["restore_enc_blocks"]),
+            "middle_blocks": int(phase2["restore_middle_blocks"]), "dec_blocks": tuple(phase2["restore_dec_blocks"]),
+            "fourier_levels": tuple(phase2["restore_fourier_levels"]),
+            "fourier_width": int(phase2["restore_fourier_width"])},
+        "restormer": {"weights": str(phase2["restore_restormer_weights"])} if restormer else None,
         "tone_width": int(phase2["restore_tone_width"]),
         "flare": _flare_settings(phase2),
         "motion": None if field is None else {

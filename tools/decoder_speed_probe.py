@@ -101,8 +101,9 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
                 system.encode(image, imu, image_time, imu_times)
 
         def restore_net():
-            # p47 restore_rgb: the RGB NAFNet on the toned frame, the deflared frame and the gyro path's channels.
-            channels = decoder.net.intro.in_channels
+            # p47 restore_rgb: the RGB NAFNet (p51: the Restormer) on the toned frame, the deflared frame and the gyro
+            # path's channels.
+            channels = getattr(decoder.net, "in_channels", None) or decoder.net.intro.in_channels
             with autocast():
                 out = decoder.net(zi, torch.rand(batch, channels, height, width, device=device), base=image)
             out.float().square().mean().backward()

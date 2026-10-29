@@ -12,6 +12,27 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p51_restormer — khôi phục bằng Restormer đã train sẵn (khử mờ GoPro), fine-tune, thay NAFNet tự train** (config
+`configs/kaggle_restormer.yaml` → OUT `outputs/p51_restormer`; kế thừa p50_noghost). Người dùng sau p49 (29/10/2026):
+ảnh khôi phục có ô vuông mờ, chưa thật sự nét, muốn thay bằng model tốt hơn hoặc train sẵn rồi fine-tune; chọn Restormer
+khử mờ và giữ latent JEPA. Đo ở p49: ảnh chỉ bị mờ (Cell 11, D1) độ mạnh cạnh 0,139 → 0,167 (ảnh sạch 0,248), tức lấy
+lại khoảng 26% độ nét; latent sạch hoàn hảo thêm +0,1% đường nét (latent chỉ giúp độ sáng, băng LL); không IMU 21,63 so
+với 21,69 dB; ảnh tốt (test) 29,48 → 29,33, 42% tệ hơn đầu vào; ô vuông xám ở vùng tối (Cell 12b). NAFNet của p47–p49
+train từ đầu với khoảng 32 nghìn khung (4 000 update × 8), trong khi Restormer gốc train 300 nghìn bước. Restormer phát
+hành (`motion_deblurring.pth`, MIT, GitHub release v1.0), **chưa fine-tune**, trên ảnh VisDrone mờ chuyển động 5–15 px:
+27,3/25,2/24,5 → 31,3/30,5/29,5 dB; ảnh nét đi qua ở 49 dB (đo ở máy). `phase2.restore_net: restormer` (khoá mới,
+thiếu = NAFNet như cũ; các khoá hình dạng NAFNet đặt `null`): Uformer khử lóe (đóng băng) → tone cả ảnh → Restormer
+(`qjepa/models/restormer.py`, port với tên tham số gốc: cùng đầu ra với file gốc tới 1e-5). Ảnh không lóe và đường đi
+gyro vào qua `extra_embed`, ZI vào tầng đáy (1/8 khung, phóng song tuyến) qua `latent_in`; cả hai khởi tạo 0, nên ở
+update 0 đầu ra là Restormer phát hành trên ảnh không lóe. `restore_pretrained_lr_scale` 0,25: Restormer fine-tune ở
+7,5e-5, các lớp mới ở 3e-4. Train giữ đầu vào mỗi khối và tính lại ở lượt lùi (activation checkpointing) cho vừa T4.
+Trọng số: `data.restormer_checkpoint` (đường dẫn, ngoài hash; Cell 4 tìm trong Input hoặc tải từ GitHub, kiểm sha256).
+Hash phase 1 bằng p49, hash giai đoạn lóe bằng p50: chỉ train lại phase 2. Kèm sửa Cell 12c: `tools/small_test.py` đếm
+cặp FlareImage tách khỏi cặp drone có lóe (p49 dừng với "3 mau FlareImage, config doi 2"). Bằng chứng:
+`tests/test_restormer.py` (tên và số tham số của bản phát hành, lớp khởi tạo 0, bộ nạp chỉ nhận đúng sha256, p51 = p50
+cộng khoá restormer với hash phase 1 của p49, phase 2 smoke nạp trọng số rồi fine-tune ở nhóm lr 0,25),
+`tests/test_small_test.py::test_only_flareimage_pairs_count_as_flareimage`.
+
 **p50_noghost — p49_glint không có bóng ma do code vẽ** (config `configs/kaggle_noghost.yaml` → OUT
 `outputs/p50_noghost`). Người dùng xem batch giai đoạn lóe ở Cell 5b (29/10/2026): bóng ma lục giác "trông giống như được
 tạo bởi code và không tự nhiên". Chúng đến từ bộ vẽ quang học của repo (`lens_flare._draw_optics`), không phải từ ảnh

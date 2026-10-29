@@ -113,6 +113,14 @@ class Phase2Trainer:
             held = {id(parameter) for parameter in gate.parameters()}
             groups = [{"params": [p for p in self.parameters if id(p) not in held]},
                       {"params": list(gate.parameters()), "lr_scale": float(self.phase["split_tone_gate_lr_scale"])}]
+        pretrained = getattr(getattr(self.system.decoders.image, "net", None), "pretrained_parameters", None)
+        if "restore_pretrained_lr_scale" in self.phase and pretrained is not None:
+            # p51: the released Restormer fine-tunes at a fraction of the rate of the layers that start from zero (its
+            # two input layers, the tone step, the IMU decoder). Absent: one group, as before.
+            held = {id(parameter) for parameter in pretrained()}
+            groups = [{"params": [p for p in self.parameters if id(p) not in held]},
+                      {"params": [p for p in self.parameters if id(p) in held],
+                       "lr_scale": float(self.phase["restore_pretrained_lr_scale"])}]
         self.optimizer = torch.optim.AdamW(
             groups,
             lr=self.phase["learning_rate"],

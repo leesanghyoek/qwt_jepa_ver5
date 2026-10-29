@@ -4,8 +4,9 @@ Pins: the TartanAir part spreads over every test trajectory (or over evenly spac
 centred in equal stretches of each, deterministically; the plot picks are half FlareImage, half TartanAir; without a
 checkpoint the tool only writes the selection file (TartanAir test frames and FlareImage test pairs, none from
 train or valid), names each sample by the id the dataset gives it and reads the same file back; with a phase-2
-checkpoint it scores the CLI's own training microbatches -- each holding the FlareImage pairs the config asks for --
-and every sample of the file, the same numbers on a second run, and refuses a file that no longer matches.
+checkpoint it scores the CLI's own training microbatches -- each holding the FlareImage pairs the config asks for,
+counted apart from flared drone pairs and dark pairs that also carry flare_pair -- and every sample of the file, the
+same numbers on a second run, and refuses a file that no longer matches.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import torch
 from qjepa.cli import _dataset, _manifest, flare_pair_bank
 from qjepa.data.flare_pairs import FlarePairBank
 from test_flare_pairs import SHORT_SIDE, _smoke, _train_tiny
-from tools.small_test import main, pick, spread
+from tools.small_test import main, pair_kind, pick, spread
 
 
 def _samples(lengths):
@@ -124,3 +125,12 @@ def test_the_selection_file_holds_unseen_samples_and_the_tool_scores_a_training_
     stale.write_text(selection.read_text().replace(rows[0]["sample_id"], "Env__Data_easy__P999__000000"))
     with pytest.raises(ValueError, match="khong con khop"):
         main(["--config", str(config_path), "--manifest", str(manifest_dir), "--selection", str(stale)])
+
+
+def test_only_flareimage_pairs_count_as_flareimage():
+    # p49 on Kaggle: a flared drone pair also carries flare_pair, and Cell 12c stopped with "3 mau FlareImage, config
+    # doi 2". Drone pairs (source scene/...) and dark pairs (lowlight/...) are their own kinds.
+    assert pair_kind(None) == "tartanair"
+    assert pair_kind({"source": "flare_removal", "clear": True}) == "flareimage"
+    assert pair_kind({"source": "scene/glint", "clear": True}) == "scene"
+    assert pair_kind({"source": "lowlight/lol", "clear": True, "lowlight": True}) == "lowlight"

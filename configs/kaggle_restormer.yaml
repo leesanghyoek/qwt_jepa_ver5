@@ -1,0 +1,36 @@
+# p51_restormer: p50_noghost voi mang khoi phuc la Restormer DA TRAIN SAN (khu mo GoPro), fine-tune, thay NAFNet tu train.
+#
+# Nguoi dung (29/10/2026, sau p49): "anh khoi phuc tu tao 1 vai o vuong mo o 1 so vung, anh chua that su net ... co the
+# xoa no thay bang 1 model khac tot hon hoac train san de finetune"; chon Restormer khu mo va giu latent JEPA.
+# Do o p49 (Cell 11 / 12):
+#   - anh chi bi mo (D1 blur_only): do manh canh 0,139 -> 0,167, anh sach 0,248: lay lai ~26% net da mat;
+#   - latent sach hoan hao: duong net +0,1% -- latent chi giup do sang (bang LL), khong giup lam net;
+#   - khong IMU 21,63 vs co IMU 21,69 dB; anh tot (test) 29,48 -> 29,33, 42% te hon vao;
+#   - o vuong xam o vung toi (Cell 12b): NAFNet doc ZI o tang 16x16 roi PixelShuffle len.
+# NAFNet tu train chi thay ~32 000 khung (4 000 update x 8); mang khu mo cong bo train 300 000 buoc. Restormer phat
+# hanh (motion_deblurring.pth, MIT) tren anh VisDrone mo chuyen dong 5-15 px, chua fine-tune: +4 den +5 dB, anh net
+# di qua 49 dB (do o may 29/10/2026). Nhanh khu loe (Uformer phat hanh + fine-tune) da lam tot theo dung cach nay.
+#
+# phase2.restore_net: restormer (khoa moi; thieu = NAFNet nhu cu): Uformer khu loe (dong bang) -> tone ca anh ->
+# Restormer phat hanh, anh khong loe va duong di gyro vao qua lop khoi tao 0, ZI vao tang day (1/8 khung) qua conv
+# 1x1 khoi tao 0, phong to song tuyen (khong con buoc 16 px). Update 0: dau ra = Restormer phat hanh tren anh khong loe.
+# restore_pretrained_lr_scale 0,25: Restormer fine-tune o 0,25 x learning_rate (7,5e-5), cac lop moi o 3e-4.
+# Trong so: data.restormer_checkpoint (duong dan, ngoai hash; Cell 4 tim trong Input hoac tai tu GitHub, kiem sha256).
+#
+# Phase 1 va giai doan loe bang p50 (cung hash): DUNG LAI phase 1 cua p49, giai doan loe cua p50 neu da chay (khong
+# thi train, tiep tu best.pt cua p49). Chi train lai phase 2.
+extends: kaggle_noghost.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p51_restormer
+
+phase2:
+  restore_net: restormer
+  restore_restormer_weights: motion_deblurring
+  restore_pretrained_lr_scale: 0.25
+  restore_widths: null
+  restore_enc_blocks: null
+  restore_middle_blocks: null
+  restore_dec_blocks: null
+  restore_fourier_levels: null
+  restore_fourier_width: null

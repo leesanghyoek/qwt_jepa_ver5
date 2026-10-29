@@ -196,7 +196,7 @@ def score(batch, image, imu) -> list[dict[str, object]]:
         corruption = batch["corruption"][k]
         pair = corruption["image"].get("flare_pair")
         rows.append({
-            "sample_id": sample_id, "kind": "flareimage" if pair else "tartanair",
+            "sample_id": sample_id, "kind": pair_kind(pair),
             "source": pair["source"] if pair else batch["trajectory_key"][k],
             "frame_kind": frame_kind(corruption["image"]), "blur": blur_text(corruption["image"]),
             "imu_donor": corruption.get("imu_donor"),
@@ -222,6 +222,15 @@ def summarize(rows: list[dict[str, object]]) -> dict[str, float]:
             "better_fraction": float((values["psnr_out"] > values["psnr_in"]).mean())}
 
 
+def pair_kind(pair) -> str:
+    """Loai mau tu thong tin cap cua no: FlareImage, cap drone (scene/..., p46+), cap anh toi (lowlight/..., p47),
+    khong co cap: khung TartanAir (hay cap drone sach, dich = dau vao)."""
+    if not pair:
+        return "tartanair"
+    source = str(pair.get("source", ""))
+    return "scene" if source.startswith("scene/") else "lowlight" if source.startswith("lowlight/") else "flareimage"
+
+
 def groups(rows) -> list[tuple[str, list[dict[str, object]]]]:
     tartan = [row for row in rows if row["kind"] == "tartanair"]
     flare = [row for row in rows if row["kind"] == "flareimage"]
@@ -231,12 +240,16 @@ def groups(rows) -> list[tuple[str, list[dict[str, object]]]]:
     found += [("FlareImage", flare)]
     found += [(f"  FlareImage · {source}", [row for row in flare if row["source"] == source])
               for source in sorted({row["source"] for row in flare})]
+    found += [("Cặp drone", [row for row in rows if row["kind"] == "scene"]),
+              ("Cặp ảnh tối", [row for row in rows if row["kind"] == "lowlight"])]
     return [(name, members) for name, members in found if members]
 
 
 def short(row) -> str:
     if row["kind"] == "flareimage":
         return f"FlareImage {row['source']}"
+    if row["kind"] in ("scene", "lowlight"):
+        return str(row["source"])
     environment, _, trajectory = str(row["source"]).partition("/")
     return f"{environment}/{trajectory.rpartition('/')[2]}"
 
@@ -423,7 +436,8 @@ def main(argv: list[str] | None = None) -> None:
     train_rows, train_tensors = [], []
     for number in range(microbatches):
         batch = next(stream)
-        found = sum(bool(corruption["image"].get("flare_pair")) for corruption in batch["corruption"])
+        # Chi cap FlareImage: cap drone co loe va cap anh toi cung mang flare_pair (p49 tren Kaggle: 3 thay vi 2).
+        found = sum(pair_kind(corruption["image"].get("flare_pair")) == "flareimage" for corruption in batch["corruption"])
         if found != expected:
             raise AssertionError(f"microbatch {number}: {found} mau FlareImage, config doi {expected}")
         image, imu = restore(forward, batch, device)

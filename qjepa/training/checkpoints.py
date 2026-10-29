@@ -22,7 +22,7 @@ def configuration_hash(config: dict[str, Any], phase: str) -> str:
         for key, value in config["data"].items()
         if key not in {"root", "manifest_dir", "num_workers", "pin_memory", "halo_root", "flare_pairs_root",
                        "lens_flare_root", "uformer_checkpoint", "wu_flare_root", "scene_pairs_root",
-                       "lowlight_pairs_root"}
+                       "lowlight_pairs_root", "restormer_checkpoint"}
     }
     contract: dict[str, Any] = {
         "pipeline_version": config["pipeline_version"],

@@ -1258,13 +1258,17 @@ class RestoreRGBDecoder(nn.Module):
     luminance edges, tone grid, stop map, tone gate, chroma detail and edge refiner: eleven parts, six of them with a
     loss of their own pulling against the image's, and up to p46 the frames with little wrong ('nhe', 'mo') came out
     worse than they went in (README p44).
+
+    p51 (phase2.restore_net: restormer): ``net`` is the released Restormer (qjepa/models/restormer.py) on the toned
+    frame, the other inputs and ZI through its zero-initialised layers; at update 0 the output is the released
+    Restormer's answer on the frame without its flare (the train-phase2 CLI loads its weights in a fresh run).
     """
 
     tone_gate = None          # Phase2Trainer and the calibration look for the split decoder's gate
     uses_stages = False
 
-    def __init__(self, latent_channels: int = 128, *, naf: dict, tone_width: int = 32, flare: dict | None = None,
-                 motion: dict | None = None) -> None:
+    def __init__(self, latent_channels: int = 128, *, naf: dict | None = None, tone_width: int = 32,
+                 flare: dict | None = None, motion: dict | None = None, restormer: dict | None = None) -> None:
         super().__init__()
         self.flare = build_flare_layer(latent_channels, flare)
         self.exposure_norm = FeatureStandardizer(EXPOSURE_FEATURES)
@@ -1272,9 +1276,13 @@ class RestoreRGBDecoder(nn.Module):
         from .motion_field import GyroBlurField
         self.motion = GyroBlurField(**motion) if motion else None
         inputs = 6 + (self.motion.channels if self.motion is not None else 0)
-        self.net = NAFNetBranch(inputs, 3, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
-                                int(naf["middle_blocks"]), tuple(naf["dec_blocks"]), (),
-                                tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)))
+        if restormer is not None:
+            from .restormer import RestormerNet
+            self.net = RestormerNet(inputs, latent_channels)
+        else:
+            self.net = NAFNetBranch(inputs, 3, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
+                                    int(naf["middle_blocks"]), tuple(naf["dec_blocks"]), (),
+                                    tuple(naf.get("fourier_levels", ())), int(naf.get("fourier_width", 16)))
 
     def _deflare(self, latent: torch.Tensor, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.flare is None:
