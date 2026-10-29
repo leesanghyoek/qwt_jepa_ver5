@@ -141,14 +141,16 @@ class RestormerNet(nn.Module):
     Returns ``base`` (default: channels 0-2) plus the network's answer, as the original returns input + answer.
 
     Training holds only each block's input and recomputes the block in the backward pass (activation checkpointing):
-    on a T4 the full Restormer at 256 x 256 needs about 4 GB per frame otherwise."""
+    on a T4 the full Restormer at 256 x 256 needs about 4 GB per frame otherwise. ``checkpointing`` False (p52, which
+    trains on 128 x 128 crops, a quarter of that) skips the recompute: about a quarter of the training step."""
 
     def __init__(self, in_channels: int, latent_channels: int, *, dim: int = 48, blocks=(4, 6, 6, 8),
-                 refinement: int = 4, heads=(1, 2, 4, 8), expansion: float = 2.66) -> None:
+                 refinement: int = 4, heads=(1, 2, 4, 8), expansion: float = 2.66, checkpointing: bool = True) -> None:
         super().__init__()
         if in_channels < 3:
             raise ValueError("RestormerNet restores an RGB frame: in_channels >= 3")
         self.in_channels = int(in_channels)
+        self.checkpointing = bool(checkpointing)
 
         def level(width: int, count: int, head: int) -> nn.Sequential:
             return nn.Sequential(*[TransformerBlock(width, head, expansion) for _ in range(count)])
@@ -185,7 +187,7 @@ class RestormerNet(nn.Module):
         return [p for name, p in self.named_parameters() if not name.startswith(EXTRA_LAYERS)]
 
     def _blocks(self, blocks: nn.Sequential, x: torch.Tensor) -> torch.Tensor:
-        if not (self.training and torch.is_grad_enabled()):
+        if not (self.checkpointing and self.training and torch.is_grad_enabled()):
             return blocks(x)
         for block in blocks:
             x = checkpoint(block, x, use_reentrant=False)

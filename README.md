@@ -12,6 +12,49 @@ backbone đóng băng, chỉ train decoder khôi phục — cho ảnh là decode
 đường nét** (màu ở 128×128, đường nét trên kênh sáng Y ở 256×256, rồi ghép lại), cho
 IMU là decoder hệ số Haar.
 
+**p52_detail — Restormer chỉ thêm chi tiết, ánh sáng do khâu tone lo, train trên ô cắt 128²** (config
+`configs/kaggle_detail.yaml` → OUT `outputs/p52_detail`; kế thừa p51_restormer). Người dùng sau log p51 (29/10/2026):
+train 5 tiếng quá lâu, cần ảnh tốt hơn; IMU và ảnh không liên quan nên không khử mờ theo IMU; muốn cách hiệu quả mà
+tiết kiệm. Đo:
+- p49 `brightness_probe` (Cell 28): ảnh không bị đổi sáng có 60% ra tệ hơn đầu vào ở tần số thấp (độ sáng, màu). Ảnh tốt ở
+  tập test có 42% tệ hơn đầu vào.
+- Ô xám ở vùng tối (Cell 12b) do mạng tự vẽ; ảnh vào không có (32,7 → 31,0 dB).
+- Restormer phát hành trên đúng ảnh nhe/mo của pipeline không làm xấu ảnh: L1 nhe 0,0152 → 0,0149, mo 0,0307 → 0,0281.
+- p51 chạy 4,40 s/update trên T4, so với 1,78 của p49.
+- Ảnh toi_mo chiếm 38% batch, phơi sáng trung vị 32 ms, chỉ còn 16% độ mạnh cạnh của ảnh sạch.
+
+Các thay đổi đều chỉ ở phase 2 và đều là khoá mới, chỉ dùng được với `restore_net: restormer`; thiếu khoá thì chạy như p51:
+- `restore_highpass_sigma: 4`: câu trả lời của Restormer trừ đi bản làm mờ Gauss của nó, nên mạng chỉ thêm chi tiết (chu kỳ dưới
+  khoảng 20 px) và không vẽ được độ sáng theo vùng.
+- `restore_light_grid: 16`: sau đường cong tone có thêm một lưới song phương 16×16 ô × 8 mức sáng (`BilateralGridTone`, khởi tạo 0).
+  Lưới lo ánh sáng khác nhau theo vùng (đèn, sáng không đều, sương) và mượt theo cách dựng, nên không tạo ô vuông.
+- `restore_train_crop: 128`: lúc train, Restormer nhận một ô 128² ngẫu nhiên mỗi ảnh, góc nằm trên lưới 8 px, bản đồ ZI ở 1/8
+  cắt theo cùng ô. Khâu khử lóe và tone vẫn đọc cả ảnh; trainer chấm mọi số hạng ảnh trên đúng ô đó của ảnh sạch, còn loss
+  tone chấm trên cả ảnh. Validation và test vẫn chạy cả ảnh 256².
+- `restore_checkpointing: false`: bỏ activation checkpointing (ô 128 chỉ cần khoảng 1/4 bộ nhớ).
+- `motion_field: null`: ảnh không đọc đường đi gyro nữa.
+
+Ước tính tốc độ khoảng 2 s/update. Cell 4 đo con số thật. Hash phase 1 bằng p49, hash giai đoạn lóe bằng p51: chỉ train lại
+phase 2. Bằng chứng: `tests/test_detail_run.py`:
+- p52 = p51 cộng các khoá mới, với các hash như trên; khoá sai bị từ chối;
+- ô cắt của bản đồ ZI trùng ô của ảnh;
+- có high-pass thì một độ sáng cộng thêm không tới được ảnh ra, còn hoa văn 2 px thì tới;
+- lưới khởi tạo đồng nhất và có học;
+- lúc train ra một ô mỗi ảnh, lúc đánh giá ra cả ảnh;
+- phase 2 smoke train trên ô và validate cả ảnh.
+
+`tools/decoder_speed_probe.py` đo Restormer và VGG trên ô cắt.
+
+![Kiến trúc p52_detail](docs/kien_truc_ijepa.svg)
+
+Hình vẽ lại cho p52 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_detail.yaml`):
+- ô "Lưới ánh sáng" nằm sau tone;
+- ảnh ra = sáng + Δ, trong đó Δ chỉ là chi tiết (Δ − Gauss σ 4);
+- Restormer ghi "train ô 128²";
+- loss ghi số hạng ảnh chấm trên ô, tone chấm trên cả ảnh.
+
+Các config cũ (p45, p49, p51) vẫn vẽ như trước.
+
 **p51_restormer — khôi phục bằng Restormer đã train sẵn (khử mờ GoPro), fine-tune, thay NAFNet tự train** (config
 `configs/kaggle_restormer.yaml` → OUT `outputs/p51_restormer`; kế thừa p50_noghost). Người dùng sau p49 (29/10/2026):
 ảnh khôi phục có ô vuông mờ, chưa thật sự nét, muốn thay bằng model tốt hơn hoặc train sẵn rồi fine-tune; chọn Restormer
@@ -33,9 +76,7 @@ cặp FlareImage tách khỏi cặp drone có lóe (p49 dừng với "3 mau Flar
 cộng khoá restormer với hash phase 1 của p49, phase 2 smoke nạp trọng số rồi fine-tune ở nhóm lr 0,25),
 `tests/test_small_test.py::test_only_flareimage_pairs_count_as_flareimage`.
 
-![Kiến trúc p51_restormer](docs/kien_truc_ijepa.svg)
-
-Hình vẽ lại cho p51 (`tools/draw_architecture_ijepa.py`, mặc định đọc `configs/kaggle_restormer.yaml`): phase 1 thêm đầu
+Hình vẽ cho p51 (`tools/draw_architecture_ijepa.py configs/kaggle_restormer.yaml`): phase 1 thêm đầu
 tái tạo ảnh sạch (p48); phase 2 vẽ theo `restore_rgb` (khử lóe → tone cả ảnh → Restormer từng cấp, đánh dấu
 `extra_embed` và `latent_in` khởi tạo 0, đường đi gyro); ④ đếm cả cặp drone. Config cũ (p45, p49) vẫn vẽ được.
 

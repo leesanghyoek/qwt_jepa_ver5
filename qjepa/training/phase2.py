@@ -16,7 +16,7 @@ from ..models.pipeline import RestorationSystem
 from ..execution import RestorationForward, execution_metadata, parallel_forward
 from .checkpoints import configuration_hash, rng_state, state_dict_hash
 from ..models.color_edge import downsample
-from ..models.decoders import PIXEL_IMAGE_DECODERS, RELIGHT_STOP_RANGE
+from ..models.decoders import PIXEL_IMAGE_DECODERS, RELIGHT_STOP_RANGE, crop_frames
 from .losses import (LOWFREQ_SCALE, color_edge_split_loss, fft_l1, invisible_detail_fraction, lowfreq_mse,
                      phase2_reconstruction_loss)
 from .perceptual import PerceptualLoss
@@ -233,6 +233,14 @@ class Phase2Trainer:
                     restored = {key: gather_shares(value, keep_graph=True) for key, value in restored.items()}
                     batch = {key: gather_shares(value, keep_graph=False) if isinstance(value, torch.Tensor)
                              else value for key, value in batch.items()}
+                if "image_crop" in restored:
+                    # p52 (phase2.restore_train_crop): the Restormer restored one window per frame; every image term
+                    # scores the same window of the clean (and, for the log, the noisy) frame. The tone steps' output
+                    # is the whole frame and keeps the whole clean frame.
+                    size = restored["image"].shape[-1]
+                    batch["image_clean_full"] = batch["image_clean"]
+                    for key in ("image_clean", "image_noisy"):
+                        batch[key] = crop_frames(batch[key], restored["image_crop"], size)
                 if self.phase.get("kind_balance", False):
                     # p44: p43's log had 'nhe' and 'mo' frames ~6% each, made worse by a decoder fitted to the rest.
                     if "log_kind" not in batch:
@@ -305,7 +313,8 @@ class Phase2Trainer:
                     tone_weight = float(self.phase["restore_tone_weight"])
                     if tone_weight > 0:
                         light_l1 = F.l1_loss(downsample(restored["image_light"], LOWFREQ_SCALE),
-                                             downsample(batch["image_clean"], LOWFREQ_SCALE))
+                                             downsample(batch.get("image_clean_full", batch["image_clean"]),
+                                                        LOWFREQ_SCALE))
                         loss = loss + tone_weight * light_l1
                         parts["image_light_l1"] = light_l1
                     fft_weight = float(self.phase["restore_fft_weight"])

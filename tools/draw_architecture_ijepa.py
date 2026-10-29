@@ -27,6 +27,8 @@ flare and the gyro's path during the exposure (phase2.motion_field) and adds its
 phase2.restore_net restormer (p51) that net is the released Restormer drawn level by level, its two zero-initialised
 layers (extra_embed, latent_in) marked. With phase1.ijepa_reconstruction_weight (p48) phase 1 gains the reconstruction
 head that redraws the clean frame from ZI. Band 4 counts drone pairs (flare.kinds scene, p46) when the config has them.
+p52 (phase2.restore_light_grid / restore_highpass_sigma / restore_train_crop): the light grid after the tone curve, the
+Restormer's answer cut to detail only, and the window it trains on.
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
@@ -40,7 +42,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_restormer.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_detail.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -58,6 +60,9 @@ KIND_BALANCE = bool(P2.get("kind_balance", False))
 RESTORE = P2.get("image_decoder") == "restore_rgb"                 # p47+
 RESTORMER = RESTORE and P2.get("restore_net") == "restormer"      # p51
 FIELD = P2.get("motion_field") if RESTORE else None
+LIGHT_GRID = P2.get("restore_light_grid") if RESTORMER else None    # p52
+HIGHPASS = P2.get("restore_highpass_sigma") if RESTORMER else None
+CROP = P2.get("restore_train_crop") if RESTORMER else None
 SCENES = float(CONFIG["data"].get("scene_pairs_fraction", 0.0))
 NO_IMU = float(CONFIG["data"].get("imu_absent_probability", 0.0))
 RECON = float(P1.get("ijepa_reconstruction_weight", 0.0)) > 0    # p48
@@ -152,8 +157,10 @@ def mid_bot(b):   x, y, w, h = b; return (x + w / 2, y + h)
 # ---------------- header
 if RESTORE:
     text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA{" + tái tạo ảnh sạch" if RECON else ""} (ViT trên hệ số'
-         f' wavelet) · phase 2: {"khử lóe → " if FLARE else ""}tone cả ảnh → '
-         f'{"Restormer train sẵn, fine-tune" if RESTORMER else "NAFNet RGB"}{" · ④ giai đoạn lóe" if STAGE else ""}',
+         f' wavelet) · phase 2: {"khử lóe → " if FLARE else ""}'
+         f'{"tone + lưới ánh sáng → " if LIGHT_GRID else "tone cả ảnh → "}'
+         f'{"Restormer train sẵn chỉ thêm chi tiết" if HIGHPASS else "Restormer train sẵn, fine-tune" if RESTORMER else "NAFNet RGB"}'
+         f'{" · ④ giai đoạn lóe" if STAGE else ""}',
          size=16, weight='bold', color='#D81B60', anchor='start')
 else:
     text(20, 28, f'{RUN} — kiến trúc đang train · phase 1 I-JEPA (backbone ViT trên hệ số wavelet) · phase 2 khôi phục'
@@ -289,7 +296,11 @@ arrow([(760, 205), (760, 194), (866, 194)], color='#8E24AA', width=2.4, label='Z
 FX = 905
 if RESTORE:
     # ---------------- phase 2 (p47+ restore_rgb): tone of the whole frame, then one RGB restoration net
-    img_out = node(1392, 290, 100, 78, 'out', 'Ảnh', ['phục hồi', '= tone + Δ'])
+    img_out = node(1392, 290, 100, 78, 'out', 'Ảnh', ['phục hồi', '= sáng + Δ' if HIGHPASS else '= tone + Δ'])
+    if HIGHPASS:
+        for k, line_text in enumerate(('Δ chỉ chi tiết:', f'Δ − Gauss σ {HIGHPASS:g}'.replace('.', ','),
+                                       'không đổi độ sáng', 'theo vùng')):
+            text(1442, 392 + 15 * k, line_text, size=11, weight='bold' if k == 0 else 'normal', color='#00897B')
     tone = node(866, 122, 180, 92, 'color', 'Tone cả ảnh', ['đường cong + ma trận màu', 'mỗi ảnh · phơi sáng + ZI',
                                                            'khởi tạo 0 = đồng nhất'], title_size=14)
     gyro_channels = 0
@@ -301,6 +312,12 @@ if RESTORE:
                                                                   f'+ cờ có IMU = {gyro_channels} kênh'], title_size=14)
         arrow([(1156, 98), (1156, 122)], dash='4 3', width=1.8, label='gyro của IMU nhiễu', lx=1162, ly=112, lsize=11,
               lanchor='start')
+    grid = None
+    if LIGHT_GRID and not FIELD:
+        grid = node(1066, 122, 180, 92, 'color', 'Lưới ánh sáng (mới)', [f'{LIGHT_GRID}×{LIGHT_GRID} ô × 8 mức sáng',
+                                                                       'affine màu theo vùng · ZI',
+                                                                       'khởi tạo 0 = đồng nhất'], title_size=14)
+        arrow([mid_right(tone), mid_left(grid)], color='#EF6C00', width=2.4)
     extra = f'ảnh bỏ lóe + {gyro_channels} kênh gyro' if gyro_channels else 'ảnh bỏ lóe'
     if RESTORMER:
         xin = node(1266, 122, 225, 92, 'edge', 'extra_embed (mới)', ['conv 3×3: ' + extra, '→ 48 kênh, cộng vào cấp 1',
@@ -311,10 +328,14 @@ if RESTORE:
         arrow([mid_right(gyro), mid_left(xin)], color='#2E7D32', width=2)
     el.append('<rect x="866" y="236" width="506" height="210" rx="12" fill="#FFFFFF" fill-opacity="0.85" '
               'stroke="#2E7D32" stroke-width="1.5"/>')
-    arrow([(900, 214), (900, 282)], color='#EF6C00', width=2.4)
+    if grid is not None:
+        arrow([(1156, 214), (1156, 220), (900, 220), (900, 282)], color='#EF6C00', width=2.4)
+    else:
+        arrow([(900, 214), (900, 282)], color='#EF6C00', width=2.4)
     arrow([(1378, 214), (1378, 226), (930, 226), (930, 282)], color='#2E7D32', width=2.2)
     if RESTORMER:
-        text(938, 254, 'ảnh sau tone → patch_embed (gốc)', size=11, weight='bold', color='#EF6C00', anchor='start')
+        text(938, 254, 'ảnh sau tone + lưới → patch_embed (gốc)' if grid is not None else 'ảnh sau tone → patch_embed (gốc)',
+             size=11, weight='bold', color='#EF6C00', anchor='start')
         text(938, 270, '+ extra_embed (mới) ở cấp 1', size=11, weight='bold', color='#2E7D32', anchor='start')
         e1 = level(880, 282, '256² · 48', '4 khối')
         e2 = level(950, 318, '128² · 96', '6 khối')
@@ -336,7 +357,8 @@ if RESTORE:
         text(1290, 408, 'RESTORMER khử mờ', size=13, weight='bold', color='#2E7D32')
         text(1290, 423, 'GoPro · train sẵn · 26,1 M', size=11, color='#37474F')
         scale = f'{float(P2["restore_pretrained_lr_scale"]):g}'.replace('.', ',')
-        text(1290, 437, f'fine-tune lr × {scale}', size=11, weight='bold', color='#37474F')
+        text(1290, 437, f'lr × {scale} · train ô {CROP}²' if CROP else f'fine-tune lr × {scale}', size=11,
+             weight='bold', color='#37474F')
         text(870, 399, 'ZI → latent_in 1×1 (= 0)', size=11, weight='bold', color='#8E24AA', anchor='start')
         text(870, 437, 'khối: attention theo kênh (MDTA) + GDFN', size=10, color='#78909C', anchor='start')
         arrow([(1366, 297), (1380, 297), (1380, 329), (1392, 329)])
@@ -493,7 +515,8 @@ if RESTORE:
              f'phổ: L1 của FFT phức ảnh ra × {float(P2["restore_fft_weight"]):g}'.replace('.', ','),
              f'tone: L1 ảnh sau tone ↔ ảnh sạch ở 1/8 × {float(P2["restore_tone_weight"]):g}'.replace('.', ','),
              (f'đích quá tối (< {brighten["below"]:g}) nâng lên {brighten["target"]:g}'.replace('.', ',')
-              if brighten else '')]
+              if brighten else ''),
+             f'ảnh: chấm trên ô {CROP}² · tone: trên cả ảnh' if CROP else '']
 else:
     terms = ['ảnh: L1 · chi tiết QWT của Y · VGG16 (perceptual)', 'màu: L1 Cb/Cr + thống kê màu từng ảnh',
          'nét: L1 · độ dốc · FFT phức · 128², 64² · mượt',

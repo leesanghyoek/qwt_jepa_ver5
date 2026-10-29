@@ -1241,6 +1241,31 @@ def build_flare_layer(latent_channels: int, flare: dict | None) -> nn.Module | N
                       uses_latent=bool(flare.get("latent", True)))
 
 
+def crop_frames(x: torch.Tensor, offsets, size: int, scale: int = 1) -> torch.Tensor:
+    """One ``size`` x ``size`` window per frame, frame i's top-left corner at ``offsets[i]`` = (top, left) in pixels of
+    the full frame; ``x`` at 1/``scale`` of it (ZI's map at 1/8) is cut at offsets / scale, size / scale."""
+    rows = offsets.tolist() if torch.is_tensor(offsets) else offsets
+    side = size // scale
+    return torch.stack([x[i, :, top // scale: top // scale + side, left // scale: left // scale + side]
+                        for i, (top, left) in enumerate(rows)])
+
+
+def gaussian_highpass(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """``x`` minus its Gaussian blur (separable, reflect padding, fp32): what is left has no brightness of its own
+    over regions much larger than ``sigma`` -- detail only."""
+    radius = max(1, math.ceil(3.0 * sigma))
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        y = x.float()
+        taps = torch.arange(-radius, radius + 1, device=y.device, dtype=y.dtype)
+        kernel = torch.exp(-0.5 * (taps / sigma) ** 2)
+        kernel = kernel / kernel.sum()
+        channels = y.shape[1]
+        blurred = F.pad(y, (radius, radius, radius, radius), mode="reflect")
+        blurred = F.conv2d(blurred, kernel.view(1, 1, 1, -1).expand(channels, 1, 1, -1), groups=channels)
+        blurred = F.conv2d(blurred, kernel.view(1, 1, -1, 1).expand(channels, 1, -1, 1), groups=channels)
+        return (y - blurred).to(x.dtype)
+
+
 class RestoreRGBDecoder(nn.Module):
     """p47 (phase2.image_decoder: restore_rgb): the frame restored in three steps, every one scored on the output.
 
@@ -1262,23 +1287,47 @@ class RestoreRGBDecoder(nn.Module):
     p51 (phase2.restore_net: restormer): ``net`` is the released Restormer (qjepa/models/restormer.py) on the toned
     frame, the other inputs and ZI through its zero-initialised layers; at update 0 the output is the released
     Restormer's answer on the frame without its flare (the train-phase2 CLI loads its weights in a fresh run).
+
+    p52 (Restormer only; each absent: as p51):
+    - ``light_grid`` (phase2.restore_light_grid): after the tone curve, a bilateral grid of colour affines
+      (BilateralGridTone, ``light_grid`` x ``light_grid`` cells, zero-initialised) for light that differs by region --
+      lamps, uneven light, fog. Smooth across the frame by construction (trilinear slicing): no blocks.
+    - ``highpass_sigma`` (phase2.restore_highpass_sigma): the Restormer's answer minus its Gaussian blur, so the network
+      adds detail only and the light is the tone steps' alone. p49 made 60% of the frames whose light was right worse
+      at long periods (brightness_probe) and drew grey blocks in dark areas (Cell 12b): both are a brightness the
+      restoration network painted.
+    - ``train_crop`` (phase2.restore_train_crop): in training, the Restormer sees one random ``train_crop``-pixel
+      window per frame (corner on the 8-px grid, ZI's 1/8 map cut to match), as its authors trained it; the flare and
+      tone steps still read the whole frame. Output "image" is that window, "image_crop" its (top, left);
+      Phase2Trainer scores it against the same window of the clean frame. Validation and inference: whole frames.
     """
 
     tone_gate = None          # Phase2Trainer and the calibration look for the split decoder's gate
     uses_stages = False
 
     def __init__(self, latent_channels: int = 128, *, naf: dict | None = None, tone_width: int = 32,
-                 flare: dict | None = None, motion: dict | None = None, restormer: dict | None = None) -> None:
+                 flare: dict | None = None, motion: dict | None = None, restormer: dict | None = None,
+                 train_crop: int | None = None, highpass_sigma: float | None = None,
+                 light_grid: int | None = None) -> None:
         super().__init__()
+        if restormer is None and (train_crop or highpass_sigma or light_grid):
+            raise ValueError("train_crop, highpass_sigma and light_grid restore with the Restormer (restormer=...)")
         self.flare = build_flare_layer(latent_channels, flare)
         self.exposure_norm = FeatureStandardizer(EXPOSURE_FEATURES)
         self.tone = GlobalToneColor(latent_channels, int(tone_width), exposure_stats=True)
+        self.light_grid = (BilateralGridTone(latent_channels, size=int(light_grid), width=int(tone_width))
+                           if light_grid else None)
+        self.train_crop = int(train_crop) if train_crop else None
+        self.highpass_sigma = float(highpass_sigma) if highpass_sigma else None
         from .motion_field import GyroBlurField
         self.motion = GyroBlurField(**motion) if motion else None
         inputs = 6 + (self.motion.channels if self.motion is not None else 0)
         if restormer is not None:
-            from .restormer import RestormerNet
-            self.net = RestormerNet(inputs, latent_channels)
+            from .restormer import STEP, RestormerNet
+            self.net = RestormerNet(inputs, latent_channels, checkpointing=restormer.get("checkpointing", True))
+            self.latent_step = STEP          # the Restormer's bottom level is 1/STEP of the frame
+            if self.train_crop is not None and self.train_crop % STEP:
+                raise ValueError(f"train_crop must divide by {STEP}")
         else:
             self.net = NAFNetBranch(inputs, 3, latent_channels, tuple(naf["widths"]), tuple(naf["enc_blocks"]),
                                     int(naf["middle_blocks"]), tuple(naf["dec_blocks"]), (),
@@ -1307,6 +1356,8 @@ class RestoreRGBDecoder(nn.Module):
                 motion: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         image, parts = self._deflare(latent, image)
         toned = self.tone(latent, image, self.exposure_norm)
+        if self.light_grid is not None:
+            toned = self.light_grid(latent, toned)
         parts["image_light"] = toned
         x = torch.cat((toned, image), dim=1)
         if self.motion is not None:
@@ -1314,7 +1365,22 @@ class RestoreRGBDecoder(nn.Module):
                 # Driven without the IMU (decode(latent) in the ablation tools): the "no IMU" input, all zero.
                 motion = image.new_zeros(image.shape[0], self.motion.channels)
             x = torch.cat((x, motion.to(x.dtype)[:, :, None, None].expand(-1, -1, *x.shape[-2:])), dim=1)
-        return self.net(latent, x, base=toned), parts
+        if self.train_crop is not None and self.training and torch.is_grad_enabled():
+            # Corners on the 8-px grid, so ZI's map at 1/8 (as the Restormer resizes it for the whole frame) cuts
+            # exactly. Drawn on the CPU generator: a resumed run draws the same windows.
+            height, width = x.shape[-2:]
+            step, frames = self.latent_step, x.shape[0]
+            corners = torch.stack((torch.randint(0, (height - self.train_crop) // step + 1, (frames,)),
+                                   torch.randint(0, (width - self.train_crop) // step + 1, (frames,))), dim=1)
+            offsets = (corners * step).tolist()
+            latent = crop_frames(F.interpolate(latent, size=(-(-height // step), -(-width // step)), mode="bilinear",
+                                               align_corners=False), offsets, self.train_crop, scale=step)
+            x, toned = crop_frames(x, offsets, self.train_crop), crop_frames(toned, offsets, self.train_crop)
+            parts["image_crop"] = torch.tensor(offsets, device=x.device)
+        if self.highpass_sigma is None:
+            return self.net(latent, x, base=toned), parts
+        answer = self.net(latent, x, base=torch.zeros_like(toned))
+        return toned + gaussian_highpass(answer, self.highpass_sigma), parts
 
 
 class ImuRefiner(nn.Module):

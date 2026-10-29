@@ -855,6 +855,9 @@ RESTORE_NETS = ("nafnet", "restormer")
 RESTORE_NAF_KEYS = ("restore_widths", "restore_enc_blocks", "restore_middle_blocks", "restore_dec_blocks",
                     "restore_fourier_levels", "restore_fourier_width")
 RESTORE_RESTORMER_KEYS = ("restore_restormer_weights", "restore_pretrained_lr_scale")
+# p52, Restormer only, each optional (absent: as p51): the Restormer trains on crops, adds detail only, the light gets
+# a bilateral grid after the tone curve, and activation checkpointing can go (RestoreRGBDecoder's docstring).
+RESTORE_DETAIL_KEYS = ("restore_train_crop", "restore_highpass_sigma", "restore_light_grid", "restore_checkpointing")
 MOTION_FIELD_KEYS = ("seconds", "samples", "focal_px", "scale_px", "max_px")
 # The split decoder's stages: restore_rgb has none of them, so they must be off (or absent) beside it.
 SPLIT_ONLY_SWITCHES = ("split_light_branch", "split_tone_grid", "split_relight", "split_chroma_detail",
@@ -876,7 +879,7 @@ def _validate_restore(config: dict[str, Any]) -> None:
         raise ValueError("phase2.image_latent none is for the pixel decoders split_color_edge and restore_rgb")
     field = phase2.get("motion_field")
     restore = phase2.get("image_decoder") == "restore_rgb"
-    known = (*RESTORE_KEYS, "restore_net", *RESTORE_RESTORMER_KEYS)
+    known = (*RESTORE_KEYS, "restore_net", *RESTORE_RESTORMER_KEYS, *RESTORE_DETAIL_KEYS)
     unknown = sorted(key for key in phase2 if key.startswith("restore_") and key not in known)
     if unknown:
         raise ValueError(f"phase2: unknown keys {unknown}; restore_rgb's keys are {list(known)}")
@@ -890,8 +893,9 @@ def _validate_restore(config: dict[str, Any]) -> None:
     if net == "restormer":
         _validate_restormer(config)
         return
-    if any(key in phase2 for key in RESTORE_RESTORMER_KEYS):
-        raise ValueError(f"phase2.{'/'.join(RESTORE_RESTORMER_KEYS)} belong to phase2.restore_net: restormer")
+    if any(key in phase2 for key in (*RESTORE_RESTORMER_KEYS, *RESTORE_DETAIL_KEYS)):
+        raise ValueError(f"phase2.{'/'.join((*RESTORE_RESTORMER_KEYS, *RESTORE_DETAIL_KEYS))} belong to "
+                         f"phase2.restore_net: restormer")
     missing = [key for key in RESTORE_KEYS if key not in phase2]
     if missing:
         raise ValueError(f"phase2.image_decoder restore_rgb needs every restore_* key written out; missing: "
@@ -941,7 +945,31 @@ def _validate_restormer(config: dict[str, Any]) -> None:
         raise ValueError("phase2.restore_pretrained_lr_scale must be in (0, 1]")
     if not _positive_int(phase2["restore_tone_width"]):
         raise ValueError("phase2.restore_tone_width must be a positive integer")
+    _validate_restore_detail(config)
     _validate_restore_common(config)
+
+
+def _validate_restore_detail(config: dict[str, Any]) -> None:
+    """p52 RESTORE_DETAIL_KEYS. restore_train_crop: on the 8-px grid of the Restormer's bottom level and of the low-
+    frequency loss, smaller than the frame (the VGG term scores the whole window when it is not above perceptual_crop).
+    restore_highpass_sigma: its blur's reach (3 sigma) inside the window the network sees."""
+    from .models.restormer import STEP
+    phase2 = config["phase2"]
+    sides = config["data"]["image_size"]
+    crop = phase2.get("restore_train_crop")
+    if crop is not None:
+        if not _positive_int(crop) or crop % STEP or crop % LOWFREQ_SCALE or crop >= min(sides):
+            raise ValueError(f"phase2.restore_train_crop must be a multiple of {max(STEP, LOWFREQ_SCALE)} smaller "
+                             f"than the frame {list(sides)}")
+    sigma = phase2.get("restore_highpass_sigma")
+    if sigma is not None and (not _nonnegative_number(sigma) or sigma <= 0
+                              or np.ceil(3 * sigma) >= (crop or min(sides))):
+        raise ValueError("phase2.restore_highpass_sigma must be positive with 3 x sigma inside the restored window")
+    grid = phase2.get("restore_light_grid")
+    if grid is not None and (not _positive_int(grid) or grid < 2):
+        raise ValueError("phase2.restore_light_grid must be an integer >= 2 (cells per side)")
+    if not isinstance(phase2.get("restore_checkpointing", True), bool):
+        raise ValueError("phase2.restore_checkpointing must be true or false")
 
 
 def _validate_restore_common(config: dict[str, Any]) -> None:
@@ -1641,7 +1669,12 @@ def _restore_settings(config: dict[str, Any]) -> dict[str, Any]:
             "middle_blocks": int(phase2["restore_middle_blocks"]), "dec_blocks": tuple(phase2["restore_dec_blocks"]),
             "fourier_levels": tuple(phase2["restore_fourier_levels"]),
             "fourier_width": int(phase2["restore_fourier_width"])},
-        "restormer": {"weights": str(phase2["restore_restormer_weights"])} if restormer else None,
+        "restormer": None if not restormer else {
+            "weights": str(phase2["restore_restormer_weights"]),
+            **({"checkpointing": bool(phase2["restore_checkpointing"])} if "restore_checkpointing" in phase2 else {})},
+        "train_crop": phase2.get("restore_train_crop"),
+        "highpass_sigma": phase2.get("restore_highpass_sigma"),
+        "light_grid": phase2.get("restore_light_grid"),
         "tone_width": int(phase2["restore_tone_width"]),
         "flare": _flare_settings(phase2),
         "motion": None if field is None else {

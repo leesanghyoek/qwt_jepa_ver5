@@ -32,6 +32,7 @@ from qjepa.data import ImuNormalizer  # noqa: E402
 from qjepa.execution import RestorationForward  # noqa: E402
 from qjepa.models import RestorationSystem  # noqa: E402
 from qjepa.models.color_edge import downsample  # noqa: E402
+from qjepa.models.decoders import crop_frames  # noqa: E402
 from qjepa.training.perceptual import PerceptualLoss, load_vgg16_features  # noqa: E402
 from qjepa.training.phase2 import freeze_flare_stage  # noqa: E402
 
@@ -74,6 +75,8 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
     image_time = imu_times.mean(dim=1)
     crop = int(config["phase2"].get("perceptual_crop", 0))
     vgg = PerceptualLoss(load_vgg16_features(pretrained=False), crop=crop).to(device)
+    # p52 (phase2.restore_train_crop): the Restormer and the image losses train on one window per frame.
+    window = getattr(decoder, "train_crop", None) or height
     forward = RestorationForward(system)
     optimizer = torch.optim.AdamW([p for p in system.decoders.parameters() if p.requires_grad], lr=1e-4)
     with torch.no_grad():
@@ -104,8 +107,10 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
             # p47 restore_rgb: the RGB NAFNet (p51: the Restormer) on the toned frame, the deflared frame and the gyro
             # path's channels.
             channels = getattr(decoder.net, "in_channels", None) or decoder.net.intro.in_channels
+            side = (window, window) if window != height else (height, width)
             with autocast():
-                out = decoder.net(zi, torch.rand(batch, channels, height, width, device=device), base=image)
+                out = decoder.net(zi, torch.rand(batch, channels, *side, device=device),
+                                  base=image[..., :side[0], :side[1]])
             out.float().square().mean().backward()
 
         def colour():
@@ -126,17 +131,19 @@ def probe(config_path: Path, device: torch.device, batch: int, steps: int, warmu
             out.float().square().mean().backward()
 
         def perceptual():
-            predicted = image.clone().requires_grad_(True)
+            target = image if window == height else image[..., :window, :window]
+            predicted = target.clone().requires_grad_(True)
             with autocast():
-                loss = vgg(predicted, image)
+                loss = vgg(predicted, target)
             loss.backward()
 
         def whole_step():
             optimizer.zero_grad(set_to_none=True)
             out = forward(image, imu, image_time, imu_times)
-            loss = F.l1_loss(out["image"], image) + F.l1_loss(out["imu_physical"], imu)
+            target = crop_frames(image, out["image_crop"], window) if "image_crop" in out else image
+            loss = F.l1_loss(out["image"], target) + F.l1_loss(out["imu_physical"], imu)
             with autocast():
-                loss = loss + 0.5 * vgg(out["image"], image)
+                loss = loss + 0.5 * vgg(out["image"], target)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_([p for p in system.decoders.parameters() if p.requires_grad], 5.0)

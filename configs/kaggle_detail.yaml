@@ -1,0 +1,30 @@
+# p52_detail: p51_restormer nhung Restormer chi them CHI TIET, anh sang do buoc tone lo, va train tren o cat 128x128.
+#
+# Nguoi dung (29/10/2026, sau log p51): "train 5 tieng qua lau", "lam sao de anh tot hon"; IMU va anh khong lien quan
+# nen khong khu mo theo IMU; muon cach hieu qua nhung tiet kiem hon.
+# Do (p49 Cell 28 brightness_probe, Cell 12b; do o may 29/10/2026):
+#   - anh khong bi doi sang: 60% ra TE HON vao o tan so thap (do sang, mau); anh tot o test: 42% te hon vao;
+#   - o vuong xam o vung toi (Cell 12b): mang tu ve, anh vao khong co (32,7 -> 31,0 dB);
+#   - Restormer phat hanh tren anh nhe/mo cua pipeline: khong lam xau (nhe L1 0,0152 -> 0,0149, mo 0,0307 -> 0,0281);
+#   - p51 tren T4: 4,40 s/update (p49 1,78): 4000 update ~5 gio.
+# Thay doi (chi phase 2; thieu khoa = nhu p51):
+#   - restore_highpass_sigma 4: cau tra loi cua Restormer tru di ban lam mo Gauss cua no -> mang chi them chi tiet
+#     (chu ky duoi ~20 px), khong ve duoc do sang theo vung: het o xam, khong lam lech sang anh tot;
+#   - restore_light_grid 16: sau duong cong tone, luoi song phuong 16x16 o (BilateralGridTone, khoi tao 0) cho anh
+#     sang khac nhau theo vung (den, sang khong deu, suong); muot theo cach dung, khong co o vuong;
+#   - restore_train_crop 128: Restormer train tren 1 o 128x128 moi anh (nhu tac gia Restormer train), buoc khu loe va
+#     tone van doc ca anh; validation/test van ca anh 256x256. ~1/4 phep tinh cua Restormer;
+#   - restore_checkpointing false: o 128 chi can ~1/4 bo nho, bo tinh lai khi backward (~1/4 buoc train);
+#   - motion_field null: anh khong doc duong di gyro nua (IMU khong lien quan anh; p49: co IMU chi +0,06 dB).
+# Phase 1 va giai doan loe bang p51 (cung hash): DUNG LAI phase 1 cua p49, giai doan loe cua p51/p50.
+extends: kaggle_restormer.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p52_detail
+
+phase2:
+  restore_train_crop: 128
+  restore_highpass_sigma: 4.0
+  restore_light_grid: 16
+  restore_checkpointing: false
+  motion_field: null
