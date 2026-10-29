@@ -29,7 +29,8 @@ layers (extra_embed, latent_in) marked. With phase1.ijepa_reconstruction_weight 
 head that redraws the clean frame from ZI. Band 4 counts drone pairs (flare.kinds scene, p46) when the config has them.
 p52 (phase2.restore_light_grid / restore_highpass_sigma / restore_train_crop): the light grid after the tone curve, the
 Restormer's answer cut to detail only, and the window it trains on. p53 (flare.veil_grid / veil_only): the veil grid
-after the Uformer, in the flare layer (3) and in band 4, where only the grid trains.
+after the Uformer, in the flare layer (3) and in band 4, where only the grid trains. The input box says "mờ (gyro)"
+when corruption.image.motion_from_imu blurs along the gyro's path (p47-p53), "mờ nhẹ" otherwise (p54).
 
 Usage: python3 tools/draw_architecture_ijepa.py docs/kien_truc_ijepa.svg [config]
 """
@@ -43,7 +44,7 @@ sys.path.insert(0, str(REPO))
 from qjepa.config import load_config  # noqa: E402
 from qjepa.models.ijepa import multiblock_masks  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_veil.yaml"
+CONFIG_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "configs/kaggle_mild.yaml"
 CONFIG = load_config(CONFIG_PATH)
 P1, P2, MODEL = CONFIG["phase1"], CONFIG["phase2"], CONFIG["model"]
 RUN = Path(CONFIG["runtime"]["output_dir"]).name
@@ -65,6 +66,7 @@ LIGHT_GRID = P2.get("restore_light_grid") if RESTORMER else None    # p52
 HIGHPASS = P2.get("restore_highpass_sigma") if RESTORMER else None
 CROP = P2.get("restore_train_crop") if RESTORMER else None
 VEIL = STAGE.get("veil_grid") if STAGE and UFORMER else None        # p53
+GYRO_BLUR = bool(CONFIG["corruption"]["image"].get("motion_from_imu", False))   # p47-p53; p54 back to p44's blur
 VEIL_ONLY = bool(STAGE.get("veil_only", False)) if VEIL else False
 SCENES = float(CONFIG["data"].get("scene_pairs_fraction", 0.0))
 NO_IMU = float(CONFIG["data"].get("imu_absent_probability", 0.0))
@@ -185,7 +187,8 @@ region(190, 505 + OY, 940, 200 + RH, 'p1', '② Phase 1 — I-JEPA')
 
 # ---------------- inputs and backbone
 if SCENES:
-    img_in = node(20, 192, 150, 96, 'data', 'Ảnh vào', ['3 × 256 × 256', 'mờ (gyro), tối, hạt',
+    img_in = node(20, 192, 150, 96, 'data', 'Ảnh vào', ['3 × 256 × 256', 'mờ (gyro), tối, hạt' if GYRO_BLUR
+                                                        else 'mờ nhẹ, tối, hạt',
                                                         '+ FlareImage, drone',
                                                         f'{NO_IMU:.0%} không IMU' if NO_IMU else ''])
 elif PAIRS:

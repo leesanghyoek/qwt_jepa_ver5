@@ -1,0 +1,32 @@
+# p54_mild: p53_veil voi muc MO va TOI cua p44 (anh vao giu nhieu duong net hon); du lieu drone, giai doan loe
+# (Uformer + luoi man sang) va Restormer chi them chi tiet giu nguyen.
+#
+# Nguoi dung (30/10/2026): ban p44 "co kha nang lam net, on hon" nhung khu loe khong hon; dong y giu nhanh hien tai va
+# dua muc nhieu ve nhu p44 (anh drone chu yeu chup ban ngay, mo nhe).
+# Do:
+#   - bao cao train, valid cua moi run: canh 4-16 px so voi anh sach, vao -> ra: p44 0,50 -> 0,90; p49 0,33 -> 0,55;
+#     vung loe test (Cell 12d) hai ban ngang nhau (p44 21,24, p49 21,83 dB): cung mot Uformer;
+#   - o may (30/10/2026, 11 anh VisDrone/TartanAir x 60 lan rut, gyro gia dinh 0,3-2,5 rad/s): duong net anh vao con
+#     lai (trung vi) 0,32 voi nhieu p53 -> 0,66 voi nhieu nay; anh vua toi vua mo 63% -> 36% mau, net con 0,19 -> 0,45;
+#     anh nhe 0% -> 14%. Tu p47 mo gyro toi 32 px va toi toi x0,08: phan duong net da mat, khong mang nao lay lai duoc.
+# Thay doi (chi corruption.image, tro ve gia tri cua p44):
+#   - motion_from_imu false: mo khong theo gyro nua (anh va IMU doc lap, nhu bat bien thiet ke va loi nguoi dung);
+#     mo chuyen dong thang 15% anh, 2-4 px (khong ghi thi mac dinh 55%, 3-9 px);
+#   - defocus_sigma_px [0,3, 0,95] (p53 toi 2,0);
+#   - exposure_gain [0,5, 1,0] (p53 toi 0,08, ~3,6 stop); buoc moi truong (sang khong deu, den, suong) giu nguyen.
+#   exposure_seconds / exposure_follows_light / focal_length_px / motion_max_radius_px chi dung cho mo gyro: khong con
+#   tac dung.
+# Doi nhieu nen TRAIN LAI phase 1 (p49: 33 phut), giai doan loe (chi luoi man sang, tiep tu Uformer cua run truoc) va
+# phase 2. PSNR khong so thang voi p49-p53: de bai de hon.
+extends: kaggle_veil.yaml
+
+runtime:
+  output_dir: /kaggle/working/qwt_jepa_version3/outputs/p54_mild
+
+corruption:
+  image:
+    motion_from_imu: false
+    motion_probability: 0.15
+    motion_length_px: [2, 4]
+    defocus_sigma_px: [0.3, 0.95]
+    exposure_gain: [0.5, 1.0]
